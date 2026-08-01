@@ -34,3 +34,25 @@ flink-jobs/.mvn/
 .idea/
 *.swp
 *.swo
+
+# AI 工具配置(含本机路径)
+.qwen/
+.mimocode/
+
+# 渗透测试报告 / 真实流量数据 / 本机安全脚本
+security_audit_report.md
+测试数据*.json
+测试数据*.txt
+check_ssh.ps1
+check_sshd.ps1
+fix_ssh.ps1
+
+# 开发调试脚本(不入库)
+benchmark_logs.py
+check_*.py
+quick_test.py
+inject_test_data.py
+convert_to_json.py
+demo_e2e.py
+demo_start.bat
+test_*.py
