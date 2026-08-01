@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+@theme {
+  /* ── Apple 浅色调色板 ── */
+  --color-surface: #f5f5f7;          /* Apple 标志性浅灰背景 */
+  --color-card: #ffffff;
+  --color-ink: #1d1d1f;              /* Apple 近黑主文字 */
+  --color-ink-soft: #6e6e73;         /* Apple 次级灰 */
+  --color-ink-faint: #86868b;        /* Apple 三级灰 */
+  --color-accent: #0071e3;           /* Apple 蓝 */
+  --color-accent-hover: #0077ed;
+  --color-link: #0066cc;             /* Apple 链接蓝 */
+  --color-line: #d2d2d7;             /* Apple 边框灰 */
+  --color-ok: #34c759;               /* Apple 系统绿 */
+  --color-warn: #ff9f0a;             /* Apple 系统琥珀 */
+  --color-alert: #ff3b30;            /* Apple 系统红 */
+
+  /* ── Apple 系统字体栈（中文优先苹方/雅黑）── */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro SC",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+  /* 迁移别名：旧代码的 font-serif 统一渲染为无衬线，保持 Apple 风 */
+  --font-serif: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro SC",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(0, 113, 227, 0.16);
+  color: #0071e3;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px }
+::-webkit-scrollbar-track { background: transparent }
+::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 8px }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.28) }

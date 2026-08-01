@@ -1,0 +1,175 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: shared-memory-pg
+    restart: always
+    environment:
+      POSTGRES_DB: shared_memory
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d shared_memory"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: shared-memory-redis
+    restart: always
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Kafka 消息总线 (KRaft 模式, 无需 ZooKeeper) ──
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: soc-kafka
+    restart: always
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # 双监听: PLAINTEXT 容器内(9092) / PLAINTEXT_HOST 宿主机(9094)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Kafka UI (竞赛演示可视化) ──
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: soc-kafka-ui
+    restart: always
+    environment:
+      KAFKA_CLUSTERS_0_NAME: SOC-Kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8082:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ── Flink 流处理引擎 ──
+  flink-jobmanager:
+    build:
+      context: ./flink-jobs
+      dockerfile: Dockerfile
+    container_name: soc-flink-jobmanager
+    restart: always
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+      KAFKA_BOOTSTRAP: kafka:9092
+    ports:
+      - "8081:8081"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  flink-taskmanager:
+    build:
+      context: ./flink-jobs
+      dockerfile: Dockerfile
+    container_name: soc-flink-taskmanager
+    restart: always
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+      KAFKA_BOOTSTRAP: kafka:9092
+    depends_on:
+      - flink-jobmanager
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: shared-memory-backend
+    restart: always
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      SHARED_MEMORY_DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:-admin123}@postgres:5432/shared_memory
+      SHARED_MEMORY_REDIS_URL: redis://redis:6379/0
+      # 必填：请在运行前设置 API Key，否则 LLM/Embedding 将返回降级响应
+      SHARED_MEMORY_LLM_API_KEY: ${SHARED_MEMORY_LLM_API_KEY:?LLM_API_KEY_REQUIRED}
+      SHARED_MEMORY_LLM_BASE_URL: ${SHARED_MEMORY_LLM_BASE_URL:-https://api.xiaomimimo.com/v1}
+      SHARED_MEMORY_LLM_MODEL: ${SHARED_MEMORY_LLM_MODEL:-mimo-v2.5}
+      SHARED_MEMORY_EMBEDDING_API_KEY: ${SHARED_MEMORY_EMBEDDING_API_KEY:?EMBEDDING_API_KEY_REQUIRED}
+      SHARED_MEMORY_EMBEDDING_BASE_URL: ${SHARED_MEMORY_EMBEDDING_BASE_URL:-https://maas-api.cn-huabei-1.xf-yun.com/v2}
+      SHARED_MEMORY_EMBEDDING_MODEL: ${SHARED_MEMORY_EMBEDDING_MODEL:-mimo-v2.5}
+      SHARED_MEMORY_EMBEDDING_DIM: ${SHARED_MEMORY_EMBEDDING_DIM:-1024}
+      # 安全认证配置
+      SHARED_MEMORY_JWT_SECRET: ${SHARED_MEMORY_JWT_SECRET:?JWT_SECRET_REQUIRED}
+      SHARED_MEMORY_ADMIN_USER: ${SHARED_MEMORY_ADMIN_USER:-admin}
+      SHARED_MEMORY_ADMIN_PASSWORD: ${SHARED_MEMORY_ADMIN_PASSWORD:?ADMIN_PASSWORD_REQUIRED}
+      SHARED_MEMORY_ALLOWED_ORIGINS: ${SHARED_MEMORY_ALLOWED_ORIGINS:-["http://localhost:3001"]}
+      # 响应引擎 SSH 传输配置
+      SHARED_MEMORY_RESPONSE_TRANSPORT_MODE: ${SHARED_MEMORY_RESPONSE_TRANSPORT_MODE:-auto}
+      SHARED_MEMORY_RESPONSE_SSH_HOST: ${SHARED_MEMORY_RESPONSE_SSH_HOST:-host.docker.internal}
+      SHARED_MEMORY_RESPONSE_SSH_PORT: ${SHARED_MEMORY_RESPONSE_SSH_PORT:-22}
+      SHARED_MEMORY_RESPONSE_SSH_USER: ${SHARED_MEMORY_RESPONSE_SSH_USER:-Admin}
+      SHARED_MEMORY_RESPONSE_SSH_KEY_FILE: ${SHARED_MEMORY_RESPONSE_SSH_KEY_FILE:-/root/.ssh/id_rsa}
+      # Kafka 消息总线
+      SHARED_MEMORY_KAFKA_ENABLED: ${SHARED_MEMORY_KAFKA_ENABLED:-true}
+      SHARED_MEMORY_KAFKA_BOOTSTRAP: kafka:9092
+    volumes:
+      # 挂载宿主机 SSH 私钥到中性路径（entrypoint 会复制到 /tmp/ssh 并修正权限）
+      - ~/.ssh/id_rsa:/tmp/ssh-keys/id_rsa:ro
+      - ~/.ssh/id_rsa.pub:/tmp/ssh-keys/id_rsa.pub:ro
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: shared-memory-frontend
+    restart: always
+    ports:
+      - "3001:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  kafka_data:

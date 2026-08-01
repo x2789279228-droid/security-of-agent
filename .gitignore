@@ -1,0 +1,36 @@
+# 安全：禁止提交环境变量文件（含密钥）
+.env
+backend/.env
+frontend/.env
+
+# 数据库与构建产物
+database.db
+database.db-shm
+database.db-wal
+*.sqlite3
+build_out*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Node / 前端
+frontend/node_modules/
+node_modules/
+frontend/dist/
+
+# Flink / Java
+flink-jobs/target/
+flink-jobs/.mvn/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
