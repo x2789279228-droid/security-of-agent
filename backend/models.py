@@ -58,6 +58,8 @@ class SecurityEvent(Base):
     message = Column(Text)
     raw_data = Column(MutableJSON, default=dict)
     analyzed = Column(Boolean, default=False, index=True)
+    status = Column(String(30), default="new", index=True)  # new|acknowledged|investigating|resolved|closed|false_positive
+    case_id = Column(Integer, ForeignKey("security_cases.id"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class MemoryTreeNode(Base):
@@ -154,6 +156,40 @@ class AgentTrace(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 
+class PipelineSpan(Base):
+    """流水线阶段 Span — 全链路追踪"""
+    __tablename__ = "pipeline_spans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    span_id = Column(String(20), default="", index=True)
+    event_id = Column(Integer, default=0, index=True)
+    session_id = Column(String(100), default="", index=True)
+    stage = Column(String(30), default="", index=True)       # ingest | decomposer | executor | ...
+    status = Column(String(20), default="running", index=True)  # running | success | error | timeout
+    start_time = Column(Float, default=0.0)
+    end_time = Column(Float, default=0.0)
+    latency_ms = Column(Float, default=0.0)
+    error = Column(Text, default="")
+    metadata_ = Column("metadata", MutableJSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class DiagnosticReport(Base):
+    """看门狗诊断报告 — 全链路自动诊断结果"""
+    __tablename__ = "diagnostic_reports"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trigger_reason = Column(String(200), default="")
+    trigger_stage = Column(String(50), default="", index=True)
+    severity = Column(String(20), default="medium", index=True)  # critical | high | medium | low
+    stage_metrics = Column(MutableJSON, default=dict)
+    root_cause = Column(Text, default="")
+    recommendations = Column(MutableJSON, default=list)
+    llm_analysis = Column(Text, default="")
+    affected_event_count = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
 class EvalRun(Base):
     """质量评估运行 — 一次检索/忠实度评估"""
     __tablename__ = "eval_runs"
@@ -239,6 +275,127 @@ class EvalScore(Base):
     passed = Column(Boolean, default=False)
     reason = Column(Text, default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+# ════════════════════════════════════════════
+# 事件运营闭环模型
+# ════════════════════════════════════════════
+
+class SecurityCase(Base):
+    """安全案例 — 多条告警事件的聚合容器"""
+    __tablename__ = "security_cases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    case_number = Column(String(30), unique=True, index=True)   # CASE-20260801-001
+    title = Column(String(300), default="")
+    status = Column(String(30), default="open", index=True)
+    # open → investigating → pending_approval → responding → resolved → closed
+    priority = Column(String(20), default="medium", index=True)  # critical|high|medium|low
+    threat_type = Column(String(50), default="")
+    severity = Column(String(20), default="medium")
+    confidence = Column(Float, default=0.0)
+    src_ips = Column(MutableJSON, default=list)
+    dst_ips = Column(MutableJSON, default=list)
+    event_ids = Column(MutableJSON, default=list)
+    event_count = Column(Integer, default=0)
+    assignee = Column(String(100), default="")
+    sla_deadline = Column(DateTime(timezone=True), nullable=True)
+    disposition = Column(Text, default="")              # 最终处置结论
+    disposition_by = Column(String(100), default="")
+    disposition_at = Column(DateTime(timezone=True), nullable=True)
+    tags = Column(MutableJSON, default=list)
+    metadata_ = Column("metadata", MutableJSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class WorkOrder(Base):
+    """工单 — 持久化任务跟踪（处置/审批/复盘/回滚）"""
+    __tablename__ = "work_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_number = Column(String(30), unique=True, index=True)  # WO-20260801-001
+    case_id = Column(Integer, ForeignKey("security_cases.id"), nullable=True, index=True)
+    order_type = Column(String(30), default="disposition", index=True)
+    # disposition | approval | review | rollback
+    title = Column(String(300), default="")
+    description = Column(Text, default="")
+    status = Column(String(30), default="pending", index=True)
+    # pending → assigned → in_progress → completed → cancelled
+    priority = Column(String(20), default="medium")
+    assignee = Column(String(100), default="")
+    created_by = Column(String(100), default="system")
+    approval_status = Column(String(20), default="")    # pending|approved|rejected（审批类工单）
+    approved_by = Column(String(100), default="")
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    reject_reason = Column(Text, default="")
+    sla_deadline = Column(DateTime(timezone=True), nullable=True)
+    sla_breached = Column(Boolean, default=False)
+    result = Column(MutableJSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class PostMortem(Base):
+    """复盘报告 — 案例关闭后的结构化复盘"""
+    __tablename__ = "post_mortems"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    case_id = Column(Integer, ForeignKey("security_cases.id"), unique=True, index=True)
+    title = Column(String(300), default="")
+    summary = Column(Text, default="")
+    timeline = Column(MutableJSON, default=list)         # [{time, event, detail}]
+    root_cause = Column(Text, default="")
+    impact_assessment = Column(Text, default="")
+    lessons_learned = Column(MutableJSON, default=list)
+    action_items = Column(MutableJSON, default=list)     # [{item, owner, deadline, done}]
+    false_positive_count = Column(Integer, default=0)
+    detection_gaps = Column(Text, default="")
+    rule_improvements = Column(MutableJSON, default=list)
+    author = Column(String(100), default="")
+    reviewer = Column(String(100), default="")
+    status = Column(String(20), default="draft", index=True)  # draft|reviewed|published
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class FeedbackRecord(Base):
+    """误报/反馈记录 — 运营人员对检测结论的纠正"""
+    __tablename__ = "feedback_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event_id = Column(Integer, ForeignKey("security_events.id"), nullable=True, index=True)
+    case_id = Column(Integer, ForeignKey("security_cases.id"), nullable=True, index=True)
+    feedback_type = Column(String(30), default="false_positive", index=True)
+    # false_positive | true_positive | missed_threat | rule_suggestion
+    original_conclusion = Column(String(50), default="")
+    operator_conclusion = Column(String(50), default="")
+    reason = Column(Text, default="")
+    rule_id = Column(String(30), default="", index=True)
+    rule_suggestion = Column(Text, default="")
+    submitted_by = Column(String(100), default="")
+    status = Column(String(20), default="submitted", index=True)
+    # submitted → reviewed → applied | dismissed
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class RuleVersion(Base):
+    """规则版本 — Sigma 规则 / 响应策略的版本管理"""
+    __tablename__ = "rule_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_type = Column(String(30), default="sigma", index=True)  # sigma | response_policy
+    rule_id = Column(String(50), default="", index=True)         # SIG-001 / C2通信自动封禁
+    version = Column(Integer, default=1)
+    content = Column(MutableJSON, default=dict)
+    change_summary = Column(Text, default="")
+    changed_by = Column(String(100), default="")
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
 
 async def init_db():
     async with engine.begin() as conn:

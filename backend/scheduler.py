@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 SNAPSHOT_INTERVAL = 300        # 基线快照间隔（5分钟）
 LONG_CHAIN_INTERVAL = 1800     # 长周期关联间隔（30分钟）
+WATCHDOG_INTERVAL = 600        # 看门狗巡检间隔（10分钟）
+SLA_CHECK_INTERVAL = 300       # SLA 超时扫描间隔（5分钟）
+FP_ANALYTICS_INTERVAL = 3600   # 误报统计间隔（1小时）
 
 
 class Scheduler:
@@ -50,9 +53,13 @@ class Scheduler:
             asyncio.create_task(self._baseline_snapshot_loop(db_session_factory)),
             asyncio.create_task(self._long_chain_scan_loop(db_session_factory)),
             asyncio.create_task(self._cad_context_audit_loop()),
+            asyncio.create_task(self._watchdog_patrol_loop()),
+            asyncio.create_task(self._sla_check_loop(db_session_factory)),
+            asyncio.create_task(self._fp_analytics_loop(db_session_factory)),
         ]
-        logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds",
-                     SNAPSHOT_INTERVAL, LONG_CHAIN_INTERVAL, 3600)
+        logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds, watchdog=%ds, sla=%ds, fp=%ds",
+                     SNAPSHOT_INTERVAL, LONG_CHAIN_INTERVAL, 3600, WATCHDOG_INTERVAL,
+                     SLA_CHECK_INTERVAL, FP_ANALYTICS_INTERVAL)
 
     async def stop(self):
         """停止所有后台任务"""
@@ -280,6 +287,63 @@ class Scheduler:
                 break
             except Exception as e:
                 logger.warning(f"CAD context audit failed: {e}")
+
+    # ── 4. 看门狗巡检 ──
+
+    async def _watchdog_patrol_loop(self):
+        """定时运行全链路健康巡检"""
+        while self._running:
+            try:
+                await asyncio.sleep(WATCHDOG_INTERVAL)
+                from observability.watchdog import watchdog
+                result = await watchdog.patrol()
+                status = result.get("status", result.get("severity", "unknown"))
+                if status != "healthy":
+                    logger.warning(f"[Watchdog] Patrol result: {status}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[Watchdog] Patrol failed: {e}")
+
+    # ── 5. SLA 超时扫描 ──
+
+    async def _sla_check_loop(self, db_factory):
+        """定时扫描超时工单"""
+        while self._running:
+            try:
+                await asyncio.sleep(SLA_CHECK_INTERVAL)
+                from work_order_service import work_order_service
+                async with db_factory() as session:
+                    breached = await work_order_service.check_sla_breaches(session)
+                    if breached:
+                        logger.warning(f"[SLA] {len(breached)} work orders breached SLA")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[SLA] Check failed: {e}")
+
+    # ── 6. 误报统计 ──
+
+    async def _fp_analytics_loop(self, db_factory):
+        """定时生成误报统计 + 调优建议"""
+        while self._running:
+            try:
+                await asyncio.sleep(FP_ANALYTICS_INTERVAL)
+                from feedback_loop import feedback_loop
+                async with db_factory() as session:
+                    suggestions = await feedback_loop.generate_tuning_suggestions(session)
+                    if suggestions:
+                        logger.info(f"[FP Analytics] {len(suggestions)} tuning suggestions generated")
+                        from event_bus import event_bus
+                        event_bus.publish("pipeline_health", {
+                            "type": "tuning_suggestions",
+                            "count": len(suggestions),
+                            "suggestions": [s.get("suggestion", "")[:100] for s in suggestions[:3]],
+                        })
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[FP Analytics] Failed: {e}")
 
 
 scheduler = Scheduler()

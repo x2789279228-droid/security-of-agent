@@ -136,6 +136,14 @@ async def lifespan(app: FastAPI):
     await scheduler.start(async_session)
     logger.info("Scheduler started")
 
+    # 可观测性: 注册看门狗诊断回调 + 启用 span 持久化
+    from observability.health_monitor import health_monitor
+    from observability.watchdog import watchdog
+    from observability.pipeline_tracer import pipeline_tracer
+    health_monitor.set_diagnose_callback(watchdog.diagnose)
+    pipeline_tracer.enable_persist()
+    logger.info("Observability: health monitor + watchdog + pipeline tracer initialized")
+
     yield
 
     # 停止 Kafka
@@ -270,6 +278,176 @@ async def kafka_status():
         "producer_active": kafka_producer.is_active,
     }
 
+@app.get("/api/kafka/rejections")
+async def kafka_rejections():
+    """Kafka 拒绝原因统计（数据质量可观测）"""
+    return kafka_consumer_manager.rejection_stats()
+
+@app.get("/api/cep/partial-matches")
+async def cep_partial_matches():
+    """CEP 攻击链部分匹配状态（实时可视化）"""
+    return {"matches": kafka_consumer_manager.cep_partial_matches()}
+
+# ── CEP 模式管理端点（热更新 + 灰度）──
+
+# 默认 CEP 模式（内存缓存，通过 Kafka Broadcast 同步到 Flink）
+_CEP_PATTERNS_CACHE: dict[str, dict] = {
+    "port_scan_to_c2": {
+        "patternId": "port_scan_to_c2", "name": "端口扫描→暴力破解→C2",
+        "steps": ["PORT_SCAN", "BRUTE_FORCE", "C2_BEACON"],
+        "withinMinutes": 30, "enabled": True, "shadowMode": False, "version": 1,
+    },
+    "lateral_movement": {
+        "patternId": "lateral_movement", "name": "可疑登录→文件访问→横向移动",
+        "steps": ["SUSPICIOUS_LOGIN", "FILE_ACCESS", "LATERAL_MOVE"],
+        "withinMinutes": 60, "enabled": True, "shadowMode": False, "version": 1,
+    },
+    "data_exfil": {
+        "patternId": "data_exfil", "name": "文件访问→数据外泄",
+        "steps": ["FILE_ACCESS", "DATA_EXFIL"],
+        "withinMinutes": 15, "enabled": True, "shadowMode": False, "version": 1,
+    },
+}
+
+@app.get("/api/cep/patterns")
+async def cep_patterns_list():
+    """列出所有 CEP 攻击链模式"""
+    return {"patterns": list(_CEP_PATTERNS_CACHE.values())}
+
+@app.post("/api/cep/patterns/{pattern_id}/toggle")
+async def cep_pattern_toggle(pattern_id: str):
+    """启用/禁用 CEP 模式（通过 Kafka Broadcast 热更新到 Flink）"""
+    if pattern_id not in _CEP_PATTERNS_CACHE:
+        return {"success": False, "error": f"模式 {pattern_id} 不存在"}
+    p = _CEP_PATTERNS_CACHE[pattern_id]
+    p["enabled"] = not p["enabled"]
+    p["version"] += 1
+    await _broadcast_pattern(p)
+    return {"success": True, "pattern": p}
+
+@app.post("/api/cep/patterns/{pattern_id}/shadow")
+async def cep_pattern_shadow(pattern_id: str):
+    """切换灰度模式（shadow mode: 仅记录不告警）"""
+    if pattern_id not in _CEP_PATTERNS_CACHE:
+        return {"success": False, "error": f"模式 {pattern_id} 不存在"}
+    p = _CEP_PATTERNS_CACHE[pattern_id]
+    p["shadowMode"] = not p["shadowMode"]
+    p["version"] += 1
+    await _broadcast_pattern(p)
+    return {"success": True, "pattern": p}
+
+async def _broadcast_pattern(pattern: dict):
+    """将模式配置发布到 Kafka Broadcast topic"""
+    if kafka_producer.is_active:
+        try:
+            await kafka_producer._producer.send(
+                settings.kafka_topic_cep_patterns,
+                key=pattern["patternId"],
+                value=pattern,
+            )
+            logger.info(f"[CEP] Broadcast pattern: {pattern['patternId']} v{pattern['version']}")
+        except Exception as e:
+            logger.warning(f"[CEP] Broadcast failed: {e}")
+
+@app.post("/api/cep/replay")
+async def cep_replay(limit: int = 200, src_ip: str = ""):
+    """CEP 回放验证：用历史事件回测攻击链模式命中率"""
+    from models import async_session as db_session, SecurityEvent
+    from sqlalchemy import select, desc
+
+    patterns = {k: v["steps"] for k, v in _CEP_PATTERNS_CACHE.items() if v["enabled"]}
+
+    async with db_session() as session:
+        stmt = select(SecurityEvent).order_by(desc(SecurityEvent.created_at)).limit(limit)
+        if src_ip:
+            stmt = stmt.where(SecurityEvent.src_ip == src_ip)
+        result = await session.execute(stmt)
+        events = result.scalars().all()
+
+    # 按 src_ip 分组，时间正序回放
+    from collections import defaultdict
+    by_ip: dict[str, list] = defaultdict(list)
+    for evt in reversed(events):
+        by_ip[evt.src_ip or "unknown"].append(evt)
+
+    hits = []
+    for ip, ip_events in by_ip.items():
+        for pname, steps in patterns.items():
+            matched = []
+            step_idx = 0
+            for evt in ip_events:
+                if step_idx < len(steps) and evt.event_type == steps[step_idx]:
+                    matched.append({"event_id": evt.id, "event_type": evt.event_type,
+                                    "step": steps[step_idx], "at": str(evt.created_at)})
+                    step_idx += 1
+                    if step_idx >= len(steps):
+                        hits.append({"pattern": pname, "src_ip": ip,
+                                     "events": matched, "status": "completed"})
+                        step_idx = 0
+                        matched = []
+            if matched:
+                hits.append({"pattern": pname, "src_ip": ip,
+                             "events": matched, "status": "partial",
+                             "progress": f"{len(matched)}/{len(steps)}"})
+
+    return {
+        "total_events": len(events),
+        "total_ips": len(by_ip),
+        "patterns_tested": list(patterns.keys()),
+        "hits": hits,
+        "hit_count": sum(1 for h in hits if h["status"] == "completed"),
+        "partial_count": sum(1 for h in hits if h["status"] == "partial"),
+    }
+
+# ── 资产重要性管理端点 ──
+
+# 资产重要性注册表（IP/CIDR → 等级 + 权重）
+_ASSET_REGISTRY: dict[str, dict] = {}
+
+ASSET_LEVELS = {
+    "critical": {"weight": 1.5, "label": "核心资产（数据库/AD/防火墙）"},
+    "high":     {"weight": 1.3, "label": "重要资产（应用服务器/文件服务器）"},
+    "medium":   {"weight": 1.0, "label": "一般资产（工作站/终端）"},
+    "low":      {"weight": 0.8, "label": "低优先级（IoT/测试环境）"},
+}
+
+@app.get("/api/assets")
+async def assets_list():
+    """列出所有已注册资产"""
+    return {"assets": _ASSET_REGISTRY, "levels": ASSET_LEVELS}
+
+@app.post("/api/assets")
+async def assets_register(ip: str, level: str = "medium", label: str = "", business: str = ""):
+    """注册资产重要性（影响异常检测评分权重）"""
+    if level not in ASSET_LEVELS:
+        return {"success": False, "error": f"无效等级: {level}，可选: {list(ASSET_LEVELS.keys())}"}
+    _ASSET_REGISTRY[ip] = {
+        "ip": ip, "level": level, "label": label or ip,
+        "business": business, "weight": ASSET_LEVELS[level]["weight"],
+    }
+    return {"success": True, "asset": _ASSET_REGISTRY[ip]}
+
+@app.delete("/api/assets/{ip}")
+async def assets_remove(ip: str):
+    """移除资产注册"""
+    if ip in _ASSET_REGISTRY:
+        del _ASSET_REGISTRY[ip]
+        return {"success": True}
+    return {"success": False, "error": "资产不存在"}
+
+def get_asset_weight(dst_ip: str) -> float:
+    """查询目标 IP 的资产权重（供 kafka_consumer 调用）"""
+    import ipaddress
+    if not dst_ip:
+        return 1.0
+    for cidr, info in _ASSET_REGISTRY.items():
+        try:
+            if ipaddress.ip_address(dst_ip) in ipaddress.ip_network(cidr, strict=False):
+                return info["weight"]
+        except ValueError:
+            continue
+    return 1.0
+
 # ── Sigma 检测引擎端点 ──
 
 @app.get("/api/sigma/stats")
@@ -277,6 +455,12 @@ async def sigma_stats():
     """Sigma 检测引擎状态"""
     from sigma_detector import sigma_detector
     return sigma_detector.stats()
+
+@app.get("/api/llm/cost")
+async def llm_cost():
+    """LLM 成本统计（每日预算/用量/调用次数）"""
+    from summary_compression import cost_tracker
+    return cost_tracker.stats()
 
 class SigmaDetectRequest(BaseModel):
     events: list[dict]
@@ -1152,6 +1336,23 @@ async def reset_circuit_breaker():
     """人工重置熔断器"""
     return circuit_breaker.reset()
 
+@app.put("/api/cad/thresholds")
+async def update_cad_thresholds(body: dict, user: UserInfo = Depends(RequireRole("admin"))):
+    """运行时更新 CAD 熔断阈值"""
+    updated = circuit_breaker.update_thresholds(**body)
+    return {"success": True, "updated": updated, "current": circuit_breaker.get_status()["thresholds"]}
+
+@app.post("/api/cad/override/{event_id}")
+async def cad_override(event_id: int, user: UserInfo = Depends(RequireRole("admin"))):
+    """人工覆盖 CAD 决策（标记为误报）"""
+    circuit_breaker.record_override(event_id)
+    return {"success": True, "event_id": event_id, "accuracy": circuit_breaker.accuracy_stats()}
+
+@app.get("/api/cad/accuracy")
+async def cad_accuracy():
+    """CAD 自身准确率统计"""
+    return circuit_breaker.accuracy_stats()
+
 @app.get("/api/cad/verification/{event_id}")
 async def get_cad_verification(
     event_id: int,
@@ -1793,6 +1994,381 @@ async def agent_trace_stats(
     """Agent 轨迹聚合统计"""
     from eval_repository import get_trace_stats
     return await get_trace_stats(caller=caller)
+
+
+# ── 全链路可观测性端点 ──
+
+@app.get("/api/observability/health")
+async def observability_health(
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """各阶段健康快照（红绿灯）"""
+    from observability.health_monitor import health_monitor
+    snapshot = health_monitor.get_health_snapshot()
+    return snapshot.to_dict()
+
+
+@app.get("/api/observability/spans")
+async def observability_spans(
+    event_id: int = Query(0, description="按事件 ID 过滤"),
+    stage: str = Query("", description="按阶段过滤"),
+    limit: int = Query(50, ge=1, le=200),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """查询最近 Span（支持 event_id/stage 过滤）"""
+    from observability.pipeline_tracer import pipeline_tracer
+    return pipeline_tracer.get_recent_spans(
+        event_id=event_id or None,
+        stage=stage or None,
+        limit=limit,
+    )
+
+
+@app.get("/api/observability/diagnostics")
+async def observability_diagnostics(
+    limit: int = Query(20, ge=1, le=100),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """查询历史诊断报告"""
+    from sqlalchemy import select, desc
+    from models import DiagnosticReport, async_session as db_session
+    async with db_session() as session:
+        stmt = (
+            select(DiagnosticReport)
+            .order_by(desc(DiagnosticReport.created_at))
+            .limit(limit)
+        )
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+        return [
+            {
+                "id": r.id,
+                "trigger_reason": r.trigger_reason,
+                "trigger_stage": r.trigger_stage,
+                "severity": r.severity,
+                "root_cause": r.root_cause,
+                "recommendations": r.recommendations,
+                "affected_event_count": r.affected_event_count,
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+            }
+            for r in rows
+        ]
+
+
+@app.post("/api/observability/diagnose")
+async def observability_diagnose(
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """手动触发全链路诊断"""
+    from observability.watchdog import watchdog
+    report = await watchdog.diagnose(trigger_reason="manual_api_trigger")
+    return report
+
+
+# ── 事件运营闭环端点 ──
+
+# 案例管理
+@app.get("/api/cases")
+async def list_cases(
+    status: str = Query(""), priority: str = Query(""),
+    assignee: str = Query(""), limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    from case_manager import case_manager
+    async with async_session() as session:
+        return await case_manager.list_cases(session, status, priority, assignee, limit, offset)
+
+@app.post("/api/cases")
+async def create_case(
+    body: dict, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from case_manager import case_manager
+    async with async_session() as session:
+        case = await case_manager.create_case(
+            session, title=body.get("title", ""),
+            event_ids=body.get("event_ids", []),
+            priority=body.get("priority", "medium"),
+            threat_type=body.get("threat_type", ""),
+            assignee=body.get("assignee", ""),
+            tags=body.get("tags", []),
+        )
+        return {"success": True, "case": case_manager._case_to_dict(case)}
+
+@app.get("/api/cases/{case_id}")
+async def get_case(case_id: int, user: UserInfo = Depends(RequireRole("admin"))):
+    from case_manager import case_manager
+    async with async_session() as session:
+        result = await case_manager.get_case(session, case_id)
+        if not result:
+            raise HTTPException(404, "案例不存在")
+        return result
+
+@app.put("/api/cases/{case_id}/status")
+async def update_case_status(
+    case_id: int, body: dict, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from case_manager import case_manager
+    async with async_session() as session:
+        return await case_manager.update_status(session, case_id, body.get("status", ""), body.get("by", ""))
+
+@app.put("/api/cases/{case_id}/assign")
+async def assign_case(
+    case_id: int, body: dict, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from case_manager import case_manager
+    async with async_session() as session:
+        return await case_manager.assign(session, case_id, body.get("assignee", ""))
+
+@app.put("/api/cases/{case_id}/disposition")
+async def set_case_disposition(
+    case_id: int, body: dict, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from case_manager import case_manager
+    async with async_session() as session:
+        return await case_manager.set_disposition(session, case_id, body.get("disposition", ""), body.get("by", ""))
+
+@app.get("/api/cases/{case_id}/timeline")
+async def get_case_timeline(case_id: int, user: UserInfo = Depends(RequireRole("admin"))):
+    from case_manager import case_manager
+    async with async_session() as session:
+        return await case_manager.get_case_timeline(session, case_id)
+
+# 工单
+@app.get("/api/work-orders")
+async def list_work_orders(
+    case_id: int = Query(0), order_type: str = Query(""),
+    status: str = Query(""), limit: int = Query(50, ge=1, le=200),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    from work_order_service import work_order_service
+    async with async_session() as session:
+        return await work_order_service.list_orders(session, case_id, order_type, status, limit)
+
+@app.post("/api/work-orders")
+async def create_work_order(body: dict, user: UserInfo = Depends(RequireRole("admin"))):
+    from work_order_service import work_order_service
+    async with async_session() as session:
+        order = await work_order_service.create_order(
+            session, case_id=body.get("case_id"),
+            order_type=body.get("order_type", "disposition"),
+            title=body.get("title", ""), description=body.get("description", ""),
+            priority=body.get("priority", "medium"),
+            assignee=body.get("assignee", ""),
+            created_by=body.get("created_by", "admin"),
+        )
+        return {"success": True, "order": work_order_service._order_to_dict(order)}
+
+@app.put("/api/work-orders/{order_id}/status")
+async def update_work_order_status(
+    order_id: int, body: dict, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from work_order_service import work_order_service
+    async with async_session() as session:
+        return await work_order_service.update_status(session, order_id, body.get("status", ""))
+
+@app.post("/api/work-orders/{order_id}/approve")
+async def approve_work_order(
+    order_id: int, body: dict = None, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from work_order_service import work_order_service
+    async with async_session() as session:
+        return await work_order_service.approve(session, order_id, (body or {}).get("approved_by", "admin"))
+
+@app.post("/api/work-orders/{order_id}/reject")
+async def reject_work_order(
+    order_id: int, body: dict = None, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from work_order_service import work_order_service
+    b = body or {}
+    async with async_session() as session:
+        return await work_order_service.reject(session, order_id, b.get("reason", ""), b.get("rejected_by", "admin"))
+
+# 复盘
+@app.post("/api/post-mortems")
+async def create_post_mortem(body: dict, user: UserInfo = Depends(RequireRole("admin"))):
+    from post_mortem_service import post_mortem_service
+    async with async_session() as session:
+        return await post_mortem_service.create_post_mortem(session, body.get("case_id", 0), body.get("author", ""))
+
+@app.get("/api/post-mortems/{case_id}")
+async def get_post_mortem(case_id: int, user: UserInfo = Depends(RequireRole("admin"))):
+    from post_mortem_service import post_mortem_service
+    async with async_session() as session:
+        result = await post_mortem_service.get_post_mortem(session, case_id)
+        if not result:
+            raise HTTPException(404, "复盘报告不存在")
+        return result
+
+@app.put("/api/post-mortems/{case_id}")
+async def update_post_mortem(
+    case_id: int, body: dict, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from post_mortem_service import post_mortem_service
+    async with async_session() as session:
+        return await post_mortem_service.update_post_mortem(session, case_id, body)
+
+@app.put("/api/post-mortems/{case_id}/publish")
+async def publish_post_mortem(
+    case_id: int, body: dict = None, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from post_mortem_service import post_mortem_service
+    async with async_session() as session:
+        return await post_mortem_service.publish(session, case_id, (body or {}).get("reviewer", ""))
+
+# 反馈 + 规则
+@app.post("/api/feedback")
+async def submit_feedback(body: dict, user: UserInfo = Depends(RequireRole("admin"))):
+    from feedback_loop import feedback_loop
+    async with async_session() as session:
+        record = await feedback_loop.submit_feedback(
+            session, event_id=body.get("event_id"),
+            case_id=body.get("case_id"),
+            feedback_type=body.get("feedback_type", "false_positive"),
+            original_conclusion=body.get("original_conclusion", ""),
+            operator_conclusion=body.get("operator_conclusion", ""),
+            reason=body.get("reason", ""),
+            rule_id=body.get("rule_id", ""),
+            rule_suggestion=body.get("rule_suggestion", ""),
+            submitted_by=body.get("submitted_by", ""),
+        )
+        return {"success": True, "id": record.id}
+
+@app.get("/api/feedback/stats")
+async def feedback_stats(
+    rule_id: str = Query(""), days: int = Query(30, ge=1, le=365),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    from feedback_loop import feedback_loop
+    async with async_session() as session:
+        return await feedback_loop.get_fp_statistics(session, rule_id, days)
+
+@app.get("/api/feedback/suggestions")
+async def feedback_suggestions(user: UserInfo = Depends(RequireRole("admin"))):
+    from feedback_loop import feedback_loop
+    async with async_session() as session:
+        return await feedback_loop.generate_tuning_suggestions(session)
+
+@app.get("/api/rules")
+async def list_rules(
+    rule_type: str = Query("sigma"), user: UserInfo = Depends(RequireRole("admin")),
+):
+    from rule_manager import rule_manager
+    return rule_manager.list_rules(rule_type)
+
+@app.post("/api/rules")
+async def create_rule(body: dict, user: UserInfo = Depends(RequireRole("admin"))):
+    from rule_manager import rule_manager
+    result = rule_manager.create_rule(body.get("rule_type", "sigma"), body.get("content", {}), body.get("changed_by", "admin"))
+    if result.get("success") and result.get("version_data"):
+        async with async_session() as session:
+            await rule_manager.save_version(session, result["version_data"])
+    return result
+
+@app.put("/api/rules/{rule_type}/{rule_id}")
+async def update_rule(
+    rule_type: str, rule_id: str, body: dict,
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    from rule_manager import rule_manager
+    result = rule_manager.update_rule(
+        rule_type, rule_id, body.get("content", {}),
+        body.get("change_summary", ""), body.get("changed_by", "admin"),
+    )
+    if result.get("success") and result.get("version_data"):
+        async with async_session() as session:
+            await rule_manager.save_version(session, result["version_data"])
+    return result
+
+@app.get("/api/rules/{rule_type}/{rule_id}/versions")
+async def get_rule_versions(
+    rule_type: str, rule_id: str, user: UserInfo = Depends(RequireRole("admin")),
+):
+    from rule_manager import rule_manager
+    async with async_session() as session:
+        return await rule_manager.get_versions(session, rule_type, rule_id)
+
+@app.post("/api/rules/{rule_type}/{rule_id}/rollback")
+async def rollback_rule(
+    rule_type: str, rule_id: str, body: dict,
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    from rule_manager import rule_manager
+    async with async_session() as session:
+        return await rule_manager.rollback(session, rule_type, rule_id, body.get("target_version", 1), body.get("changed_by", "admin"))
+
+@app.post("/api/rules/sandbox")
+async def sandbox_test_rule(body: dict, user: UserInfo = Depends(RequireRole("admin"))):
+    from rule_manager import rule_manager
+    async with async_session() as session:
+        return await rule_manager.sandbox_test(
+            session, body.get("rule_content", {}),
+            body.get("event_ids"), body.get("limit", 100),
+        )
+
+@app.post("/api/rules/sigma/{rule_id}/toggle")
+async def sigma_rule_toggle(rule_id: str, user: UserInfo = Depends(RequireRole("admin"))):
+    """启用/停用 Sigma 规则"""
+    from sigma_detector import sigma_detector
+    for r in sigma_detector.rules:
+        if r.rule_id == rule_id:
+            r.enabled = not r.enabled
+            return {"success": True, "rule_id": rule_id, "enabled": r.enabled}
+    return {"success": False, "error": f"规则 {rule_id} 不存在"}
+
+@app.post("/api/rules/sigma/{rule_id}/shadow")
+async def sigma_rule_shadow(rule_id: str, user: UserInfo = Depends(RequireRole("admin"))):
+    """切换 Sigma 规则灰度模式（shadow: 仅记录不触发响应）"""
+    from sigma_detector import sigma_detector
+    for r in sigma_detector.rules:
+        if r.rule_id == rule_id:
+            r.shadow_mode = not r.shadow_mode
+            return {"success": True, "rule_id": rule_id, "shadow_mode": r.shadow_mode}
+    return {"success": False, "error": f"规则 {rule_id} 不存在"}
+
+# ── Sigma 规则测试集 ──
+_SIGMA_TEST_CASES: list[dict] = [
+    {"name": "SSH爆破命中", "event": {"event": "BRUTE_FORCE", "severity": "high", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.1:22", "message": "SSH brute force"}, "expected_rule": "SIG-007", "expected_hit": True},
+    {"name": "正常登录不命中", "event": {"event": "USER_LOGIN", "severity": "info", "src_ip": "10.0.0.5", "message": "Admin login success"}, "expected_rule": "SIG-007", "expected_hit": False},
+    {"name": "C2通信命中", "event": {"event": "C2_BEACON", "severity": "critical", "src_ip": "192.168.1.100", "message": "C2 beacon detected"}, "expected_rule": "SIG-008", "expected_hit": True},
+    {"name": "路径遍历命中", "event": {"event": "PATH_TRAVERSAL", "severity": "critical", "src_ip": "5.6.7.8", "url": "/../../etc/passwd", "message": "path traversal"}, "expected_rule": "SIG-003", "expected_hit": True},
+    {"name": "端口扫描命中", "event": {"event": "PORT_SCAN", "severity": "medium", "src_ip": "9.10.11.12", "message": "port scan detected"}, "expected_rule": "SIG-009", "expected_hit": True},
+    {"name": "正常DNS不命中", "event": {"event": "DNS_QUERY", "severity": "info", "src_ip": "10.0.0.10", "message": "DNS resolution"}, "expected_rule": "SIG-009", "expected_hit": False},
+]
+
+@app.get("/api/sigma/test-cases")
+async def sigma_test_cases():
+    """列出 Sigma 规则测试集"""
+    return {"test_cases": _SIGMA_TEST_CASES, "count": len(_SIGMA_TEST_CASES)}
+
+@app.post("/api/sigma/run-tests")
+async def sigma_run_tests(user: UserInfo = Depends(RequireRole("admin"))):
+    """运行 Sigma 规则测试集，验证命中/不命中"""
+    from sigma_detector import sigma_detector
+    results = []
+    passed = 0
+    for tc in _SIGMA_TEST_CASES:
+        hits = sigma_detector.detect(tc["event"])
+        hit_ids = [h.rule_id for h in hits]
+        actual_hit = tc["expected_rule"] in hit_ids
+        ok = actual_hit == tc["expected_hit"]
+        if ok:
+            passed += 1
+        results.append({
+            "name": tc["name"],
+            "expected_hit": tc["expected_hit"],
+            "actual_hit": actual_hit,
+            "matched_rules": hit_ids,
+            "passed": ok,
+        })
+    return {
+        "total": len(_SIGMA_TEST_CASES),
+        "passed": passed,
+        "failed": len(_SIGMA_TEST_CASES) - passed,
+        "pass_rate": round(passed / max(len(_SIGMA_TEST_CASES), 1), 4),
+        "results": results,
+    }
+
 
 # ── 钓鱼检测端点 ──
 

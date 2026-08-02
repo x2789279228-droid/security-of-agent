@@ -3,12 +3,18 @@ Kafka 生产者 — 将审计结果回写到 Kafka 消息总线
 
 后端 Audit-LLM 完成审计后，将结果发布到 security-audit-results topic，
 供下游消费者（前端 SSE、响应引擎、归档系统）使用。
+
+增强:
+  - 所有消息携带 trace_id header，支持全链路追踪
+  - 敏感字段加密（apiKey 等）在发送前自动处理
 """
 import json
 import logging
+import uuid
 from typing import Optional
 
 from config import settings
+from field_cipher import field_cipher
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +27,7 @@ except ImportError:
 
 
 class KafkaProducerWrapper:
-    """异步 Kafka 生产者封装"""
+    """异步 Kafka 生产者封装（带 trace_id 传播）"""
 
     def __init__(self):
         self._producer: Optional[object] = None
@@ -52,31 +58,41 @@ class KafkaProducerWrapper:
             self._started = False
             logger.info("Kafka producer stopped")
 
-    async def publish_audit_result(self, event_id: int, result: dict):
+    @staticmethod
+    def _trace_headers(trace_id: str = "") -> list:
+        """构造 Kafka message headers（trace_id 传播）"""
+        tid = trace_id or uuid.uuid4().hex
+        return [("trace_id", tid.encode("utf-8"))]
+
+    async def publish_audit_result(self, event_id: int, result: dict, trace_id: str = ""):
         """发布审计结果到 Kafka"""
         if not self._started:
             return
         try:
+            encrypted = field_cipher.encrypt_message(result)
             await self._producer.send(
                 settings.kafka_topic_audit_results,
                 key=str(event_id),
                 value={
                     "event_id": event_id,
-                    **result,
+                    **encrypted,
                 },
+                headers=self._trace_headers(trace_id),
             )
         except Exception as e:
             logger.warning(f"Kafka publish audit result failed: {e}")
 
-    async def publish_alert(self, alert: dict):
+    async def publish_alert(self, alert: dict, trace_id: str = ""):
         """发布告警到 Kafka"""
         if not self._started:
             return
         try:
+            encrypted = field_cipher.encrypt_message(alert)
             await self._producer.send(
                 settings.kafka_topic_alerts,
                 key=alert.get("src_ip", ""),
-                value=alert,
+                value=encrypted,
+                headers=self._trace_headers(trace_id),
             )
         except Exception as e:
             logger.warning(f"Kafka publish alert failed: {e}")

@@ -184,7 +184,8 @@ async def run_continuous_kafka(bootstrap: str, api_key: str, interval: float,
         while count == 0 or sent < count:
             evt = generate_continuous()
             msg = to_kafka_message(evt, api_key, source_id)
-            await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg)
+            trace_headers = [("trace_id", msg["eventId"].encode("utf-8"))]
+            await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg, headers=trace_headers)
             sent += 1
             is_attack = evt["severity"] in ("high", "critical")
             flag = "🔴" if is_attack else "  "
@@ -210,7 +211,8 @@ async def run_burst_kafka(bootstrap: str, api_key: str, count: int, source_id: s
         for i in range(count):
             evt = generate_continuous(attack_ratio=0.3)
             msg = to_kafka_message(evt, api_key, source_id)
-            await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg)
+            trace_headers = [("trace_id", msg["eventId"].encode("utf-8"))]
+            await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg, headers=trace_headers)
         await producer.flush()
     finally:
         await producer.stop()
@@ -234,7 +236,8 @@ async def run_chain_kafka(bootstrap: str, api_key: str, source_id: str):
 
             evt = make_event(step)
             msg = to_kafka_message(evt, api_key, source_id)
-            await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg)
+            trace_headers = [("trace_id", msg["eventId"].encode("utf-8"))]
+            await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg, headers=trace_headers)
             print(
                 f"  🔴 [{i+1}/{len(ATTACK_CHAIN)}] {evt['event']:24s} "
                 f"{evt.get('src_ip', '')} → {evt.get('dst_ip', '')} "

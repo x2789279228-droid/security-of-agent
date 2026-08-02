@@ -127,6 +127,9 @@ class CADAgent:
                 f"{circuit_breaker.state.reason}"
             )
 
+        # 记录 CAD 决策（用于自身准确率评估）
+        circuit_breaker.record_decision(event_id, circuit_breaker.state.tripped)
+
         logger.info(
             f"CAD audit complete for event #{event_id}: "
             f"{verified_claims}/{total_claims} verified, "

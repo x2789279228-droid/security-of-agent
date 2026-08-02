@@ -94,6 +94,20 @@ class SSHTransport:
                 "returncode": -1,
             }
 
+        # 命令白名单检查（Windows 平台）
+        from .command_whitelist import command_whitelist
+        allowed, rule_id, reason = command_whitelist.check(command, platform="windows")
+        if not allowed:
+            logger.warning(f"[SSH] Command whitelist REJECTED: {reason}")
+            return {
+                "success": False,
+                "error": f"命令白名单拒绝: {reason}",
+                "stdout": "",
+                "stderr": "",
+                "returncode": -1,
+                "blocked_by": "command_whitelist",
+            }
+
         # 构造 SSH 命令
         # 使用 /tmp/ssh/known_hosts 或 /dev/null 避免 appuser 无 home 目录问题
         known_hosts_candidates = ["/tmp/ssh/known_hosts", "/dev/null"]

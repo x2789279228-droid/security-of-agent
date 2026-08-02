@@ -6,6 +6,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 安全告警事件模型
@@ -56,9 +57,27 @@ public class AlertEvent implements Serializable {
     @JsonProperty("timestamp")
     private long timestamp;
 
+    /** 全链路追踪 ID */
+    @JsonProperty("traceId")
+    private String traceId;
+
+    /** 证据链：攻击链中所有原始事件的 eventId 列表 */
+    @JsonProperty("evidenceEventIds")
+    private List<String> evidenceEventIds;
+
+    /** 证据链：攻击链中所有事件的摘要快照 */
+    @JsonProperty("evidenceChain")
+    private List<Map<String, Object>> evidenceChain;
+
+    /** 攻击链时间跨度（毫秒）*/
+    @JsonProperty("timeSpanMs")
+    private long timeSpanMs;
+
     /** 默认构造函数 */
     public AlertEvent() {
         this.reasons = new ArrayList<>();
+        this.evidenceEventIds = new ArrayList<>();
+        this.evidenceChain = new ArrayList<>();
     }
 
     // ==================== Getters & Setters ====================
@@ -141,6 +160,38 @@ public class AlertEvent implements Serializable {
 
     public void setTimestamp(long timestamp) {
         this.timestamp = timestamp;
+    }
+
+    public String getTraceId() {
+        return traceId;
+    }
+
+    public void setTraceId(String traceId) {
+        this.traceId = traceId;
+    }
+
+    public List<String> getEvidenceEventIds() {
+        return evidenceEventIds;
+    }
+
+    public void setEvidenceEventIds(List<String> evidenceEventIds) {
+        this.evidenceEventIds = evidenceEventIds;
+    }
+
+    public List<Map<String, Object>> getEvidenceChain() {
+        return evidenceChain;
+    }
+
+    public void setEvidenceChain(List<Map<String, Object>> evidenceChain) {
+        this.evidenceChain = evidenceChain;
+    }
+
+    public long getTimeSpanMs() {
+        return timeSpanMs;
+    }
+
+    public void setTimeSpanMs(long timeSpanMs) {
+        this.timeSpanMs = timeSpanMs;
     }
 
     @Override

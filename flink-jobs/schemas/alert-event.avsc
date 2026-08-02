@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "AlertEvent",
+  "namespace": "com.soc.schema",
+  "doc": "安全告警 Schema — security-alerts topic 的规范消息格式",
+  "fields": [
+    {"name": "alertId", "type": "string", "doc": "告警唯一标识"},
+    {"name": "eventType", "type": "string", "doc": "触发告警的事件类型"},
+    {"name": "severity", "type": {"type": "enum", "name": "AlertSeverity", "symbols": ["info", "low", "medium", "high", "critical"]}, "doc": "严重级别"},
+    {"name": "srcIp", "type": ["null", "string"], "default": null, "doc": "源 IP"},
+    {"name": "dstIp", "type": ["null", "string"], "default": null, "doc": "目标 IP"},
+    {"name": "message", "type": "string", "doc": "告警描述"},
+    {"name": "anomalyScore", "type": "double", "doc": "异常评分 [0, 1]"},
+    {"name": "alertType", "type": {"type": "enum", "name": "AlertType", "symbols": ["ANOMALY", "ATTACK_CHAIN", "THRESHOLD"]}, "doc": "告警类型"},
+    {"name": "reasons", "type": {"type": "array", "items": "string"}, "doc": "告警触发原因列表"},
+    {"name": "timestamp", "type": "long", "doc": "告警时间戳 (epoch millis)"},
+    {"name": "traceId", "type": ["null", "string"], "default": null, "doc": "全链路追踪 ID"}
+  ]
+}

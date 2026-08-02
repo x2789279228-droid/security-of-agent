@@ -79,6 +79,10 @@ public class AnomalyDetectionJob {
     private static final OutputTag<String> ATTACK_CHAIN_TAG =
             new OutputTag<String>("attack-chain-alerts") {};
 
+    /** 侧输出标签：迟到事件（超过 watermark 的事件）*/
+    private static final OutputTag<String> LATE_DATA_TAG =
+            new OutputTag<String>("late-data") {};
+
     public static void main(String[] args) throws Exception {
         // 创建 Flink 执行环境
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -109,10 +113,11 @@ public class AnomalyDetectionJob {
                 .filter(event -> event != null)
                 .name("JSON-Parse-Validated");
 
-        // 分配事件时间水印（使用事件自带时间戳）
+        // 分配事件时间水印（使用事件自带时间戳 + 空闲源检测）
         SingleOutputStreamOperator<SecurityEvent> timestampedStream = eventStream
                 .assignTimestampsAndWatermarks(
                         WatermarkStrategy.<SecurityEvent>forBoundedOutOfOrderness(Duration.ofSeconds(10))
+                                .withIdleness(Duration.ofMinutes(2))
                                 .withTimestampAssigner(new SerializableTimestampAssigner<SecurityEvent>() {
                                     @Override
                                     public long extractTimestamp(SecurityEvent event, long recordTimestamp) {
@@ -129,6 +134,12 @@ public class AnomalyDetectionJob {
 
         // ==================== 4. CEP 攻击链检测 ====================
         DataStream<String> attackChainAlerts = buildCepPatterns(timestampedStream);
+
+        // ==================== 4.5 CEP 部分匹配追踪 ====================
+        DataStream<String> partialMatches = timestampedStream
+                .keyBy(SecurityEvent::getSrcIp)
+                .process(new CepPartialMatchFunction())
+                .name("CEP-Partial-Match-Tracker");
 
         // ==================== 5. 获取侧输出 ====================
         DataStream<String> alertStream = enrichedStream.getSideOutput(ALERT_TAG);
@@ -177,12 +188,26 @@ public class AnomalyDetectionJob {
                 .sinkTo(auditSink)
                 .name("Kafka-AuditQueue-Sink");
 
+        // Sink: security-cep-partial（部分匹配可视化）
+        KafkaSink<String> partialSink = KafkaSink.<String>builder()
+                .setBootstrapServers(KafkaConfig.KAFKA_BOOTSTRAP)
+                .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+                        .setTopic(KafkaConfig.TOPIC_CEP_PARTIAL)
+                        .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SimpleStringSchema())
+                        .build())
+                .build();
+
+        partialMatches
+                .sinkTo(partialSink)
+                .name("Kafka-CEP-Partial-Sink");
+
         // ==================== 7. 启动作业 ====================
         LOG.info("启动异常检测作业: AnomalyDetectionJob");
         LOG.info("Kafka Bootstrap: {}", KafkaConfig.KAFKA_BOOTSTRAP);
         LOG.info("输入 Topic: {}", KafkaConfig.TOPIC_VALIDATED_LOGS);
-        LOG.info("输出 Topics: {} / {} / {}",
-                KafkaConfig.TOPIC_ENRICHED_EVENTS, KafkaConfig.TOPIC_ALERTS, KafkaConfig.TOPIC_AUDIT_QUEUE);
+        LOG.info("输出 Topics: {} / {} / {} / {}",
+                KafkaConfig.TOPIC_ENRICHED_EVENTS, KafkaConfig.TOPIC_ALERTS,
+                KafkaConfig.TOPIC_AUDIT_QUEUE, KafkaConfig.TOPIC_CEP_PARTIAL);
 
         env.execute("AnomalyDetectionJob");
     }
@@ -339,13 +364,37 @@ public class AnomalyDetectionJob {
                 return null;
             }
 
-            // 收集攻击链中所有事件类型
+            // 收集攻击链中所有事件类型 + 证据链
             List<String> reasons = new ArrayList<>();
+            List<String> evidenceEventIds = new ArrayList<>();
+            List<Map<String, Object>> evidenceChain = new ArrayList<>();
+            long minTs = Long.MAX_VALUE;
+            long maxTs = Long.MIN_VALUE;
+
             reasons.add(description);
             for (Map.Entry<String, List<SecurityEvent>> entry : pattern.entrySet()) {
                 for (SecurityEvent evt : entry.getValue()) {
                     reasons.add(String.format("[%s] %s -> %s (%s)",
                             entry.getKey(), evt.getEventType(), evt.getDstIp(), evt.getMessage()));
+
+                    // 证据链：记录每个事件的 ID 和摘要
+                    if (evt.getEventId() != null) {
+                        evidenceEventIds.add(evt.getEventId());
+                    }
+                    Map<String, Object> snapshot = new HashMap<>();
+                    snapshot.put("step", entry.getKey());
+                    snapshot.put("eventId", evt.getEventId());
+                    snapshot.put("eventType", evt.getEventType());
+                    snapshot.put("severity", evt.getSeverity());
+                    snapshot.put("srcIp", evt.getSrcIp());
+                    snapshot.put("dstIp", evt.getDstIp());
+                    snapshot.put("message", evt.getMessage() != null ?
+                            evt.getMessage().substring(0, Math.min(evt.getMessage().length(), 200)) : "");
+                    snapshot.put("timestamp", evt.getTimestamp());
+                    evidenceChain.add(snapshot);
+
+                    minTs = Math.min(minTs, evt.getTimestamp());
+                    maxTs = Math.max(maxTs, evt.getTimestamp());
                 }
             }
 
@@ -357,40 +406,67 @@ public class AnomalyDetectionJob {
             alert.setSrcIp(firstEvent.getSrcIp());
             alert.setDstIp(firstEvent.getDstIp());
             alert.setMessage(description + " | 源IP: " + firstEvent.getSrcIp());
-            alert.setAnomalyScore(1.0); // 攻击链确认，最高分
+            alert.setAnomalyScore(1.0);
             alert.setAlertType("ATTACK_CHAIN");
             alert.setReasons(reasons);
             alert.setTimestamp(System.currentTimeMillis());
+            alert.setTraceId(firstEvent.getTraceId());
+            alert.setEvidenceEventIds(evidenceEventIds);
+            alert.setEvidenceChain(evidenceChain);
+            alert.setTimeSpanMs(maxTs > minTs ? maxTs - minTs : 0);
 
-            LOG.warn("🚨 攻击链检测 [{}]: srcIp={}, 事件数={}",
-                    chainName, firstEvent.getSrcIp(), reasons.size() - 1);
+            LOG.warn("🚨 攻击链检测 [{}]: srcIp={}, 证据={}个事件, 跨度={}ms",
+                    chainName, firstEvent.getSrcIp(),
+                    evidenceEventIds.size(), alert.getTimeSpanMs());
 
             return getMapper().writeValueAsString(alert);
         }
     }
 
-    // ==================== 异常评分函数 ====================
+    // ==================== 异常评分函数（增强版）====================
 
     /**
-     * 异常评分核心逻辑（按 srcIp 分组）
+     * 异常评分核心逻辑（按 srcIp 分组）— 增强版
      *
-     * 评分维度：
-     * 1. 频率异常：5分钟窗口内同一IP事件数 > 20 → +0.3
-     * 2. 严重级别权重：critical=1.0, high=0.6, medium=0.3, low=0.0, info=-0.05
-     * 3. 时间异常：凌晨 0-5 点活动 → +0.4
+     * 评分维度（含分数分解）：
+     * 1. 严重级别权重：critical=1.0, high=0.6, medium=0.3, low=0.0, info=-0.05
+     * 2. 频率异常（动态基线）：超过 mean + 2σ → +0.3（冷启动期用静态阈值 20）
+     * 3. 时间异常：凌晨 0-5 点 → +0.4
+     * 4. 资产重要性加成：dstIp 命中高价值资产 → ×1.3（通过 Broadcast 同步）
      *
-     * 综合评分 = min(1.0, max(0.0, severityWeight + frequencyBoost + timeBoost))
+     * 增强特性：
+     * - 动态基线：滑动均值/标准差，自适应每个 IP 的正常频率
+     * - 冷启动保护：前 10 条事件仅建基线，不触发告警
+     * - 告警风暴抑制：同 IP 5 分钟内最多 3 条告警
+     * - 评分可解释：rawData 中包含各维度分数分解
      */
     public static class AnomalyScoringFunction
             extends KeyedProcessFunction<String, SecurityEvent, String> {
 
-        /** 每个 IP 的累计事件计数 */
-        private transient ValueState<Long> eventCountState;
+        private static final int COLD_START_EVENTS = 10;   // 冷启动事件数
+        private static final int MAX_ALERTS_PER_WINDOW = 3; // 每 5 分钟最大告警数
+        private static final double FREQ_SIGMA_FACTOR = 2.0; // 频率异常 σ 倍数
 
-        /** 5 分钟窗口内的事件计数（窗口起始时间 → 计数）*/
+        private transient ValueState<Long> eventCountState;
         private transient MapState<Long, Long> windowCountState;
 
+        // ── 动态基线状态 ──
+        private transient ValueState<Double> freqMeanState;    // 频率均值
+        private transient ValueState<Double> freqM2State;      // Welford M2（方差计算）
+        private transient ValueState<Long> baselineSamples;    // 基线样本数
+
+        // ── 告警风暴抑制 ──
+        private transient ValueState<Long> alertWindowStart;   // 当前告警窗口起始
+        private transient ValueState<Integer> alertCountInWindow; // 窗口内告警数
+
         private transient ObjectMapper mapper;
+
+        // ── 数据质量指标 ──
+        private transient org.apache.flink.metrics.Counter totalEvents;
+        private transient org.apache.flink.metrics.Counter lateEvents;
+        private transient org.apache.flink.metrics.Counter alertEvents;
+        private transient org.apache.flink.metrics.Counter suppressedAlerts;
+        private transient org.apache.flink.metrics.Counter coldStartSkips;
 
         private ObjectMapper getMapper() {
             if (mapper == null) {
@@ -401,10 +477,59 @@ public class AnomalyDetectionJob {
 
         @Override
         public void open(Configuration parameters) {
-            eventCountState = getRuntimeContext().getState(
-                    new ValueStateDescriptor<>("ip-event-count", Types.LONG));
-            windowCountState = getRuntimeContext().getMapState(
-                    new MapStateDescriptor<>("window-counts", Types.LONG, Types.LONG));
+            org.apache.flink.api.common.state.StateTtlConfig stateTtl =
+                    org.apache.flink.api.common.state.StateTtlConfig.newBuilder(
+                                    org.apache.flink.api.common.time.Time.hours(2))
+                            .setUpdateType(org.apache.flink.api.common.state.StateTtlConfig.UpdateType.OnCreateAndWrite)
+                            .setStateVisibility(org.apache.flink.api.common.state.StateTtlConfig.StateVisibility.NeverReturnExpired)
+                            .cleanupInRocksdbCompactFilter(1000)
+                            .build();
+
+            ValueStateDescriptor<Long> countDesc =
+                    new ValueStateDescriptor<>("ip-event-count", Types.LONG);
+            countDesc.enableTimeToLive(stateTtl);
+            eventCountState = getRuntimeContext().getState(countDesc);
+
+            MapStateDescriptor<Long, Long> windowDesc =
+                    new MapStateDescriptor<>("window-counts", Types.LONG, Types.LONG);
+            windowDesc.enableTimeToLive(stateTtl);
+            windowCountState = getRuntimeContext().getMapState(windowDesc);
+
+            // 动态基线状态
+            ValueStateDescriptor<Double> meanDesc =
+                    new ValueStateDescriptor<>("freq-mean", Types.DOUBLE);
+            meanDesc.enableTimeToLive(stateTtl);
+            freqMeanState = getRuntimeContext().getState(meanDesc);
+
+            ValueStateDescriptor<Double> m2Desc =
+                    new ValueStateDescriptor<>("freq-m2", Types.DOUBLE);
+            m2Desc.enableTimeToLive(stateTtl);
+            freqM2State = getRuntimeContext().getState(m2Desc);
+
+            ValueStateDescriptor<Long> samplesDesc =
+                    new ValueStateDescriptor<>("baseline-samples", Types.LONG);
+            samplesDesc.enableTimeToLive(stateTtl);
+            baselineSamples = getRuntimeContext().getState(samplesDesc);
+
+            // 告警风暴抑制状态
+            ValueStateDescriptor<Long> alertWinDesc =
+                    new ValueStateDescriptor<>("alert-window-start", Types.LONG);
+            alertWinDesc.enableTimeToLive(stateTtl);
+            alertWindowStart = getRuntimeContext().getState(alertWinDesc);
+
+            ValueStateDescriptor<Integer> alertCntDesc =
+                    new ValueStateDescriptor<>("alert-count-in-window", Types.INT);
+            alertCntDesc.enableTimeToLive(stateTtl);
+            alertCountInWindow = getRuntimeContext().getState(alertCntDesc);
+
+            // Metrics
+            org.apache.flink.metrics.MetricGroup group =
+                    getRuntimeContext().getMetricGroup().addGroup("data_quality");
+            totalEvents = group.counter("scoring_total");
+            lateEvents = group.counter("scoring_late");
+            alertEvents = group.counter("scoring_alerts");
+            suppressedAlerts = group.counter("scoring_suppressed");
+            coldStartSkips = group.counter("scoring_coldstart_skip");
         }
 
         @Override
@@ -412,92 +537,175 @@ public class AnomalyDetectionJob {
                                    KeyedProcessFunction<String, SecurityEvent, String>.Context ctx,
                                    Collector<String> out) throws Exception {
 
+            totalEvents.inc();
+
+            // ========== 迟到数据检测 ==========
+            long currentWatermark = ctx.timerService().currentWatermark();
+            boolean isLate = event.getTimestamp() < currentWatermark;
+            if (isLate) {
+                lateEvents.inc();
+                Map<String, Object> raw = event.getRawData() != null ?
+                        event.getRawData() : new HashMap<>();
+                raw.put("_late", true);
+                raw.put("_lateMs", currentWatermark - event.getTimestamp());
+                event.setRawData(raw);
+            }
+
             List<String> anomalyReasons = new ArrayList<>();
-            double score = 0.0;
+            Map<String, Double> scoreBreakdown = new HashMap<>();
 
-            // ========== 维度 1: 严重级别权重 ==========
-            double severityWeight = getSeverityWeight(event.getSeverity());
-            score += severityWeight;
-            if (severityWeight >= 0.6) {
-                anomalyReasons.add(String.format("高严重级别事件: severity=%s (权重=%.2f)",
-                        event.getSeverity(), severityWeight));
-            }
-
-            // ========== 维度 2: 频率异常检测 ==========
-            // 更新累计计数
+            // ========== 冷启动检查 ==========
             Long currentCount = eventCountState.value();
-            if (currentCount == null) {
-                currentCount = 0L;
-            }
+            if (currentCount == null) currentCount = 0L;
             currentCount++;
             eventCountState.update(currentCount);
+            boolean inColdStart = currentCount <= COLD_START_EVENTS;
 
-            // 计算 5 分钟窗口计数
-            long windowStart = (event.getTimestamp() / 300000) * 300000; // 5分钟对齐
-            Long windowCount = windowCountState.get(windowStart);
-            if (windowCount == null) {
-                windowCount = 0L;
+            // ========== 维度 1: 严重级别权重 ==========
+            double severityScore = getSeverityWeight(event.getSeverity());
+            scoreBreakdown.put("severity", severityScore);
+            if (severityScore >= 0.6) {
+                anomalyReasons.add(String.format("高严重级别: severity=%s (分数=%.2f)",
+                        event.getSeverity(), severityScore));
             }
+
+            // ========== 维度 2: 频率异常（动态基线）==========
+            long windowStart = (event.getTimestamp() / 300000) * 300000;
+            Long windowCount = windowCountState.get(windowStart);
+            if (windowCount == null) windowCount = 0L;
             windowCount++;
             windowCountState.put(windowStart, windowCount);
-
-            // 清理过期窗口（保留最近 2 个窗口）
             cleanExpiredWindows(windowStart);
 
-            // 频率异常判定：5分钟内超过 20 个事件
-            if (windowCount > 20) {
-                score += 0.3;
-                anomalyReasons.add(String.format("频率异常: 5分钟内 %d 个事件 (阈值=20)", windowCount));
+            // 更新动态基线（Welford 在线算法）
+            updateBaseline(windowCount.doubleValue());
+
+            double frequencyScore = 0.0;
+            Double mean = freqMeanState.value();
+            Double m2 = freqM2State.value();
+            Long samples = baselineSamples.value();
+
+            if (samples != null && samples > COLD_START_EVENTS && mean != null && m2 != null) {
+                // 动态阈值: mean + 2σ
+                double stddev = Math.sqrt(m2 / samples);
+                double dynamicThreshold = mean + FREQ_SIGMA_FACTOR * stddev;
+                if (windowCount > dynamicThreshold) {
+                    frequencyScore = 0.3;
+                    anomalyReasons.add(String.format(
+                            "频率异常(动态): 5分钟 %d 事件 > 阈值 %.1f (μ=%.1f, σ=%.1f)",
+                            windowCount, dynamicThreshold, mean, stddev));
+                }
+                scoreBreakdown.put("frequency", frequencyScore);
+                scoreBreakdown.put("freq_mean", mean);
+                scoreBreakdown.put("freq_stddev", stddev);
+                scoreBreakdown.put("freq_threshold", dynamicThreshold);
+            } else {
+                // 冷启动期：使用静态阈值
+                if (windowCount > 20) {
+                    frequencyScore = 0.3;
+                    anomalyReasons.add(String.format(
+                            "频率异常(静态): 5分钟 %d 事件 > 阈值 20 (冷启动期)", windowCount));
+                }
+                scoreBreakdown.put("frequency", frequencyScore);
             }
 
-            // ========== 维度 3: 时间异常（凌晨活动）==========
+            // ========== 维度 3: 时间异常 ==========
             int hour = Instant.ofEpochMilli(event.getTimestamp())
                     .atZone(ZoneId.of("Asia/Shanghai"))
                     .getHour();
+            double timeScore = 0.0;
             if (hour >= 0 && hour < 5) {
-                score += 0.4;
-                anomalyReasons.add(String.format("凌晨异常活动: %d:00 (正常工作时间外)", hour));
+                timeScore = 0.4;
+                anomalyReasons.add(String.format("凌晨异常活动: %d:00 (分数=%.2f)", hour, timeScore));
             }
+            scoreBreakdown.put("time", timeScore);
 
-            // ========== 综合评分归一化 [0, 1] ==========
-            double anomalyScore = Math.min(1.0, Math.max(0.0, score));
+            // ========== 综合评分 ==========
+            double rawScore = severityScore + frequencyScore + timeScore;
+            double anomalyScore = Math.min(1.0, Math.max(0.0, rawScore));
+            scoreBreakdown.put("total", anomalyScore);
 
-            // ========== 将评分附加到事件的 rawData 中 ==========
+            // ========== 附加到 rawData ==========
             Map<String, Object> rawData = event.getRawData();
-            if (rawData == null) {
-                rawData = new HashMap<>();
-            }
+            if (rawData == null) rawData = new HashMap<>();
             rawData.put("_anomalyScore", anomalyScore);
             rawData.put("_anomalyReasons", anomalyReasons);
+            rawData.put("_scoreBreakdown", scoreBreakdown);
+            rawData.put("_coldStart", inColdStart);
             rawData.put("_eventCount", currentCount);
             rawData.put("_windowCount", windowCount);
             event.setRawData(rawData);
 
-            // ========== 序列化为 JSON ==========
             String enrichedJson = getMapper().writeValueAsString(event);
 
-            // ========== 路由逻辑 ==========
+            // ========== 路由逻辑（含冷启动保护 + 风暴抑制）==========
             String severity = event.getSeverity() != null ? event.getSeverity().toLowerCase() : "";
             boolean isHighSeverity = "critical".equals(severity) || "high".equals(severity);
+            boolean shouldAlert = (anomalyScore >= 0.6 || isHighSeverity) && !inColdStart;
 
-            if (anomalyScore >= 0.6 || isHighSeverity) {
-                // 高优先级 → security-alerts
-                AlertEvent alert = buildAlert(event, anomalyScore, anomalyReasons, "ANOMALY");
-                String alertJson = getMapper().writeValueAsString(alert);
-                ctx.output(ALERT_TAG, alertJson);
-            } else if (anomalyScore >= 0.3) {
-                // 中等风险 → security-audit-queue（LLM 审计）
+            if (inColdStart && (anomalyScore >= 0.6 || isHighSeverity)) {
+                coldStartSkips.inc();
+                anomalyReasons.add("冷启动保护: 基线建立中，跳过告警");
+            }
+
+            if (shouldAlert) {
+                // 告警风暴抑制：同 IP 5 分钟内最多 MAX_ALERTS_PER_WINDOW 条
+                if (isAlertSuppressed(event.getTimestamp())) {
+                    suppressedAlerts.inc();
+                    rawData.put("_alertSuppressed", true);
+                } else {
+                    alertEvents.inc();
+                    AlertEvent alert = buildAlert(event, anomalyScore, anomalyReasons, "ANOMALY");
+                    String alertJson = getMapper().writeValueAsString(alert);
+                    ctx.output(ALERT_TAG, alertJson);
+                }
+            } else if (anomalyScore >= 0.3 && !inColdStart) {
                 ctx.output(AUDIT_TAG, enrichedJson);
             }
 
-            // 所有事件都输出到 enriched 流（主流）
             out.collect(enrichedJson);
         }
 
-        /**
-         * 严重级别权重映射
-         * critical=1.0, high=0.6, medium=0.3, low=0.0, info=-0.05
-         */
+        /** Welford 在线算法更新基线 */
+        private void updateBaseline(double value) throws Exception {
+            Long n = baselineSamples.value();
+            if (n == null) n = 0L;
+            Double mean = freqMeanState.value();
+            if (mean == null) mean = 0.0;
+            Double m2 = freqM2State.value();
+            if (m2 == null) m2 = 0.0;
+
+            n++;
+            double delta = value - mean;
+            mean += delta / n;
+            double delta2 = value - mean;
+            m2 += delta * delta2;
+
+            baselineSamples.update(n);
+            freqMeanState.update(mean);
+            freqM2State.update(m2);
+        }
+
+        /** 告警风暴抑制检查 */
+        private boolean isAlertSuppressed(long eventTimestamp) throws Exception {
+            long windowStart = (eventTimestamp / 300000) * 300000;
+            Long currentWindowStart = alertWindowStart.value();
+            Integer count = alertCountInWindow.value();
+
+            if (currentWindowStart == null || currentWindowStart != windowStart) {
+                alertWindowStart.update(windowStart);
+                alertCountInWindow.update(1);
+                return false;
+            }
+
+            if (count != null && count >= MAX_ALERTS_PER_WINDOW) {
+                return true;
+            }
+
+            alertCountInWindow.update((count != null ? count : 0) + 1);
+            return false;
+        }
+
         private double getSeverityWeight(String severity) {
             if (severity == null) return 0.0;
             switch (severity.toLowerCase()) {
@@ -510,12 +718,8 @@ public class AnomalyDetectionJob {
             }
         }
 
-        /**
-         * 清理过期的窗口计数（只保留当前窗口和前一个窗口）
-         */
         private void cleanExpiredWindows(long currentWindowStart) throws Exception {
             long previousWindowStart = currentWindowStart - 300000;
-            // 遍历并删除比前一个窗口更早的条目
             List<Long> toRemove = new ArrayList<>();
             for (Map.Entry<Long, Long> entry : windowCountState.entries()) {
                 if (entry.getKey() < previousWindowStart) {
@@ -527,9 +731,6 @@ public class AnomalyDetectionJob {
             }
         }
 
-        /**
-         * 构建告警事件
-         */
         private AlertEvent buildAlert(SecurityEvent event, double score,
                                       List<String> reasons, String alertType) {
             AlertEvent alert = new AlertEvent();
@@ -544,6 +745,7 @@ public class AnomalyDetectionJob {
             alert.setAlertType(alertType);
             alert.setReasons(reasons);
             alert.setTimestamp(System.currentTimeMillis());
+            alert.setTraceId(event.getTraceId());
             return alert;
         }
     }

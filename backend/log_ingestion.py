@@ -27,8 +27,12 @@ from anomaly_detector import anomaly_detector
 from sliding_window import sliding_window
 from memory_tree import memory_tree
 from event_bus import event_bus
+from observability.pipeline_tracer import pipeline_tracer
 
 logger = logging.getLogger(__name__)
+
+# Prompt 版本追踪（修改 prompt 时递增）
+AUDIT_PROMPT_VERSION = "v2.1.0"
 
 
 class LogIngestor:
@@ -141,7 +145,8 @@ class LogIngestor:
             log_data["severity"] = severity
 
         # 1. 异常检测
-        anomaly_report = await anomaly_detector.analyze(log_data)
+        with pipeline_tracer.span("anomaly_detect", session_id=session_id):
+            anomaly_report = await anomaly_detector.analyze(log_data)
         log_data["_anomaly"] = {
             "score": anomaly_report.anomaly_score,
             "is_anomaly": anomaly_report.is_anomaly,
@@ -169,6 +174,13 @@ class LogIngestor:
             session, log_data, session_id,
             anomaly_score=anomaly_report.anomaly_score,
         )
+
+        # 2b. 案例自动聚合
+        try:
+            from case_manager import case_manager
+            await case_manager.auto_create_case(session, stored)
+        except Exception as case_err:
+            logger.warning(f"[Case] Auto-aggregation failed: {case_err}")
 
         # 3. 记忆树索引
         event_text = json.dumps(log_data, ensure_ascii=False)
@@ -286,13 +298,15 @@ class LogIngestor:
             )
         except asyncio.TimeoutError:
             logger.error(f"[Audit-LLM] Pipeline TIMEOUT (900s) for event #{event_id}")
-            await self._mark_analyzed(event_id, error="pipeline_timeout_300s")
+            await self._mark_analyzed(event_id, error="pipeline_timeout_900s")
+            await self._fallback_analysis(event_id, log_data, anomaly_report, "timeout")
         except Exception as e:
             logger.error(
                 f"[Audit-LLM] Pipeline crashed for event #{event_id}: {e}",
                 exc_info=True,
             )
             await self._mark_analyzed(event_id, error=str(e))
+            await self._fallback_analysis(event_id, log_data, anomaly_report, "crash")
 
     async def _mark_analyzed(self, event_id: int, error: str = ""):
         """确保事件被标记为已分析（即使管道失败）"""
@@ -311,6 +325,45 @@ class LogIngestor:
                     logger.info(f"[Audit-LLM] Event #{event_id} marked analyzed (error={error})")
         except Exception as e:
             logger.error(f"[Audit-LLM] Failed to mark event #{event_id} as analyzed: {e}")
+
+    async def _fallback_analysis(
+        self, event_id: int, log_data: dict, anomaly_report, reason: str
+    ):
+        """LLM 失败降级：用统计异常 + Sigma 结果生成轻量分析结论"""
+        try:
+            from models import async_session as db_session
+            sigma = log_data.get("_sigma", {})
+            threat_detected = (
+                anomaly_report.anomaly_score >= 0.6
+                or sigma.get("detected", False)
+            )
+            fallback_result = {
+                "prompt_version": AUDIT_PROMPT_VERSION,
+                "fallback": True,
+                "fallback_reason": reason,
+                "threat_detected": threat_detected,
+                "confidence": round(anomaly_report.anomaly_score, 4),
+                "severity": log_data.get("severity", "info"),
+                "anomaly_score": anomaly_report.anomaly_score,
+                "anomaly_reasons": anomaly_report.reasons[:5],
+                "sigma_detected": sigma.get("detected", False),
+                "sigma_attack_types": sigma.get("attack_types", []),
+                "note": f"LLM 管道失败({reason})，降级为统计+规则分析",
+            }
+            async with db_session() as session:
+                db_evt = await session.get(SecurityEvent, event_id)
+                if db_evt:
+                    db_evt.raw_data = {
+                        **(db_evt.raw_data or {}),
+                        "_audit_llm": fallback_result,
+                    }
+                    await session.commit()
+            logger.info(
+                f"[Audit-LLM] Fallback analysis for #{event_id}: "
+                f"threat={threat_detected} reason={reason}"
+            )
+        except Exception as e:
+            logger.error(f"[Audit-LLM] Fallback analysis failed for #{event_id}: {e}")
 
     async def _audit_pipeline_inner(
         self,
@@ -361,14 +414,15 @@ class LogIngestor:
                         )
 
                         # ── Layer 1: Decomposer ──
-                        decomp_output = await decomposer.decompose(
-                            event=log_data,
-                            session_id=session_id,
-                            anomaly_score=anomaly_report.anomaly_score,
-                            anomaly_reasons=anomaly_report.reasons,
-                            mode=mode,
-                            missed_threats=missed_threats,
-                        )
+                        with pipeline_tracer.span("decomposer", event_id=event_id, session_id=session_id):
+                            decomp_output = await decomposer.decompose(
+                                event=log_data,
+                                session_id=session_id,
+                                anomaly_score=anomaly_report.anomaly_score,
+                                anomaly_reasons=anomaly_report.reasons,
+                                mode=mode,
+                                missed_threats=missed_threats,
+                            )
                         depth = decomp_output.get("audit_depth", mode)
                         sub_tasks = decomp_output["sub_tasks"]
 
@@ -378,16 +432,18 @@ class LogIngestor:
                             break
 
                         # ── Layer 2: Tool Builder ──
-                        tool_calls = tool_builder.build(sub_tasks, session_id)
+                        with pipeline_tracer.span("tool_builder", event_id=event_id, session_id=session_id):
+                            tool_calls = tool_builder.build(sub_tasks, session_id)
 
                         # ── Layer 3: Executor ──
-                        audit_result = await executor.execute(
-                            tool_calls=tool_calls,
-                            session=session,
-                            session_id=session_id,
-                            raw_event=log_data,
-                            depth=depth,
-                        )
+                        with pipeline_tracer.span("executor", event_id=event_id, session_id=session_id):
+                            audit_result = await executor.execute(
+                                tool_calls=tool_calls,
+                                session=session,
+                                session_id=session_id,
+                                raw_event=log_data,
+                                depth=depth,
+                            )
 
                         tool_data_text = "\n".join(
                             f"[{tr.tool}] {'OK' if tr.success else 'FAIL'}: "
@@ -396,12 +452,13 @@ class LogIngestor:
                         )
 
                         # ── Layer 4: Reviewer ──
-                        verdict = await reviewer.review(
-                            raw_event=log_data,
-                            decomposer_output=decomp_output,
-                            audit_result=audit_result,
-                            tool_data_raw=tool_data_text,
-                        )
+                        with pipeline_tracer.span("reviewer", event_id=event_id, session_id=session_id):
+                            verdict = await reviewer.review(
+                                raw_event=log_data,
+                                decomposer_output=decomp_output,
+                                audit_result=audit_result,
+                                tool_data_raw=tool_data_text,
+                            )
 
                         # 记录本轮结果
                         round_data = {
@@ -465,6 +522,7 @@ class LogIngestor:
                         db_evt.raw_data = {
                             **(db_evt.raw_data or {}),
                             "_audit_llm": {
+                                "prompt_version": AUDIT_PROMPT_VERSION,
                                 "rounds": len(all_rounds),
                                 "max_rounds": max_rounds,
                                 "merged": merged,
@@ -535,10 +593,11 @@ class LogIngestor:
                                 from models import async_session as db_session
                                 async with db_session() as s:
                                     try:
-                                        await _resp_orch.on_threat_detected(
-                                            session=s, threat_info=threat_info,
-                                            event_id=evt_id, session_id=sid,
-                                        )
+                                        with pipeline_tracer.span("response", event_id=evt_id, session_id=sid):
+                                            await _resp_orch.on_threat_detected(
+                                                session=s, threat_info=threat_info,
+                                                event_id=evt_id, session_id=sid,
+                                            )
                                     except Exception as resp_err:
                                         logger.warning(f"[Response] Trigger failed for event #{evt_id}: {resp_err}")
 
@@ -557,9 +616,10 @@ class LogIngestor:
 
                     # ── CAD 独立审计 ──
                     try:
-                        cad_report = await cad_agent.audit_pipeline(
-                            session, event_id, db_evt.raw_data["_audit_llm"]
-                        )
+                        with pipeline_tracer.span("cad_verify", event_id=event_id, session_id=session_id):
+                            cad_report = await cad_agent.audit_pipeline(
+                                session, event_id, db_evt.raw_data["_audit_llm"]
+                            )
                         db_evt.raw_data["_cad_audit"] = {
                             "penetrating_verification": cad_report["penetrating_verification"],
                             "circuit_breaker": cad_report["circuit_breaker"],

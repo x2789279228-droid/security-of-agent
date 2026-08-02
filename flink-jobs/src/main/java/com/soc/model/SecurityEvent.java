@@ -64,6 +64,10 @@ public class SecurityEvent implements Serializable {
     @JsonProperty("timestamp")
     private long timestamp;
 
+    /** 全链路追踪 ID */
+    @JsonProperty("traceId")
+    private String traceId;
+
     /** 默认构造函数 - Jackson 反序列化需要 */
     public SecurityEvent() {
         this.rawData = new HashMap<>();
@@ -184,6 +188,14 @@ public class SecurityEvent implements Serializable {
 
     public void setTimestamp(long timestamp) {
         this.timestamp = timestamp;
+    }
+
+    public String getTraceId() {
+        return traceId;
+    }
+
+    public void setTraceId(String traceId) {
+        this.traceId = traceId;
     }
 
     @Override

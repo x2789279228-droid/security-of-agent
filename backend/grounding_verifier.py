@@ -66,10 +66,12 @@ _SEVERITY_KEYWORDS: dict[str, str] = {
 }
 
 # ── 综合评分权重 ──
-_WEIGHT_ID_VALIDITY = 0.2       # Layer 1: ID 存在性
-_WEIGHT_GROUNDING_RATIO = 0.5   # Layer 2: 字段值溯源（核心，权重最高）
-_WEIGHT_ENTITY_CONSISTENCY = 0.2  # Layer 3: 实体一致性
-_WEIGHT_KNOWLEDGE = 0.1         # Layer 4: 知识库支撑
+_WEIGHT_ID_VALIDITY = 0.15      # Layer 1: ID 存在性
+_WEIGHT_GROUNDING_RATIO = 0.40  # Layer 2: 字段值溯源（核心）
+_WEIGHT_ENTITY_CONSISTENCY = 0.15  # Layer 3: 实体一致性
+_WEIGHT_KNOWLEDGE = 0.10        # Layer 4: 知识库支撑
+_WEIGHT_FRESHNESS = 0.10        # Layer 5: 证据新鲜度
+_WEIGHT_CHAIN_INTEGRITY = 0.10  # Layer 6+7: 跨源一致性 + 链完整性
 
 # ── 判定阈值 ──
 _VERDICT_GROUNDED_THRESHOLD = 0.8
@@ -106,6 +108,18 @@ class ClaimGroundingReport:
 
     # Layer 4: 知识库一致性
     knowledge_supported: bool     # 威胁类型是否有知识库支撑
+
+    # Layer 5: 证据新鲜度
+    stale_evidence_ids: list[int] = field(default_factory=list)  # 过期证据 ID
+    freshness_score: float = 1.0  # 新鲜度得分 0-1
+
+    # Layer 6: 跨源冲突
+    cross_source_conflicts: list[str] = field(default_factory=list)  # 冲突描述
+    source_consistency: float = 1.0  # 跨源一致性 0-1
+
+    # Layer 7: 证据链完整性
+    chain_breaks: list[str] = field(default_factory=list)  # 断裂描述
+    chain_integrity: float = 1.0  # 链完整性 0-1
 
     # 综合评分
     grounding_score: float        # 加权综合得分 0-1
@@ -287,11 +301,28 @@ class GroundingVerifier:
         )
         knowledge_score = 1.0 if knowledge_supported else 0.0
 
+        # ── Layer 5: 证据新鲜度 ──
+        stale_ids, freshness = self._verify_evidence_freshness(
+            evidence_ids, event_index
+        )
+
+        # ── Layer 6: 跨源冲突 ──
+        conflicts, source_consistency = self._verify_cross_source_consistency(
+            referenced_events
+        )
+
+        # ── Layer 7: 证据链完整性 ──
+        chain_breaks, chain_integrity = self._verify_chain_integrity(
+            evidence_ids, event_index
+        )
+
         grounding_score = (
             id_validity_ratio * _WEIGHT_ID_VALIDITY
             + grounding_ratio * _WEIGHT_GROUNDING_RATIO
             + entity_consistency * _WEIGHT_ENTITY_CONSISTENCY
             + knowledge_score * _WEIGHT_KNOWLEDGE
+            + freshness * _WEIGHT_FRESHNESS
+            + (source_consistency * 0.5 + chain_integrity * 0.5) * _WEIGHT_CHAIN_INTEGRITY
         )
         grounding_score = round(min(max(grounding_score, 0.0), 1.0), 4)
 
@@ -325,6 +356,12 @@ class GroundingVerifier:
             phantom_ips=phantom_ips,
             entity_consistency=round(entity_consistency, 4),
             knowledge_supported=knowledge_supported,
+            stale_evidence_ids=stale_ids,
+            freshness_score=round(freshness, 4),
+            cross_source_conflicts=conflicts,
+            source_consistency=round(source_consistency, 4),
+            chain_breaks=chain_breaks,
+            chain_integrity=round(chain_integrity, 4),
             grounding_score=grounding_score,
             verdict=verdict,
         )
@@ -771,6 +808,180 @@ class GroundingVerifier:
             )
 
         return indicators
+
+    # ───────────────────────────────────────
+    # Layer 5: 证据新鲜度
+    # ───────────────────────────────────────
+
+    # 证据有效期：超过 24 小时的证据视为过期
+    _EVIDENCE_TTL_SECONDS = 86400
+
+    def _verify_evidence_freshness(
+        self,
+        evidence_ids: list[int],
+        event_index: dict[int, dict],
+    ) -> tuple[list[int], float]:
+        """
+        检查引用证据的时间戳是否在有效期内
+
+        安全逻辑：LLM 可能引用数小时甚至数天前的旧事件作为当前威胁的证据，
+        导致基于过期情报做出响应决策。
+
+        Returns:
+            (stale_ids, freshness_score)
+        """
+        import time as _time
+        if not evidence_ids:
+            return [], 1.0
+
+        now = _time.time()
+        stale_ids = []
+        for eid in evidence_ids:
+            event = event_index.get(eid)
+            if not event:
+                continue
+            ts = event.get("timestamp") or event.get("created_at")
+            if ts is None:
+                continue
+            # 支持 epoch millis 和 epoch seconds
+            if isinstance(ts, (int, float)):
+                ts_sec = ts / 1000 if ts > 1e12 else ts
+                age = now - ts_sec
+                if age > self._EVIDENCE_TTL_SECONDS:
+                    stale_ids.append(eid)
+
+        freshness = 1.0 - (len(stale_ids) / max(len(evidence_ids), 1))
+        return stale_ids, max(freshness, 0.0)
+
+    # ───────────────────────────────────────
+    # Layer 6: 跨源冲突
+    # ───────────────────────────────────────
+
+    def _verify_cross_source_consistency(
+        self,
+        referenced_events: list[dict],
+    ) -> tuple[list[str], float]:
+        """
+        检测引用事件之间是否存在跨源冲突
+
+        安全逻辑：不同数据源可能对同一事件给出矛盾描述。
+        例如源 A 报告 "登录成功"，源 B 报告 "登录失败"（同一 IP 同一时间）。
+
+        检测维度：
+        1. 同一 src_ip 的 severity 矛盾（info vs critical）
+        2. 同一 src_ip 的 event_type 矛盾（USER_LOGIN vs BRUTE_FORCE）
+
+        Returns:
+            (conflicts, source_consistency)
+        """
+        if len(referenced_events) < 2:
+            return [], 1.0
+
+        conflicts = []
+        # 按 src_ip 分组
+        by_ip: dict[str, list[dict]] = {}
+        for evt in referenced_events:
+            src = evt.get("src_ip", "")
+            if src:
+                by_ip.setdefault(src, []).append(evt)
+
+        conflict_count = 0
+        for ip, events in by_ip.items():
+            if len(events) < 2:
+                continue
+            severities = {str(e.get("severity", "")).lower() for e in events}
+            event_types = {str(e.get("event_type", "")).upper() for e in events}
+
+            # severity 矛盾：同时有 info 和 critical/high
+            if "info" in severities and ("critical" in severities or "high" in severities):
+                conflicts.append(
+                    f"IP {ip}: severity 矛盾 ({severities})，"
+                    f"同一源同时有 info 和高危事件"
+                )
+                conflict_count += 1
+
+            # event_type 矛盾：LOGIN 和 BRUTE_FORCE 同时出现
+            login_types = {"USER_LOGIN", "SUSPICIOUS_LOGIN"}
+            attack_types = {"BRUTE_FORCE", "PORT_SCAN", "C2_BEACON"}
+            if (event_types & login_types) and (event_types & attack_types):
+                conflicts.append(
+                    f"IP {ip}: 行为矛盾 ({event_types})，"
+                    f"同一源同时有正常登录和攻击事件"
+                )
+                conflict_count += 1
+
+        total_pairs = sum(len(evts) * (len(evts) - 1) // 2 for evts in by_ip.values())
+        consistency = 1.0 - (conflict_count / max(total_pairs, 1))
+        return conflicts, max(consistency, 0.0)
+
+    # ───────────────────────────────────────
+    # Layer 7: 证据链完整性
+    # ───────────────────────────────────────
+
+    def _verify_chain_integrity(
+        self,
+        evidence_ids: list[int],
+        event_index: dict[int, dict],
+    ) -> tuple[list[str], float]:
+        """
+        检测证据链的连续性和时序逻辑
+
+        安全逻辑：攻击链证据应按时间顺序排列。
+        如果引用的事件 ID 存在但时间戳乱序，可能表示 LLM 拼凑了不相关的事件。
+
+        检测维度：
+        1. ID 连续性：引用的 ID 是否大致连续（允许间隔，但不应跳跃过大）
+        2. 时序一致性：事件时间戳是否按引用顺序递增
+
+        Returns:
+            (chain_breaks, chain_integrity)
+        """
+        if len(evidence_ids) < 2:
+            return [], 1.0
+
+        breaks = []
+
+        # 时序一致性检查
+        timestamps = []
+        for eid in evidence_ids:
+            event = event_index.get(eid)
+            if event:
+                ts = event.get("timestamp") or event.get("created_at")
+                if ts is not None:
+                    if isinstance(ts, (int, float)):
+                        timestamps.append(ts / 1000 if ts > 1e12 else ts)
+                    else:
+                        timestamps.append(None)
+                else:
+                    timestamps.append(None)
+            else:
+                timestamps.append(None)
+
+        # 检查时序递增（忽略 None）
+        valid_ts = [(i, t) for i, t in enumerate(timestamps) if t is not None]
+        time_reversals = 0
+        for j in range(1, len(valid_ts)):
+            if valid_ts[j][1] < valid_ts[j - 1][1]:
+                idx_prev = evidence_ids[valid_ts[j - 1][0]]
+                idx_curr = evidence_ids[valid_ts[j][0]]
+                breaks.append(
+                    f"时序倒置: 事件 #{idx_curr} 早于 #{idx_prev}，"
+                    f"证据链时间顺序不一致"
+                )
+                time_reversals += 1
+
+        # ID 跳跃检查（相邻 ID 差距 > 100 视为断裂）
+        for j in range(1, len(evidence_ids)):
+            gap = abs(evidence_ids[j] - evidence_ids[j - 1])
+            if gap > 100:
+                breaks.append(
+                    f"ID 跳跃: #{evidence_ids[j-1]} → #{evidence_ids[j]} "
+                    f"(间隔 {gap})，证据链可能不连续"
+                )
+
+        total_checks = max(len(evidence_ids) - 1, 1)
+        integrity = 1.0 - (len(breaks) / (total_checks * 2))  # 每个检查点最多 2 种断裂
+        return breaks, max(integrity, 0.0)
 
 
 # ── 全局单例 ──

@@ -1,0 +1,21 @@
+{
+  "type": "record",
+  "name": "SecurityEvent",
+  "namespace": "com.soc.schema",
+  "doc": "安全事件 Schema — 所有 Kafka topic 的规范消息格式",
+  "fields": [
+    {"name": "eventId", "type": "string", "doc": "事件唯一标识 (UUID)"},
+    {"name": "sourceId", "type": "string", "doc": "日志来源标识"},
+    {"name": "apiKey", "type": "string", "doc": "数据源认证密钥"},
+    {"name": "eventType", "type": "string", "doc": "事件类型枚举 (PORT_SCAN, BRUTE_FORCE, C2_BEACON 等)"},
+    {"name": "severity", "type": {"type": "enum", "name": "Severity", "symbols": ["info", "low", "medium", "high", "critical"]}, "doc": "严重级别"},
+    {"name": "srcIp", "type": ["null", "string"], "default": null, "doc": "源 IP (IPv4)"},
+    {"name": "dstIp", "type": ["null", "string"], "default": null, "doc": "目标 IP (IPv4)"},
+    {"name": "protocol", "type": ["null", "string"], "default": null, "doc": "协议类型 (小写)"},
+    {"name": "message", "type": "string", "doc": "事件描述 (最长 500 字符)"},
+    {"name": "confidence", "type": "double", "default": 50.0, "doc": "置信度 [0, 100]"},
+    {"name": "timestamp", "type": "long", "doc": "事件时间戳 (epoch millis, 2020~2030)"},
+    {"name": "traceId", "type": ["null", "string"], "default": null, "doc": "全链路追踪 ID"},
+    {"name": "rawData", "type": ["null", {"type": "map", "values": ["null", "string", "long", "double", "boolean"]}], "default": null, "doc": "原始日志字段 (透传)"}
+  ]
+}

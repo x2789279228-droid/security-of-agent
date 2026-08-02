@@ -19,6 +19,7 @@
    - 熔断后限制风险扩散
 """
 import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -302,7 +303,7 @@ class ContextAuditor:
 
 @dataclass
 class CircuitBreakerState:
-    """熔断器状态"""
+    """熔断器状态（阈值支持环境变量覆盖）"""
     tripped: bool = False
     tripped_at: float = 0.0
     reason: str = ""
@@ -312,12 +313,17 @@ class CircuitBreakerState:
     audit_count: int = 0
     anomaly_rate: float = 0.0
 
-    # 阈值
-    MAX_HALLUCINATION_RISK: float = 0.5       # 平均幻觉风险超过此值 → 熔断
-    MIN_EVIDENCE_COMPLETENESS: float = 0.3    # 证据完整度低于此值 → 熔断
-    CONSECUTIVE_BAD_AUDITS: int = 5           # 连续 N 次审核质量差 → 熔断
-    WARMUP_AUDITS: int = 10                   # 预热期：前 N 次审计不触发熔断
-    COOLDOWN_SECONDS: float = 300             # 熔断后冷却期（秒），到期自动半开
+    # 阈值（环境变量 SHARED_MEMORY_CAD_* 覆盖）
+    MAX_HALLUCINATION_RISK: float = field(default_factory=lambda: float(
+        os.environ.get("SHARED_MEMORY_CAD_MAX_HALLUCINATION_RISK", "0.5")))
+    MIN_EVIDENCE_COMPLETENESS: float = field(default_factory=lambda: float(
+        os.environ.get("SHARED_MEMORY_CAD_MIN_EVIDENCE_COMPLETENESS", "0.3")))
+    CONSECUTIVE_BAD_AUDITS: int = field(default_factory=lambda: int(
+        os.environ.get("SHARED_MEMORY_CAD_CONSECUTIVE_BAD_AUDITS", "5")))
+    WARMUP_AUDITS: int = field(default_factory=lambda: int(
+        os.environ.get("SHARED_MEMORY_CAD_WARMUP_AUDITS", "10")))
+    COOLDOWN_SECONDS: float = field(default_factory=lambda: float(
+        os.environ.get("SHARED_MEMORY_CAD_COOLDOWN_SECONDS", "300")))
 
 
 class CircuitBreaker:
@@ -335,6 +341,10 @@ class CircuitBreaker:
     def __init__(self):
         self.state = CircuitBreakerState()
         self._bad_count = 0
+        # CAD 自身准确率追踪
+        self._cad_decisions: list[dict] = []  # {event_id, tripped, overridden, timestamp}
+        self._override_count = 0
+        self._false_trip_count = 0
 
     def record_audit_result(
         self,
@@ -430,6 +440,59 @@ class CircuitBreaker:
         self.state.reason = ""
         self._bad_count = 0
 
+    def update_thresholds(self, **kwargs) -> dict:
+        """运行时更新熔断阈值"""
+        updated = {}
+        field_map = {
+            "max_hallucination_risk": "MAX_HALLUCINATION_RISK",
+            "min_evidence_completeness": "MIN_EVIDENCE_COMPLETENESS",
+            "consecutive_bad_audits": "CONSECUTIVE_BAD_AUDITS",
+            "warmup_audits": "WARMUP_AUDITS",
+            "cooldown_seconds": "COOLDOWN_SECONDS",
+        }
+        for api_key, attr in field_map.items():
+            if api_key in kwargs and kwargs[api_key] is not None:
+                old_val = getattr(self.state, attr)
+                setattr(self.state, attr, type(old_val)(kwargs[api_key]))
+                updated[api_key] = {"old": old_val, "new": getattr(self.state, attr)}
+        if updated:
+            logger.info(f"[CAD] Thresholds updated: {updated}")
+        return updated
+
+    def record_decision(self, event_id: int, tripped: bool):
+        """记录 CAD 决策（用于自身准确率评估）"""
+        self._cad_decisions.append({
+            "event_id": event_id,
+            "tripped": tripped,
+            "overridden": False,
+            "timestamp": time.time(),
+        })
+        if len(self._cad_decisions) > 500:
+            self._cad_decisions = self._cad_decisions[-500:]
+
+    def record_override(self, event_id: int):
+        """记录人工 override（标记 CAD 误报）"""
+        self._override_count += 1
+        for d in self._cad_decisions:
+            if d["event_id"] == event_id and d["tripped"]:
+                d["overridden"] = True
+                self._false_trip_count += 1
+                break
+        logger.info(f"[CAD] Override recorded for event #{event_id}")
+
+    def accuracy_stats(self) -> dict:
+        """CAD 自身准确率统计"""
+        total_trips = sum(1 for d in self._cad_decisions if d["tripped"])
+        overridden = sum(1 for d in self._cad_decisions if d.get("overridden"))
+        accuracy = 1.0 - (overridden / max(total_trips, 1))
+        return {
+            "total_decisions": len(self._cad_decisions),
+            "total_trips": total_trips,
+            "overridden": overridden,
+            "false_trip_rate": round(overridden / max(total_trips, 1), 4),
+            "accuracy": round(accuracy, 4),
+        }
+
     def get_status(self) -> dict:
         """获取熔断器状态"""
         return {
@@ -453,6 +516,7 @@ class CircuitBreaker:
                 "warmup_audits": self.state.WARMUP_AUDITS,
                 "cooldown_seconds": self.state.COOLDOWN_SECONDS,
             },
+            "accuracy": self.accuracy_stats(),
         }
 
 

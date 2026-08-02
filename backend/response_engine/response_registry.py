@@ -78,8 +78,6 @@ class ResponseRegistry:
         self._actions: dict[str, ResponseActionDef] = {}
         self._exec_fns: dict[str, Callable[..., Coroutine]] = {}
         self._rollback_fns: dict[str, Callable[..., Coroutine]] = {}
-        # 幂等性缓存: action_name:param_key → rollback_token
-        self._idempotent_cache: dict[str, str] = {}
 
     def register(
         self,
@@ -122,17 +120,13 @@ class ResponseRegistry:
         return list(self._actions.values())
 
     async def execute(self, name: str, **kwargs) -> dict:
-        """执行动作，返回 {success, result, rollback_token}"""
+        """执行动作，返回 {success, result, rollback_token}
+
+        幂等检查已移至 SafeExecutor（Redis 持久化），此处不再做内存幂等。
+        """
         action = self._actions.get(name)
         if not action:
             raise ValueError(f"Unknown action: {name}")
-
-        # 幂等性检查
-        param_key = f"{name}:{hash(frozenset(kwargs.items()))}"
-        if param_key in self._idempotent_cache:
-            token = self._idempotent_cache[param_key]
-            logger.info(f"Idempotent check: {param_key} already executed, token={token}")
-            return {"success": True, "idempotent": True, "rollback_token": token}
 
         fn = self._exec_fns.get(name)
         if not fn:
@@ -142,7 +136,6 @@ class ResponseRegistry:
             import asyncio
             result = await asyncio.wait_for(fn(**kwargs), timeout=action.timeout_ms / 1000)
             rollback_token = f"rb_{name}_{kwargs.get('src_ip', kwargs.get('target', 'unknown'))}_{int(__import__('time').time())}"
-            self._idempotent_cache[param_key] = rollback_token
             logger.info(f"Action {name} executed: {str(result)[:100]}")
             return {
                 "success": True,
@@ -235,23 +228,40 @@ def _ps_cmd(script: str) -> str:
 
 async def _exec(cmd: str, action: str, **fields) -> dict:
     """
-    统一执行入口:
-      - ssh 模式 → 通过 SSH 在宿主机执行
-      - stub 模式 → 只打日志
-      - auto 模式 → 尝试 SSH，失败回退 stub
+    统一执行入口 — 通过 SafeExecutor 安全层路由
+
+    安全检查链: 命令白名单 → 参数校验 → 资产保护 → 幂等 → 模式路由 → 执行 → 验证
     """
-    mode = _mode()
-    if mode == "ssh" or (mode == "auto" and ssh_transport.enabled):
-        result = await ssh_transport.run(cmd, powershell=False)
-        if result["success"]:
-            logger.info(f"[SSH] {action} OK: {result['stdout'][:100]}")
-            return {"action": action, "mode": "ssh", **fields, **result}
-        elif mode == "ssh":
-            logger.error(f"[SSH] {action} FAILED: {result['stderr'][:200]}")
-            return {"action": action, "mode": "ssh", "success": False, **fields, **result}
-        else:
-            logger.warning(f"[SSH] {action} failed, fallback to stub: {result['stderr'][:100]}")
-    return await _stub_fallback(action, **fields)
+    from .safe_executor import safe_executor
+
+    # 提取 TTL 和 rule_id 参数（如果动作函数传入了）
+    ttl_seconds = fields.pop("_ttl_seconds", 0)
+    rule_id = fields.pop("_rule_id", "")
+
+    async def _live_fn(command: str) -> dict:
+        """真实 SSH 执行（保留原有 stub 回退逻辑）"""
+        mode = _mode()
+        if mode == "ssh" or (mode == "auto" and ssh_transport.enabled):
+            result = await ssh_transport.run(command, powershell=False)
+            if result["success"]:
+                logger.info(f"[SSH] {action} OK: {result['stdout'][:100]}")
+                return {"action": action, "mode": "ssh", **fields, **result}
+            elif mode == "ssh":
+                logger.error(f"[SSH] {action} FAILED: {result['stderr'][:200]}")
+                return {"action": action, "mode": "ssh", "success": False, **fields, **result}
+            else:
+                logger.warning(f"[SSH] {action} failed, fallback to stub: {result['stderr'][:100]}")
+        return await _stub_fallback(action, **fields)
+
+    return await safe_executor.execute(
+        action_name=action,
+        command=cmd,
+        params=fields,
+        platform="windows",
+        live_fn=_live_fn,
+        ttl_seconds=ttl_seconds,
+        rule_id=rule_id,
+    )
 
 
 # ── 1. block_ip / unblock_ip (Windows 防火墙) ──

@@ -12,6 +12,7 @@ const Monitor = lazy(() => import('./pages/Monitor'))
 const SecurityAudit = lazy(() => import('./pages/SecurityAudit'))
 const Response = lazy(() => import('./pages/Response'))
 const RAG = lazy(() => import('./pages/RAG'))
+const Operations = lazy(() => import('./pages/Operations'))
 
 function PageLoader() {
   return (
@@ -40,6 +41,7 @@ export default function App() {
           <Route path={ROUTES.MONITOR} element={<Suspense fallback={<PageLoader />}><Monitor /></Suspense>} />
           <Route path={ROUTES.SECURITY_AUDIT} element={<Suspense fallback={<PageLoader />}><SecurityAudit /></Suspense>} />
           <Route path={ROUTES.RESPONSE} element={<Suspense fallback={<PageLoader />}><Response /></Suspense>} />
+          <Route path={ROUTES.OPERATIONS} element={<Suspense fallback={<PageLoader />}><Operations /></Suspense>} />
           <Route path={ROUTES.RAG} element={<Suspense fallback={<PageLoader />}><RAG /></Suspense>} />
         </Route>
       </Routes>

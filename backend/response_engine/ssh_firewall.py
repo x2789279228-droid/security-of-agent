@@ -5,6 +5,12 @@ SSH 防火墙适配器 — 通过 SSH 连接 Linux 虚拟机执行 iptables 真�
   - transport.py: 通用 SSH 传输（Windows PowerShell 命令）
   - ssh_firewall.py: 专用 Linux iptables 防火墙操作（本模块）
 
+安全加固:
+  - 命令白名单: _exec() 中所有命令必须通过 CommandWhitelist 检查
+  - 参数强校验: block_ip/isolate_host 对 IP 做 ipaddress 严格校验
+  - 核心资产保护: 封禁/隔离前检查 AssetWhitelist
+  - 最小权限: nmap/list_rules 等只读操作不加 sudo
+
 能力：
   - block_ip: iptables DROP 封禁 + rule_id 追踪
   - isolate_host: 入站+出站全隔离
@@ -22,6 +28,7 @@ SSH 防火墙适配器 — 通过 SSH 连接 Linux 虚拟机执行 iptables 真�
   SHARED_MEMORY_FW_USE_SUDO      是否使用 sudo (默认 true)
 """
 import asyncio
+import ipaddress
 import logging
 import random
 import time
@@ -94,7 +101,7 @@ class SshFirewallAdapter:
         )
         self._client = client
         self._connected = True
-        info = self._exec("uname -a; echo '---'; iptables --version 2>/dev/null || echo 'iptables NOT FOUND'")
+        info = self._exec("uname -a; echo '---'; iptables --version 2>/dev/null || echo 'iptables NOT FOUND'", skip_whitelist=True)
         logger.info(f"SSH firewall connected: {cfg['username']}@{cfg['host']}:{cfg['port']}")
         return info
 
@@ -105,13 +112,23 @@ class SshFirewallAdapter:
             self._client = None
             self._connected = False
 
-    def _exec(self, cmd: str, timeout: Optional[int] = None) -> str:
-        """执行命令并返回 stdout"""
+    def _exec(self, cmd: str, timeout: Optional[int] = None, skip_whitelist: bool = False) -> str:
+        """执行命令并返回 stdout（含命令白名单检查）"""
         if self._client is None:
             raise RuntimeError("SSH 未连接，请先调用 connect()")
+
+        # 命令白名单检查
+        if not skip_whitelist:
+            from .command_whitelist import command_whitelist
+            allowed, rule_id, reason = command_whitelist.check(cmd, platform="linux")
+            if not allowed:
+                raise RuntimeError(f"命令白名单拒绝: {reason} (命令: {cmd[:100]})")
+
         t = timeout or self._config["exec_timeout"]
+        # 最小权限: 仅 iptables 命令加 sudo，nmap/诊断命令不加
         if self._config["use_sudo"] and not cmd.startswith("sudo"):
-            cmd = f"sudo {cmd}"
+            if cmd.startswith("iptables") or cmd.startswith("iptables "):
+                cmd = f"sudo {cmd}"
         stdin, stdout, stderr = self._client.exec_command(cmd, timeout=t)
         out = stdout.read().decode("utf-8", errors="ignore")
         err = stderr.read().decode("utf-8", errors="ignore")
@@ -123,7 +140,19 @@ class SshFirewallAdapter:
     # ── 防火墙 API ──
 
     def block_ip(self, ip: str, duration: int = 3600) -> dict:
-        """通过 iptables 封禁 IP"""
+        """通过 iptables 封禁 IP（含参数校验 + 核心资产保护）"""
+        # 参数强校验
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return {"status": "error", "message": f"非法 IP 地址: {ip}"}
+
+        # 核心资产保护
+        from .asset_whitelist import asset_whitelist
+        is_protected, reason = asset_whitelist.check(ip, "block_ip")
+        if is_protected:
+            return {"status": "blocked", "message": reason}
+
         rule_id = f"FW-RULE-{random.randint(10000, 99999)}"
         cmd = f"iptables -I INPUT -s {ip} -j DROP -m comment --comment '{rule_id}'"
         self._exec(cmd)
@@ -143,7 +172,19 @@ class SshFirewallAdapter:
         }
 
     def isolate_host(self, host: str, isolation_type: str = "network") -> dict:
-        """通过 iptables 阻断主机所有流量"""
+        """通过 iptables 阻断主机所有流量（含参数校验 + 核心资产保护）"""
+        # 参数强校验
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return {"status": "error", "message": f"非法 IP 地址: {host}"}
+
+        # 核心资产保护
+        from .asset_whitelist import asset_whitelist
+        is_protected, reason = asset_whitelist.check(host, "isolate_host")
+        if is_protected:
+            return {"status": "blocked", "message": reason}
+
         isolation_id = f"EDR-ISO-{random.randint(10000, 99999)}"
         cmds = [
             f"iptables -I INPUT -s {host} -j DROP -m comment --comment '{isolation_id}'",

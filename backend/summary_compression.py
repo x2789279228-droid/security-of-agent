@@ -3,6 +3,8 @@ import logging
 import hashlib
 import time
 import re
+from collections import defaultdict
+from datetime import date
 from typing import Optional
 
 import httpx
@@ -23,14 +25,55 @@ def estimate_tokens(text: str) -> int:
     return chinese + int(other / 2) + 1
 
 
+class CostTracker:
+    """LLM 成本追踪器 — 每日预算 + 每事件费用"""
+
+    def __init__(self, daily_budget_tokens: int = 5_000_000):
+        self.daily_budget = daily_budget_tokens
+        self._daily_usage: dict[str, int] = defaultdict(int)  # date → total_tokens
+        self._event_costs: dict[int, int] = {}  # event_id → total_tokens
+        self._call_count: dict[str, int] = defaultdict(int)  # date → call_count
+
+    def record(self, tokens: int, event_id: int = 0):
+        today = date.today().isoformat()
+        self._daily_usage[today] += tokens
+        self._call_count[today] += 1
+        if event_id:
+            self._event_costs[event_id] = self._event_costs.get(event_id, 0) + tokens
+
+    def is_over_budget(self) -> bool:
+        today = date.today().isoformat()
+        return self._daily_usage[today] >= self.daily_budget
+
+    def remaining_budget(self) -> int:
+        today = date.today().isoformat()
+        return max(0, self.daily_budget - self._daily_usage[today])
+
+    def stats(self) -> dict:
+        today = date.today().isoformat()
+        return {
+            "daily_budget": self.daily_budget,
+            "today_usage": self._daily_usage.get(today, 0),
+            "today_calls": self._call_count.get(today, 0),
+            "remaining": self.remaining_budget(),
+            "over_budget": self.is_over_budget(),
+            "tracked_events": len(self._event_costs),
+        }
+
+
+cost_tracker = CostTracker()
+
+
 class LLMClient:
-    """LLM 客户端 — 支持重试与降级"""
+    """LLM 客户端 — 支持重试、降级、成本控制、响应缓存"""
 
     def __init__(self):
         self.api_key = settings.llm_api_key
         self.base_url = settings.llm_base_url.rstrip("/")
         self.model = settings.llm_model
         self.client: httpx.AsyncClient | None = None
+        self._response_cache: dict[str, tuple[str, float]] = {}  # key → (response, timestamp)
+        self._cache_ttl = 600  # 10 分钟缓存
 
     async def ensure_client(self):
         if self.client is None:
@@ -39,11 +82,39 @@ class LLMClient:
             )
 
     async def chat(self, messages: list[dict], temperature: float = 0.3) -> str:
-        from trace_hook import emit_trace
+        from trace_hook import emit_trace, get_trace_context
 
         t_start = time.time()
         prompt_text = "\n".join(m.get("content", "") for m in messages)
         prompt_tokens = estimate_tokens(prompt_text)
+        ctx = get_trace_context()
+        event_id = int(ctx.get("event_id", 0) or 0)
+
+        # 成本检查：超预算时降级
+        if cost_tracker.is_over_budget():
+            logger.warning(f"[CostControl] Daily budget exhausted, returning fallback")
+            emit_trace(
+                status="error", error_type="budget_exhausted",
+                prompt_tokens=prompt_tokens,
+                latency_ms=(time.time() - t_start) * 1000,
+            )
+            return json.dumps({
+                "error": "每日 LLM 预算已用尽", "fallback": True,
+                "budget_stats": cost_tracker.stats(),
+            }, ensure_ascii=False)
+
+        # 响应缓存（相同 prompt + temperature → 缓存响应）
+        cache_key = hashlib.md5(
+            f"{prompt_text}:{temperature}".encode("utf-8")
+        ).hexdigest()
+        cached = self._response_cache.get(cache_key)
+        if cached and (time.time() - cached[1]) < self._cache_ttl:
+            emit_trace(
+                status="success", cache_hit=True,
+                prompt_tokens=prompt_tokens, completion_tokens=0, total_tokens=0,
+                latency_ms=(time.time() - t_start) * 1000,
+            )
+            return cached[0]
 
         if not self.api_key:
             logger.warning("LLM API key not configured, returning fallback")
@@ -75,14 +146,29 @@ class LLMClient:
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
                 usage = data.get("usage") or {}
+                total_tokens = int(usage.get("total_tokens", 0)) or (
+                    prompt_tokens + estimate_tokens(content)
+                )
+
+                # 成本记录
+                cost_tracker.record(total_tokens, event_id=event_id)
+
+                # 缓存响应
+                self._response_cache[cache_key] = (content, time.time())
+                # 清理过期缓存
+                if len(self._response_cache) > 200:
+                    now = time.time()
+                    self._response_cache = {
+                        k: v for k, v in self._response_cache.items()
+                        if now - v[1] < self._cache_ttl
+                    }
+
                 emit_trace(
                     status="success",
                     model=self.model,
                     prompt_tokens=int(usage.get("prompt_tokens", prompt_tokens)),
                     completion_tokens=int(usage.get("completion_tokens", estimate_tokens(content))),
-                    total_tokens=int(usage.get("total_tokens", 0)) or (
-                        prompt_tokens + estimate_tokens(content)
-                    ),
+                    total_tokens=total_tokens,
                     latency_ms=(time.time() - t_start) * 1000,
                     retry_count=retries,
                 )

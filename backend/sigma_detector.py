@@ -26,6 +26,8 @@ Sigma 风格检测引擎 — 规则化安全检测（检测能力核心）
 """
 import logging
 import re
+import time
+from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
@@ -34,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SigmaRule:
-    """Sigma 检测规则"""
+    """Sigma 检测规则（增强版）"""
     rule_id: str
     name: str
     description: str
@@ -44,6 +46,12 @@ class SigmaRule:
     action_recommend: str               # block_ip / require_confirmation / alert
     conditions: dict                    # 匹配条件
     boost_conditions: Optional[dict] = None  # 威胁加成条件
+    # ── 增强字段 ──
+    enabled: bool = True                # 启用/停用
+    shadow_mode: bool = False           # 灰度模式（仅记录不告警）
+    mitre_attack_id: str = ""           # ATT&CK 技术 ID (如 T1110)
+    mitre_tactic: str = ""             # ATT&CK 战术 (如 credential-access)
+    aggregation: Optional[dict] = None  # 聚合条件 {"func":"count","field":"src_ip","op":">","threshold":5,"timeframe":"5m"}
 
 
 @dataclass
@@ -64,14 +72,26 @@ class DetectionResult:
 
 class SigmaDetector:
     """
-    Sigma 风格检测引擎
+    Sigma 风格检测引擎（增强版）
 
     纯规则匹配，无 LLM 调用，延迟 < 1ms。
-    适合在数据接入层做第一道快速筛查。
+    增强: 聚合规则 + timeframe + 字段映射 + ATT&CK + 灰度。
     """
+
+    # ── 字段映射表（日志源字段 → 标准字段）──
+    FIELD_MAP = {
+        "eventType": "event", "event_type": "event",
+        "srcIp": "src_ip", "source_ip": "src_ip", "xffClientIp": "src_ip",
+        "dstIp": "dst_ip", "dest_ip": "dst_ip", "host": "dst_ip",
+        "msg": "message", "description": "message",
+        "proto": "protocol",
+        "sev": "severity", "level": "severity",
+    }
 
     def __init__(self):
         self.rules: list[SigmaRule] = []
+        # 聚合滑动窗口: {rule_id: {group_key: deque[(timestamp, value)]}}
+        self._agg_windows: dict[str, dict[str, deque]] = defaultdict(lambda: defaultdict(deque))
         self._load_default_rules()
         logger.info(f"SigmaDetector: loaded {len(self.rules)} rules")
 
@@ -90,6 +110,9 @@ class SigmaDetector:
                     "url_contains": ["/api/auth/login", "/login", "/admin/login"],
                     "event_contains": ["BRUTE_FORCE", "LOGIN_FAIL", "暴力破解"],
                 },
+                mitre_attack_id="T1110",
+                mitre_tactic="credential-access",
+                aggregation={"func": "count", "field": "src_ip", "op": ">", "threshold": 5, "timeframe": "5m"},
             ),
             SigmaRule(
                 rule_id="SIG-002",
@@ -104,6 +127,8 @@ class SigmaDetector:
                     "event_contains": ["INFO_DISCLOSURE", "信息探测"],
                 },
                 boost_conditions={"target_is_internal": True, "new_severity": "high"},
+                mitre_attack_id="T1595",
+                mitre_tactic="reconnaissance",
             ),
             SigmaRule(
                 rule_id="SIG-003",
@@ -117,6 +142,8 @@ class SigmaDetector:
                     "url_contains": ["/access.log", "/etc/passwd", "/../", "%2e%2e"],
                     "event_contains": ["PATH_TRAVERSAL", "路径遍历"],
                 },
+                mitre_attack_id="T1083",
+                mitre_tactic="discovery",
             ),
             SigmaRule(
                 rule_id="SIG-004",
@@ -130,6 +157,8 @@ class SigmaDetector:
                     "url_contains": ["/api/record/runDetail", "/api/admin/", "/api/internal/"],
                     "event_contains": ["UNAUTHORIZED_ACCESS", "UNAUTH_ACCESS", "越权"],
                 },
+                mitre_attack_id="T1078",
+                mitre_tactic="privilege-escalation",
             ),
             SigmaRule(
                 rule_id="SIG-005",
@@ -143,6 +172,8 @@ class SigmaDetector:
                     "url_contains": ["/api/download", "/file/download", "/export"],
                     "event_contains": ["DATA_EXFIL", "DATA_DOWNLOAD", "数据外泄"],
                 },
+                mitre_attack_id="T1048",
+                mitre_tactic="exfiltration",
             ),
             SigmaRule(
                 rule_id="SIG-006",
@@ -155,6 +186,8 @@ class SigmaDetector:
                 conditions={
                     "host_port": [9200],
                 },
+                mitre_attack_id="T1190",
+                mitre_tactic="initial-access",
             ),
             SigmaRule(
                 rule_id="SIG-007",
@@ -168,6 +201,9 @@ class SigmaDetector:
                     "host_port": [22],
                     "event_contains": ["BRUTE_FORCE", "SSH_BRUTE", "LOGIN_FAIL"],
                 },
+                mitre_attack_id="T1110.001",
+                mitre_tactic="credential-access",
+                aggregation={"func": "count", "field": "src_ip", "op": ">", "threshold": 3, "timeframe": "5m"},
             ),
             # ── 扩展规则：覆盖 platform 已有的事件类型 ──
             SigmaRule(
@@ -181,6 +217,8 @@ class SigmaDetector:
                 conditions={
                     "event_contains": ["C2_BEACON", "C2_COMM", "DNS_TUNNEL"],
                 },
+                mitre_attack_id="T1071",
+                mitre_tactic="command-and-control",
             ),
             SigmaRule(
                 rule_id="SIG-009",
@@ -193,6 +231,8 @@ class SigmaDetector:
                 conditions={
                     "event_contains": ["PORT_SCAN", "SCAN_DETECT"],
                 },
+                mitre_attack_id="T1046",
+                mitre_tactic="discovery",
             ),
             SigmaRule(
                 rule_id="SIG-010",
@@ -205,6 +245,8 @@ class SigmaDetector:
                 conditions={
                     "event_contains": ["LATERAL_MOVE", "LATERAL_SSH", "PRIV_ESCALATION"],
                 },
+                mitre_attack_id="T1021",
+                mitre_tactic="lateral-movement",
             ),
             SigmaRule(
                 rule_id="SIG-011",
@@ -217,40 +259,54 @@ class SigmaDetector:
                 conditions={
                     "event_contains": ["MALWARE", "RANSOMWARE", "TROJAN", "WORM"],
                 },
+                mitre_attack_id="T1204",
+                mitre_tactic="execution",
             ),
         ]
 
     def detect(self, event: dict) -> list[DetectionResult]:
         """
-        单条事件检测，返回命中的规则列表
+        单条事件检测（增强版）
 
-        匹配逻辑：
-          - url_contains: URL 中包含任一关键词
-          - event_contains: 事件类型或消息中包含任一关键词
-          - host_port: 目标端口匹配
-          - 同一规则内多个条件是 OR 关系（任一命中即触发）
+        增强:
+        - 跳过 enabled=False 的规则
+        - shadow_mode 规则命中后标记 _shadow=True
+        - 聚合规则检查滑动窗口条件
+        - 字段映射标准化
         """
         results = []
-        url = str(event.get("url", ""))
-        host = str(event.get("host", event.get("dst_ip", "")))
-        event_type = str(event.get("event", event.get("eventType", "")))
-        message = str(event.get("message", ""))
-        severity_raw = event.get("severity", 0)
-        src_ip = str(event.get("src_ip", event.get("srcIp", event.get("xffClientIp", ""))))
+        # 字段映射标准化
+        normalized = self._normalize_fields(event)
 
-        # 合并事件类型和消息用于关键词匹配
+        url = str(normalized.get("url", ""))
+        host = str(normalized.get("dst_ip", ""))
+        event_type = str(normalized.get("event", ""))
+        message = str(normalized.get("message", ""))
+        severity_raw = normalized.get("severity", 0)
+        src_ip = str(normalized.get("src_ip", ""))
         event_text = f"{event_type} {message}".upper()
 
         for rule in self.rules:
+            if not rule.enabled:
+                continue
+
             if not self._match_conditions(rule, url, host, event_text, severity_raw):
                 continue
 
-            # 威胁加成（内网目标自动升级严重度）
+            # 聚合条件检查
+            if rule.aggregation:
+                if not self._check_aggregation(rule, normalized):
+                    continue
+
+            # 威胁加成
             final_severity = rule.severity
             boost_hit = ""
             if rule.boost_conditions and self._match_boost(rule.boost_conditions, src_ip):
                 final_severity = rule.boost_conditions.get("new_severity", final_severity)
                 boost_hit = f" [内网加成→{final_severity}]"
+
+            # 灰度标记
+            shadow_tag = " [SHADOW]" if rule.shadow_mode else ""
 
             results.append(DetectionResult(
                 rule_id=rule.rule_id,
@@ -258,16 +314,79 @@ class SigmaDetector:
                 severity=final_severity,
                 attack_type=rule.attack_type,
                 confidence=rule.confidence,
-                action_recommend=rule.action_recommend,
+                action_recommend="alert" if rule.shadow_mode else rule.action_recommend,
                 matched_fields={
                     "event_type": event_type,
                     "src_ip": src_ip,
                     "url": url[:100] if url else "",
+                    "shadow_mode": rule.shadow_mode,
+                    "mitre_attack_id": rule.mitre_attack_id,
                 },
-                description=rule.description + boost_hit,
+                description=rule.description + boost_hit + shadow_tag,
             ))
 
         return results
+
+    def _normalize_fields(self, event: dict) -> dict:
+        """字段映射标准化"""
+        result = dict(event)
+        for src_field, std_field in self.FIELD_MAP.items():
+            if src_field in result and std_field not in result:
+                result[std_field] = result[src_field]
+        return result
+
+    def _check_aggregation(self, rule: SigmaRule, event: dict) -> bool:
+        """聚合条件检查（内存滑动窗口）"""
+        agg = rule.aggregation
+        func = agg.get("func", "count")
+        group_field = agg.get("field", "src_ip")
+        op = agg.get("op", ">")
+        threshold = agg.get("threshold", 5)
+        timeframe_str = agg.get("timeframe", "5m")
+
+        # 解析 timeframe
+        tf_seconds = self._parse_timeframe(timeframe_str)
+        group_key = str(event.get(group_field, "unknown"))
+        now = time.time()
+
+        # 更新滑动窗口
+        window = self._agg_windows[rule.rule_id][group_key]
+        window.append((now, 1))
+
+        # 清理过期数据
+        cutoff = now - tf_seconds
+        while window and window[0][0] < cutoff:
+            window.popleft()
+
+        # 计算聚合值
+        if func == "count":
+            agg_value = len(window)
+        elif func == "avg":
+            values = [v for _, v in window]
+            agg_value = sum(values) / max(len(values), 1)
+        else:
+            agg_value = len(window)
+
+        # 比较
+        if op == ">":
+            return agg_value > threshold
+        elif op == ">=":
+            return agg_value >= threshold
+        elif op == "==":
+            return agg_value == threshold
+        return agg_value > threshold
+
+    @staticmethod
+    def _parse_timeframe(tf: str) -> int:
+        """解析 timeframe 字符串 (5m → 300, 1h → 3600)"""
+        tf = tf.strip().lower()
+        if tf.endswith("m"):
+            return int(tf[:-1]) * 60
+        elif tf.endswith("h"):
+            return int(tf[:-1]) * 3600
+        elif tf.endswith("s"):
+            return int(tf[:-1])
+        return 300  # 默认 5 分钟
 
     def detect_batch(self, events: list[dict]) -> dict:
         """
@@ -388,14 +507,25 @@ class SigmaDetector:
         )
 
     def stats(self) -> dict:
-        """引擎状态"""
+        """引擎状态（增强版）"""
+        enabled = [r for r in self.rules if r.enabled]
+        shadow = [r for r in self.rules if r.shadow_mode]
         return {
             "rules_count": len(self.rules),
+            "enabled_count": len(enabled),
+            "shadow_count": len(shadow),
             "attack_types": list(set(r.attack_type for r in self.rules)),
             "severity_distribution": {
                 s: sum(1 for r in self.rules if r.severity == s)
                 for s in ["critical", "high", "medium", "low"]
             },
+            "mitre_coverage": {
+                r.mitre_attack_id: r.mitre_tactic
+                for r in self.rules if r.mitre_attack_id
+            },
+            "aggregation_rules": [
+                r.rule_id for r in self.rules if r.aggregation
+            ],
         }
 
 

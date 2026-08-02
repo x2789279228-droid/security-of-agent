@@ -366,4 +366,144 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ target_identifier: targetIdentifier, event_type: eventType }),
     }),
+
+  // ── 事件运营闭环端点 ──
+
+  /** 案例列表 */
+  opsCases: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString()
+    return fetchJSON<any[]>(`/cases${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 创建案例 */
+  opsCreateCase: (data: Record<string, any>) =>
+    fetchJSON<any>('/cases', { method: 'POST', body: JSON.stringify(data) }),
+
+  /** 案例详情 */
+  opsCase: (caseId: number) => fetchJSON<any>(`/cases/${caseId}`),
+
+  /** 案例状态流转 */
+  opsCaseStatus: (caseId: number, status: string, by = 'admin') =>
+    fetchJSON<any>(`/cases/${caseId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status, by }),
+    }),
+
+  /** 指派案例 */
+  opsCaseAssign: (caseId: number, assignee: string) =>
+    fetchJSON<any>(`/cases/${caseId}/assign`, {
+      method: 'PUT',
+      body: JSON.stringify({ assignee }),
+    }),
+
+  /** 写入处置结论 */
+  opsCaseDisposition: (caseId: number, disposition: string, by = 'admin') =>
+    fetchJSON<any>(`/cases/${caseId}/disposition`, {
+      method: 'PUT',
+      body: JSON.stringify({ disposition, by }),
+    }),
+
+  /** 案例时间线 */
+  opsCaseTimeline: (caseId: number) => fetchJSON<any[]>(`/cases/${caseId}/timeline`),
+
+  /** 工单列表 */
+  opsWorkOrders: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString()
+    return fetchJSON<any[]>(`/work-orders${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 创建工单 */
+  opsCreateWorkOrder: (data: Record<string, any>) =>
+    fetchJSON<any>('/work-orders', { method: 'POST', body: JSON.stringify(data) }),
+
+  /** 更新工单状态 */
+  opsWorkOrderStatus: (orderId: number, status: string) =>
+    fetchJSON<any>(`/work-orders/${orderId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status }),
+    }),
+
+  /** 审批通过 */
+  opsWorkOrderApprove: (orderId: number, approvedBy = 'admin') =>
+    fetchJSON<any>(`/work-orders/${orderId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ approved_by: approvedBy }),
+    }),
+
+  /** 审批拒绝 */
+  opsWorkOrderReject: (orderId: number, reason = '', rejectedBy = 'admin') =>
+    fetchJSON<any>(`/work-orders/${orderId}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ reason, rejected_by: rejectedBy }),
+    }),
+
+  /** 创建复盘 */
+  opsCreatePostMortem: (caseId: number, author = 'admin') =>
+    fetchJSON<any>('/post-mortems', {
+      method: 'POST',
+      body: JSON.stringify({ case_id: caseId, author }),
+    }),
+
+  /** 查看复盘 */
+  opsPostMortem: (caseId: number) => fetchJSON<any>(`/post-mortems/${caseId}`),
+
+  /** 编辑复盘 */
+  opsUpdatePostMortem: (caseId: number, data: Record<string, any>) =>
+    fetchJSON<any>(`/post-mortems/${caseId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  /** 发布复盘 */
+  opsPublishPostMortem: (caseId: number, reviewer = 'admin') =>
+    fetchJSON<any>(`/post-mortems/${caseId}/publish`, {
+      method: 'PUT',
+      body: JSON.stringify({ reviewer }),
+    }),
+
+  /** 提交反馈 */
+  opsSubmitFeedback: (data: Record<string, any>) =>
+    fetchJSON<any>('/feedback', { method: 'POST', body: JSON.stringify(data) }),
+
+  /** 误报统计 */
+  opsFeedbackStats: (ruleId = '', days = 30) =>
+    fetchJSON<any>(`/feedback/stats?rule_id=${encodeURIComponent(ruleId)}&days=${days}`),
+
+  /** 调优建议 */
+  opsFeedbackSuggestions: () => fetchJSON<any[]>('/feedback/suggestions'),
+
+  /** 规则列表 */
+  opsRules: (ruleType = 'sigma') => fetchJSON<any[]>(`/rules?rule_type=${ruleType}`),
+
+  /** 新增规则 */
+  opsCreateRule: (ruleType: string, content: Record<string, any>, changedBy = 'admin') =>
+    fetchJSON<any>('/rules', {
+      method: 'POST',
+      body: JSON.stringify({ rule_type: ruleType, content, changed_by: changedBy }),
+    }),
+
+  /** 修改规则 */
+  opsUpdateRule: (ruleType: string, ruleId: string, content: Record<string, any>, changeSummary = '', changedBy = 'admin') =>
+    fetchJSON<any>(`/rules/${ruleType}/${encodeURIComponent(ruleId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, change_summary: changeSummary, changed_by: changedBy }),
+    }),
+
+  /** 规则版本历史 */
+  opsRuleVersions: (ruleType: string, ruleId: string) =>
+    fetchJSON<any[]>(`/rules/${ruleType}/${encodeURIComponent(ruleId)}/versions`),
+
+  /** 规则回滚 */
+  opsRuleRollback: (ruleType: string, ruleId: string, targetVersion: number, changedBy = 'admin') =>
+    fetchJSON<any>(`/rules/${ruleType}/${encodeURIComponent(ruleId)}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({ target_version: targetVersion, changed_by: changedBy }),
+    }),
+
+  /** 规则沙箱测试 */
+  opsRuleSandbox: (ruleContent: Record<string, any>, eventIds?: number[], limit = 100) =>
+    fetchJSON<any>('/rules/sandbox', {
+      method: 'POST',
+      body: JSON.stringify({ rule_content: ruleContent, event_ids: eventIds, limit }),
+    }),
 }

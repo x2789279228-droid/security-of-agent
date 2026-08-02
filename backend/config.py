@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     kafka_topic_alerts: str = "security-alerts"
     kafka_topic_audit_queue: str = "security-audit-queue"
     kafka_topic_audit_results: str = "security-audit-results"
+    kafka_topic_cep_partial: str = "security-cep-partial"
+    kafka_topic_cep_patterns: str = "security-cep-patterns"
     kafka_consumer_group: str = "soc-backend"
     kafka_enabled: bool = False              # True=Kafka 模式, False=兼容旧 HTTP 直连模式
 
@@ -67,6 +69,13 @@ class Settings(BaseSettings):
     # MCP Guard 网关
     mcp_guard_enabled: bool = True       # 启用 4 层 Guard 检查
     security_guard_enabled: bool = True  # 启用 SecurityGuard (意图/频率/序列)
+
+    # ── 安全执行层 (SafeExecutor) ──
+    execution_mode: str = "live"             # dry_run | mock | live
+    protected_assets: str = ""               # 受保护 IP/CIDR（逗号分隔）
+    protected_assets_labels: str = ""        # 对应标签（逗号分隔）
+    fw_ssh_user_readonly: str = ""           # 只读 SSH 账号（nmap/查询用）
+    ttl_scan_interval: int = 30             # TTL 过期扫描间隔（秒）
 
     class Config:
         env_file = ".env"

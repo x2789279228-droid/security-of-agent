@@ -31,6 +31,15 @@ public class KafkaConfig {
     /** 审计队列 - 等待 LLM 审计的事件 */
     public static final String TOPIC_AUDIT_QUEUE = "security-audit-queue";
 
+    /** 死信队列 - 处理失败的消息 */
+    public static final String TOPIC_DLQ = "security-logs-dlq";
+
+    /** CEP 部分匹配 - 攻击链中间状态（可视化用）*/
+    public static final String TOPIC_CEP_PARTIAL = "security-cep-partial";
+
+    /** CEP 模式配置 - Broadcast 热更新通道 */
+    public static final String TOPIC_CEP_PATTERNS = "security-cep-patterns";
+
     // ==================== Kafka 连接配置 ====================
 
     /** Kafka Bootstrap 服务器地址，支持环境变量覆盖 */
