@@ -52,7 +52,7 @@ alerts        audit-queue        events-enriched
 |------|------|
 | **Kafka 消息总线** | 7 个 Topic 分级路由，解耦数据源与处理引擎，支持重放 |
 | **Flink 验证** | Schema 校验 + API Key 认证 + 去重，拒绝非法数据源 |
-| **Flink CEP** | 3 种攻击链模式实时检测 (端口扫描→C2 / 横向移动 / 数据外泄) |
+| **Flink CEP** | 3 种攻击链模式实时检测 + 部分匹配预警 (端口扫描→C2 / 横向移动 / 数据外泄) |
 | **Flink 异常检测** | 频率异常 + 严重度加权 + 时段异常，多维评分 |
 | **Sigma 检测引擎** | 11 条规则覆盖 8 类攻击，规则化精确匹配，< 1ms 延迟 |
 | **Audit-LLM** | 四层流水线: Decomposer→ToolBuilder→Executor→Reviewer，迭代审核 + 反幻觉 |
@@ -62,8 +62,16 @@ alerts        audit-queue        events-enriched
 | **SecurityGuard** | 调用安全守卫: 意图审查 + 序列管控 + 频率限制 + 上下文感知 |
 | **Stabilizer** | LLM 输出稳定化: JSON 修复→工具名归一→参数强转→Schema 校验 |
 | **响应引擎** | 8 条策略、5 种动作，SSH 真实执行 + iptables 防火墙 + 按 rule_id 回滚 |
+| **响应执行安全** | 命令/资产双白名单、执行模式分级、安全执行器、执行后校验、TTL 失效回收 |
 | **RAG 知识库** | MITRE ATT&CK / CAPEC 导入，向量检索 + LLM 重排，断言验证 |
 | **数据源管理** | API Key 注册/吊销/拒绝日志，解决无差别接收问题 |
+| **规则管理** | 动态规则下发/启停，响应策略热更新，无需重启服务 |
+| **运营工单** | 告警→工单流转，处置时限、优先级、责任人分配 |
+| **案例管理** | 已处置告警沉淀为案例，经验复用，同类告警自动关联 |
+| **反馈闭环** | 处置结果回灌检测引擎，误报抑制、漏报补偿 |
+| **复盘分析** | 事件后置 Post-Mortem：时间线重建、根因分析、改进项跟踪 |
+| **字段加密** | 敏感日志字段 (IP/账号) 落库前脱敏，查询权限控制 |
+| **可观测性** | 流水线追踪 (trace_id 贯穿)、健康监控、看门狗自动恢复 |
 
 ## 技术栈
 
@@ -153,10 +161,14 @@ python log_simulator.py --mode chain --api http://localhost:8001
 │   └── src/main/java/com/soc/
 │       ├── job/
 │       │   ├── LogValidationJob.java      # 验证+认证+去重
-│       │   └── AnomalyDetectionJob.java   # 异常评分+CEP攻击链
+│       │   ├── AnomalyDetectionJob.java   # 异常评分+CEP攻击链
+│       │   ├── CepPatternConfig.java      # CEP 攻击链模式配置
+│       │   ├── CepPartialMatchFunction.java # CEP 部分匹配（半截攻击链提示）
+│       │   └── SourceReputationFunction.java # 数据源信誉评分
 │       ├── model/
 │       │   ├── SecurityEvent.java         # 安全事件模型
 │       │   └── AlertEvent.java            # 告警事件模型
+│       ├── schemas/                       # AVRO 消息 Schema
 │       └── util/
 │           └── KafkaConfig.java           # Kafka Topic 配置
 ├── backend/
@@ -164,19 +176,31 @@ python log_simulator.py --mode chain --api http://localhost:8001
 │   ├── kafka_consumer.py      # ★ Kafka 消费者 (enriched/audit/alerts)
 │   ├── kafka_producer.py      # ★ Kafka 生产者 (审计结果回写)
 │   ├── source_registry.py     # ★ 数据源注册与认证
+│   ├── case_manager.py        # 案例管理与经验复用
+│   ├── feedback_loop.py       # 反馈闭环 (误报抑制/漏报补偿)
+│   ├── rule_manager.py        # 动态规则管理
+│   ├── work_order_service.py  # 运营工单流转
+│   ├── post_mortem_service.py # 事件复盘分析
+│   ├── field_cipher.py        # 敏感字段脱敏
 │   ├── agents/                # Audit-LLM 四层 + CAD
-│   ├── response_engine/       # 响应引擎 (策略/执行/审批/SSH)
+│   ├── response_engine/       # 响应引擎 (策略/执行/审批/SSH/白名单/安全执行器)
 │   ├── rag/                   # RAG 知识库 (检索/验证/导入)
+│   ├── observability/         # 流水线追踪 / 健康监控 / 看门狗
 │   ├── log_ingestion.py       # 日志接入 + 自动审计 + 自动响应
 │   ├── anomaly_detector.py    # 异常检测 (Python 侧，兼容 HTTP 模式)
 │   ├── correlation_engine.py  # 攻击链关联 (Python 侧)
 │   ├── event_bus.py           # 实时事件总线 (SSE)
 │   └── scheduler.py           # 定时任务
 ├── tools/
-│   └── syslog-adapter.py      # ★ Syslog → Kafka 适配器
-├── frontend/                  # React 前端
+│   ├── syslog-adapter.py      # ★ Syslog → Kafka 适配器
+│   ├── gen-kafka-certs.sh     # Kafka TLS 证书生成
+│   ├── init-kafka-topics.sh   # Topic 初始化
+│   └── register-schemas.sh    # Schema 注册
+├── frontend/                  # React 前端 (含运营 Operations 页面)
 ├── docker-compose.yml         # ★ 含 Kafka + Flink + Kafka UI
 ├── log_simulator.py           # ★ 日志模拟器 (支持 Kafka/HTTP 双模式)
 ├── init.sql                   # 数据库 Schema
 └── demo_e2e.py                # 端到端演示验证
 ```
+
+> 说明: 仓库会同步推送到 `security-of-agent` 与 `security-of-agent-max` 两个远端。
