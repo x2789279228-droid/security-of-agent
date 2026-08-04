@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { PageTransition } from '../components/common/PageTransition'
 import { api } from '../lib/api'
 
-type Tab = 'threats' | 'policies' | 'approvals' | 'logs'
+type Tab = 'threats' | 'policies' | 'approvals' | 'logs' | 'ddos' | 'a4'
 
 const THREAT_PRESETS = [
   { label: 'C2回连 (critical)', value: { threat_type: 'C2_BEACON', confidence: 0.85, severity: 'critical', src_ip: '192.168.1.105', message: '检测到内部主机与已知C2服务器通信' } },
@@ -13,6 +13,58 @@ const THREAT_PRESETS = [
   { label: '恶意软件 (critical)', value: { threat_type: 'MALWARE_DETECT', confidence: 0.8, severity: 'critical', src_ip: '192.168.1.50', message: '终端检测到恶意软件' } },
   { label: 'DDoS (high)', value: { threat_type: 'DDoS_TRAFFIC', confidence: 0.7, severity: 'high', src_ip: '203.0.113.1', message: '检测到DDoS攻击流量' } },
 ]
+
+// DDoS 6 场景预设 (用于 DDoS 决策预演 Tab)
+const DDOS_PRESETS = [
+  { label: '外部单IP', value: { src_ips: ['203.0.113.77'], target_service: 'web_server', traffic_pps: 10000, traffic_gbps: 1.0, evidence_confidence: 0.9 } },
+  { label: '外部CIDR', value: { src_cidrs: ['203.0.113.0/24'], target_service: 'web_server', traffic_pps: 20000, traffic_gbps: 2.0, evidence_confidence: 0.9 } },
+  { label: '外部CIDR (/16 过宽)', value: { src_cidrs: ['203.0.0.0/16'], target_service: 'web_server', traffic_pps: 20000, evidence_confidence: 0.9 } },
+  { label: '分布式外部', value: { src_ips: Array.from({length: 20}, (_, i) => `203.0.113.${i}`), target_service: 'web_server', traffic_pps: 50000, evidence_confidence: 0.85 } },
+  { label: '内部单主机', value: { src_ips: ['10.0.0.100'], target_service: 'web_server', traffic_pps: 10000, evidence_confidence: 0.9 } },
+  { label: '内部多主机', value: { src_ips: ['10.0.0.100', '10.0.0.101', '10.0.0.102'], target_service: 'web_server', traffic_pps: 30000, evidence_confidence: 0.9 } },
+  { label: '核心网络', value: { src_ips: ['203.0.113.77'], target_service: 'core_router', traffic_pps: 5000, evidence_confidence: 0.9 } },
+  { label: '大规模DDoS', value: { src_ips: Array.from({length: 50}, (_, i) => `203.0.${Math.floor(i/10)}.${i%10}`), target_service: 'web_server', traffic_pps: 200000, traffic_gbps: 15.0, evidence_confidence: 0.95 } },
+  { label: '封禁10.0.0.0/8 (拒绝)', value: { src_cidrs: ['10.0.0.0/8'], target_service: 'web_server', evidence_confidence: 0.9 } },
+  { label: '封禁172.16.0.0/12 (拒绝)', value: { src_cidrs: ['172.16.0.0/12'], target_service: 'web_server', evidence_confidence: 0.9 } },
+  { label: '封禁192.168.0.0/16 (拒绝)', value: { src_cidrs: ['192.168.0.0/16'], target_service: 'web_server', evidence_confidence: 0.9 } },
+]
+
+// A4 危险工具预设 (用于 A4 预检 Tab)
+const A4_TOOL_PRESETS = [
+  { label: 'drop_database', value: { tool_name: 'drop_database', target: 'db-prod-01', asset_type: 'database' } },
+  { label: 'drop_table', value: { tool_name: 'drop_table', target: 'db-prod-01', asset_type: 'database' } },
+  { label: 'truncate_table', value: { tool_name: 'truncate_table', target: 'db-prod-01', asset_type: 'database' } },
+  { label: 'wipe_disk', value: { tool_name: 'wipe_disk', target: 'host-01' } },
+  { label: 'delete_backup', value: { tool_name: 'delete_backup', target: 'backup-01' } },
+  { label: 'bulk_delete_users', value: { tool_name: 'bulk_delete_users' } },
+  { label: 'modify_core_route', value: { tool_name: 'modify_core_route' } },
+  { label: 'block_10.0.0.0_8_permanent', value: { tool_name: 'block_10_0_0_0_8_permanent' } },
+  { label: 'db_query_status (允许)', value: { tool_name: 'db_query_status', target: 'db-prod-01', asset_type: 'database' } },
+  { label: 'db_create_snapshot (允许)', value: { tool_name: 'db_create_snapshot', target: 'db-prod-01', asset_type: 'database' } },
+  { label: 'db_isolate_instance (允许)', value: { tool_name: 'db_isolate_instance', target: 'db-prod-01', asset_type: 'database' } },
+  { label: 'block_ip (普通)', value: { tool_name: 'block_ip', target: '203.0.113.1' } },
+]
+
+// DDoS 决策中文名映射
+const DDOS_DECISION_LABEL: Record<string, string> = {
+  allow_auto_block: '允许自动封禁',
+  allow_cidr_block: '允许 CIDR 封禁 (严格条件)',
+  use_scrubbing_device: '切换清洗设备',
+  use_rate_limit_only: '仅限速',
+  isolate_internal_host: '隔离内部主机',
+  deny_auto_response: '拒绝自动响应',
+  require_human_approval: '需人工审批',
+}
+
+const DDOS_CATEGORY_LABEL: Record<string, string> = {
+  external_single_ip: '外部单 IP',
+  external_cidr: '外部 CIDR',
+  distributed_external: '分布式外部 DDoS',
+  internal_single_host: '内部单主机',
+  internal_multi_host: '内部多主机',
+  core_network: '核心网络级攻击',
+  unknown: '未知',
+}
 
 function classNames(...classes: (string | false | undefined | null)[]) {
   return classes.filter(Boolean).join(' ')
@@ -55,12 +107,44 @@ export default function Response() {
   const [execTarget, setExecTarget] = useState('')
   const [rollbackToken, setRollbackToken] = useState('')
 
+  // DDoS / A4 预检
+  const [ddosPreview, setDdosPreview] = useState<any>(null)
+  const [a4Decision, setA4Decision] = useState<any>(null)
+  const [a4Prohibited, setA4Prohibited] = useState<{ prohibited_tools: string[]; allowed_db_actions: string[] } | null>(null)
+  const [a4CustomTool, setA4CustomTool] = useState('')
+  const [a4CustomTarget, setA4CustomTarget] = useState('')
+
   const loadPolicies = useCallback(async () => {
     try {
       const [p, a] = await Promise.all([api.getResponsePolicies(), api.getResponseActions()])
       setPolicies(p)
       setActions(a)
     } catch (e: any) { setError(e.message) }
+  }, [])
+
+  const loadA4Prohibited = useCallback(async () => {
+    try {
+      const data = await api.a4ProhibitedTools()
+      setA4Prohibited(data)
+    } catch (e: any) { setError(e.message) }
+  }, [])
+
+  const runDdosPreview = useCallback(async (payload: any) => {
+    setLoading(true); setError(''); setDdosPreview(null)
+    try {
+      const data = await api.ddosPreview(payload)
+      setDdosPreview(data)
+    } catch (e: any) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [])
+
+  const runA4Check = useCallback(async (payload: any) => {
+    setLoading(true); setError(''); setA4Decision(null)
+    try {
+      const data = await api.a4Check(payload)
+      setA4Decision(data)
+    } catch (e: any) { setError(e.message) }
+    finally { setLoading(false) }
   }, [])
 
   const loadApprovals = useCallback(async () => {
@@ -77,7 +161,7 @@ export default function Response() {
     } catch (e: any) { setError(e.message) }
   }, [])
 
-  useEffect(() => { loadPolicies() }, [loadPolicies])
+  useEffect(() => { loadPolicies(); loadA4Prohibited() }, [loadPolicies, loadA4Prohibited])
 
   const simulateThreat = async (threat: any) => {
     setLoading(true); setError(''); setResult(null)
@@ -132,6 +216,8 @@ export default function Response() {
             { id: 'policies', label: '响应策略' },
             { id: 'approvals', label: `审批队列${approvals.length ? ` (${approvals.length})` : ''}` },
             { id: 'logs', label: '响应日志' },
+            { id: 'ddos', label: 'DDoS 决策' },
+            { id: 'a4', label: 'A4 预检' },
           ] as { id: Tab; label: string }[]).map(tab => (
             <button key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.id === 'approvals') loadApprovals(); if (tab.id === 'logs') loadLogs() }}
               className={classNames('px-5 py-2 text-[13px] font-medium rounded-full transition-all',
@@ -225,6 +311,66 @@ export default function Response() {
             </div>
 
             {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+
+            {/* A4 拦截提示 — 当 result 含 a4_blocked 字段时显示 */}
+            {result?.a4_blocked && (
+              <div className="border border-red-300 bg-red-50 rounded-lg p-4 text-xs space-y-2">
+                <div className="flex items-center gap-2 text-red-700 font-semibold">
+                  <span className="shrink-0 w-2 h-2 rounded-full bg-red-500" />
+                  A4 危险动作已拦截 — 已创建人工审批工单
+                </div>
+                <p className="text-red-600">{result.reason || 'A4 策略阻止自动执行'}</p>
+                {result.a4_violations?.map((v: any, i: number) => (
+                  <div key={i} className="border-t border-red-200 pt-2 mt-2">
+                    <p><strong>动作:</strong> {v.action} | <strong>拦截器:</strong> {v.blocked_by}</p>
+                    <p className="text-red-600">{v.reason}</p>
+                    {v.recommendations?.length > 0 && (
+                      <ul className="list-disc ml-4 mt-1 space-y-0.5 text-red-700">
+                        {v.recommendations.map((r: string, j: number) => <li key={j}>{r}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* DDoS 决策卡片 — 当 result 含 ddos_decision 字段时显示 */}
+            {result?.ddos_decision && (
+              <div className="border border-orange-200 bg-orange-50 rounded-lg p-4 text-xs space-y-2">
+                <div className="flex items-center gap-2 text-orange-700 font-semibold">
+                  <span className="shrink-0 w-2 h-2 rounded-full bg-orange-500" />
+                  DDoS 决策: {DDOS_DECISION_LABEL[result.ddos_decision] || result.ddos_decision}
+                </div>
+                {result.policy_name && <p className="text-orange-700"><strong>分类:</strong> {result.policy_name}</p>}
+                {result.reason && <p className="text-ink-soft">{result.reason}</p>}
+                {result.scrubbing_device_required && (
+                  <p className="text-orange-700 font-medium">⚠ 需切换到清洗设备 — 单机 iptables 不足以处置</p>
+                )}
+                {result.allowed_actions?.length > 0 && (
+                  <p><strong className="text-green-700">允许动作:</strong> {result.allowed_actions.join(', ')}</p>
+                )}
+                {result.denied_actions?.length > 0 && (
+                  <p><strong className="text-red-700">拒绝动作:</strong> {result.denied_actions.join(', ')}</p>
+                )}
+                {result.safe_targets?.length > 0 && (
+                  <p><strong>安全目标:</strong> {result.safe_targets.join(', ')}</p>
+                )}
+                {result.require_human_approval && <p className="text-warn">需人工审批</p>}
+                {result.require_canary && <p className="text-ink-soft"> Canary 执行</p>}
+                {result.require_auto_rollback && <p className="text-ink-soft"> 自动回滚</p>}
+                {result.require_health_check && <p className="text-ink-soft"> 业务健康检查</p>}
+                {result.recommendations?.length > 0 && (
+                  <ul className="list-disc ml-4 mt-1 space-y-0.5 text-ink-soft">
+                    {result.recommendations.map((r: string, i: number) => <li key={i}>{r}</li>)}
+                  </ul>
+                )}
+                {result.approval_ticket_id && (
+                  <p className="text-ink-faint">工单 ID: <span className="font-mono">{result.approval_ticket_id}</span></p>
+                )}
+              </div>
+            )}
+
+            {/* 原始结果 Collapse — 保留 */}
             {result && <Collapse title="执行结果" defaultOpen>{JSON.stringify(result, null, 2)}</Collapse>}
           </div>
         )}
@@ -335,6 +481,193 @@ export default function Response() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── Tab: DDoS 决策 ── */}
+        {activeTab === 'ddos' && (
+          <div className="space-y-4">
+            <div>
+              <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">选择 DDoS 场景预设</label>
+              <div className="flex flex-wrap gap-2">
+                {DDOS_PRESETS.map(p => (
+                  <button key={p.label} onClick={() => runDdosPreview(p.value)} disabled={loading}
+                    className="px-3 py-1.5 text-xs font-sans rounded-lg border border-line hover:bg-gray-50 transition-colors disabled:opacity-50">
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="border-t border-line pt-4">
+              <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">自定义 DDoS 场景</label>
+              <div className="grid grid-cols-2 gap-3 mb-3 text-xs">
+                <input type="text" placeholder="源IP, 逗号分隔 (如 203.0.113.1,203.0.113.2)"
+                  id="ddos-src-ips"
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                <input type="text" placeholder="源 CIDR, 逗号分隔 (如 203.0.113.0/24)"
+                  id="ddos-src-cidrs"
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                <input type="text" placeholder="目标服务 (web_server/core_router/...)"
+                  id="ddos-target-service"
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                <input type="number" placeholder="流量 pps"
+                  id="ddos-pps"
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                <input type="number" step="0.1" placeholder="流量 Gbps"
+                  id="ddos-gbps"
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                <input type="number" step="0.05" placeholder="证据置信度 (0-1)"
+                  id="ddos-confidence"
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+              </div>
+              <button onClick={() => {
+                const ips = (document.getElementById('ddos-src-ips') as HTMLInputElement)?.value
+                const cidrs = (document.getElementById('ddos-src-cidrs') as HTMLInputElement)?.value
+                const svc = (document.getElementById('ddos-target-service') as HTMLInputElement)?.value
+                const pps = (document.getElementById('ddos-pps') as HTMLInputElement)?.value
+                const gbps = (document.getElementById('ddos-gbps') as HTMLInputElement)?.value
+                const conf = (document.getElementById('ddos-confidence') as HTMLInputElement)?.value
+                runDdosPreview({
+                  src_ips: ips ? ips.split(',').map(s => s.trim()).filter(Boolean) : [],
+                  src_cidrs: cidrs ? cidrs.split(',').map(s => s.trim()).filter(Boolean) : [],
+                  target_service: svc || 'web_server',
+                  traffic_pps: pps ? parseInt(pps) : 0,
+                  traffic_gbps: gbps ? parseFloat(gbps) : 0.0,
+                  evidence_confidence: conf ? parseFloat(conf) : 0.9,
+                })
+              }} disabled={loading}
+                className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                {loading ? '预演中...' : '预演决策'}
+              </button>
+            </div>
+
+            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+
+            {ddosPreview && (
+              <div className="border border-orange-200 bg-orange-50 rounded-lg p-4 text-xs space-y-2">
+                <div className="flex items-center gap-2 text-orange-700 font-semibold">
+                  <span className="shrink-0 w-2 h-2 rounded-full bg-orange-500" />
+                  DDoS 决策: {DDOS_DECISION_LABEL[ddosPreview.decision] || ddosPreview.decision}
+                </div>
+                <p><strong>分类:</strong> {DDOS_CATEGORY_LABEL[ddosPreview.category] || ddosPreview.category}</p>
+                <p className="text-ink-soft">{ddosPreview.reason}</p>
+                {ddosPreview.scrubbing_device_required && (
+                  <p className="text-orange-700 font-medium">⚠ 需切换到清洗设备/运营商/云 Anti-DDoS</p>
+                )}
+                {ddosPreview.allowed_actions?.length > 0 && (
+                  <p><strong className="text-green-700">允许动作:</strong> {ddosPreview.allowed_actions.join(', ')}</p>
+                )}
+                {ddosPreview.denied_actions?.length > 0 && (
+                  <p><strong className="text-red-700">拒绝动作:</strong> {ddosPreview.denied_actions.join(', ')}</p>
+                )}
+                {ddosPreview.safe_targets?.length > 0 && (
+                  <p><strong>安全目标:</strong> {ddosPreview.safe_targets.join(', ')}</p>
+                )}
+                <div className="flex flex-wrap gap-3 text-ink-soft">
+                  {ddosPreview.require_human_approval && <span>需人工审批</span>}
+                  {ddosPreview.require_canary && <span> Canary</span>}
+                  {ddosPreview.require_auto_rollback && <span> 自动回滚</span>}
+                  {ddosPreview.require_health_check && <span> 健康检查</span>}
+                  {ddosPreview.max_ttl_seconds > 0 && <span> TTL={ddosPreview.max_ttl_seconds}s</span>}
+                </div>
+                {ddosPreview.recommendations?.length > 0 && (
+                  <ul className="list-disc ml-4 mt-1 space-y-0.5 text-ink-soft">
+                    {ddosPreview.recommendations.map((r: string, i: number) => <li key={i}>{r}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
+            {ddosPreview && <Collapse title="完整决策结果">{JSON.stringify(ddosPreview, null, 2)}</Collapse>}
+          </div>
+        )}
+
+        {/* ── Tab: A4 预检 ── */}
+        {activeTab === 'a4' && (
+          <div className="space-y-4">
+            {/* A4 永久禁止工具清单 */}
+            {a4Prohibited && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="border border-red-200 bg-red-50 rounded-lg p-3">
+                  <p className="text-xs font-sans font-semibold text-red-700 mb-2">A4 永久禁止工具 (LLM Agent 不得注册)</p>
+                  <div className="flex flex-wrap gap-1">
+                    {a4Prohibited.prohibited_tools.map(t => (
+                      <span key={t} className="px-1.5 py-0.5 text-[10px] font-mono bg-white border border-red-200 rounded text-red-700">{t}</span>
+                    ))}
+                  </div>
+                </div>
+                <div className="border border-green-200 bg-green-50 rounded-lg p-3">
+                  <p className="text-xs font-sans font-semibold text-green-700 mb-2">数据库安全事件允许动作</p>
+                  <div className="flex flex-wrap gap-1">
+                    {a4Prohibited.allowed_db_actions.map(t => (
+                      <span key={t} className="px-1.5 py-0.5 text-[10px] font-mono bg-white border border-green-200 rounded text-green-700">{t}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">选择工具预设预检</label>
+              <div className="flex flex-wrap gap-2">
+                {A4_TOOL_PRESETS.map(p => (
+                  <button key={p.label} onClick={() => runA4Check(p.value)} disabled={loading}
+                    className="px-3 py-1.5 text-xs font-sans rounded-lg border border-line hover:bg-gray-50 transition-colors disabled:opacity-50">
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="border-t border-line pt-4">
+              <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">自定义工具预检</label>
+              <div className="flex items-center gap-3 mb-3">
+                <input type="text" placeholder="工具名 (如 drop_database)" value={a4CustomTool} onChange={e => setA4CustomTool(e.target.value)}
+                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                <input type="text" placeholder="目标 (可选)" value={a4CustomTarget} onChange={e => setA4CustomTarget(e.target.value)}
+                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                <button onClick={() => runA4Check({ tool_name: a4CustomTool, target: a4CustomTarget, asset_type: a4CustomTarget.startsWith('db') ? 'database' : '' })} disabled={loading || !a4CustomTool}
+                  className="px-4 py-2 text-xs font-sans font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                  预检
+                </button>
+              </div>
+            </div>
+
+            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+
+            {a4Decision && (
+              <div className={classNames('border rounded-lg p-4 text-xs space-y-2',
+                a4Decision.is_a4 ? 'border-red-300 bg-red-50' : 'border-green-200 bg-green-50')}>
+                <div className={classNames('flex items-center gap-2 font-semibold',
+                  a4Decision.is_a4 ? 'text-red-700' : 'text-green-700')}>
+                  <span className={classNames('shrink-0 w-2 h-2 rounded-full',
+                    a4Decision.is_a4 ? 'bg-red-500' : 'bg-green-500')} />
+                  {a4Decision.is_a4 ? `A4 拦截 — 拦截器: ${a4Decision.blocked_by || 'unknown'}` : '通过 — 非危险动作'}
+                </div>
+                <p className="text-ink-soft">{a4Decision.reason}</p>
+                {a4Decision.is_prohibited_tool && (
+                  <p className="text-red-700 font-medium">永久禁止工具 — 系统不得向 LLM Agent 注册此能力</p>
+                )}
+                {a4Decision.is_db_destructive && (
+                  <p className="text-red-700 font-medium">数据库破坏性操作 — 不得自动删除数据库/表/文件/备份</p>
+                )}
+                {a4Decision.require_ticket && (
+                  <p className="text-warn">需创建人工审批工单</p>
+                )}
+                {a4Decision.recommendations?.length > 0 && (
+                  <div className="border-t border-line pt-2 mt-2">
+                    <p className="font-medium text-ink">处置建议:</p>
+                    <ul className="list-disc ml-4 mt-1 space-y-0.5 text-ink-soft">
+                      {a4Decision.recommendations.map((r: string, i: number) => <li key={i}>{r}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {a4Decision.allowed_db_actions?.length > 0 && (
+                  <p className="text-green-700"><strong>允许动作:</strong> {a4Decision.allowed_db_actions.join(', ')}</p>
+                )}
+              </div>
+            )}
+            {a4Decision && <Collapse title="完整决策结果">{JSON.stringify(a4Decision, null, 2)}</Collapse>}
           </div>
         )}
 

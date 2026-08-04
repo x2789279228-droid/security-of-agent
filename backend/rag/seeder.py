@@ -966,7 +966,7 @@ async def seed_knowledge_base(session: AsyncSession):
                 threat_types=doc_data["threat_types"],
                 severity=doc_data["severity"],
                 tags=doc_data["tags"],
-                embedding=[0.0],
+                embedding=None,
                 token_count=chunk_data["token_count"],
             )
             session.add(chunk)
@@ -976,7 +976,7 @@ async def seed_knowledge_base(session: AsyncSession):
     logger.info(f"Knowledge base seeded: {len(SEED_KNOWLEDGE)} documents, {total_chunks} chunks")
 
     asyncio_create = __import__("asyncio").create_task
-    asyncio_create(_compute_missing_embeddings(session))
+    asyncio_create(_compute_missing_embeddings(None))
 
 
 async def _compute_missing_embeddings(session_factory_or_session):

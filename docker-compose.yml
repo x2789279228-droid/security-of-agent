@@ -41,10 +41,10 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9095
-      # 三监听: PLAINTEXT 容器内(9092) / SSL 加密(9093) / PLAINTEXT_HOST 宿主机(9094)
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,SSL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9095,PLAINTEXT_HOST://0.0.0.0:9094
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,SSL://kafka:9093,PLAINTEXT_HOST://localhost:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL,PLAINTEXT_HOST:PLAINTEXT
+      # 双监听: PLAINTEXT 容器内(9092) / PLAINTEXT_HOST 宿主机(9094)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9095,PLAINTEXT_HOST://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
@@ -55,22 +55,12 @@ services:
       KAFKA_LOG_SEGMENT_BYTES: 107374182
       KAFKA_LOG_CLEANUP_POLICY: delete
       KAFKA_LOG_COMPRESSION_TYPE: lz4
-      # ── SSL/TLS 配置（证书由 tools/gen-kafka-certs.sh 生成） ──
-      KAFKA_SSL_KEYSTORE_LOCATION: /etc/kafka/certs/broker-keystore.p12
-      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_PASSWORD:-soc-kafka-2024}
-      KAFKA_SSL_KEY_PASSWORD: ${KAFKA_SSL_PASSWORD:-soc-kafka-2024}
-      KAFKA_SSL_TRUSTSTORE_LOCATION: /etc/kafka/certs/ca-cert.pem
-      KAFKA_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_PASSWORD:-soc-kafka-2024}
-      KAFKA_SSL_CLIENT_AUTH: none
-      KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
       CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
     ports:
       - "9092:9092"
-      - "9093:9093"
       - "9094:9094"
     volumes:
       - kafka_data:/var/lib/kafka/data
-      - ./certs/kafka:/etc/kafka/certs:ro
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
       interval: 10s
@@ -152,6 +142,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      HTTP_PROXY: http://host.docker.internal:7897
+      HTTPS_PROXY: http://host.docker.internal:7897
+      NO_PROXY: localhost,127.0.0.1,kafka,postgres,redis,host.docker.internal,shared-memory-pg,shared-memory-redis,soc-kafka
       SHARED_MEMORY_DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:-admin123}@postgres:5432/shared_memory
       SHARED_MEMORY_REDIS_URL: redis://redis:6379/0
       # 必填：请在运行前设置 API Key，否则 LLM/Embedding 将返回降级响应

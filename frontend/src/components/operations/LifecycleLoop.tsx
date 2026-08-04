@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import { Fragment } from 'react'
 import { AI_GRADIENT_STOPS } from '../../lib/constants'
 
 export interface LoopStage {
@@ -21,15 +22,21 @@ export const LOOP_STAGES: Omit<LoopStage, 'count'>[] = [
   { key: 'tuning', label: '规则优化', icon: 'M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4' },
 ]
 
-const SIZE = 460
-const CENTER = SIZE / 2
-const RADIUS = 168
-const NODE_R = 34
+// ── 几何参数（SVG viewBox 逻辑像素） ──────────────────────
+const SIZE = 480           // viewBox 尺寸（正方形）
+const CENTER = SIZE / 2    // 圆心 = (240, 240)
+const RADIUS = 168         // 圆环半径
+const NODE_R = 32          // 节点图标半径（固定像素，不随容器缩放）
+const LABEL_GAP = 10       // 标签距离图标底部的间距
 
+/** 极坐标 → 直角坐标（angle=0 在顶部，顺时针） */
 function polar(angleDeg: number, r: number) {
   const rad = ((angleDeg - 90) * Math.PI) / 180
   return { x: CENTER + r * Math.cos(rad), y: CENTER + r * Math.sin(rad) }
 }
+
+/** 逻辑像素 → 百分比（用于响应式定位） */
+const pct = (v: number) => (v / SIZE) * 100
 
 export function LifecycleLoop({
   counts,
@@ -41,119 +48,181 @@ export function LifecycleLoop({
   onNodeClick?: (key: string) => void
 }) {
   const step = 360 / LOOP_STAGES.length
-  // 闭环路径（圆）
-  const ringPath = `M ${CENTER} ${CENTER - RADIUS} A ${RADIUS} ${RADIUS} 0 1 1 ${CENTER - 0.01} ${CENTER - RADIUS}`
+  // 闭环 motion path（仅用于光点动画，圆环渲染用 <circle>）
+  const motionPath = `M ${CENTER} ${CENTER - RADIUS} A ${RADIUS} ${RADIUS} 0 1 1 ${CENTER - 0.01} ${CENTER - RADIUS}`
 
   return (
-    <div className="relative mx-auto" style={{ width: SIZE, height: SIZE }}>
-      <svg viewBox={`0 0 ${SIZE} ${SIZE}`} className="absolute inset-0 w-full h-full">
-        <defs>
-          <linearGradient id="loopGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-            {AI_GRADIENT_STOPS.map((c, i) => (
-              <stop key={i} offset={`${(i / (AI_GRADIENT_STOPS.length - 1)) * 100}%`} stopColor={c} />
-            ))}
-          </linearGradient>
-          <filter id="loopGlow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur stdDeviation="4" result="b" />
-            <feMerge>
-              <feMergeNode in="b" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-
-        {/* 底环 */}
-        <circle cx={CENTER} cy={CENTER} r={RADIUS} fill="none" stroke="rgba(0,0,0,0.06)" strokeWidth={2} />
-
-        {/* 渐变流动环 */}
-        <path
-          d={ringPath}
-          fill="none"
-          stroke="url(#loopGrad)"
-          strokeWidth={3}
-          strokeLinecap="round"
-          strokeDasharray="14 12"
-          filter="url(#loopGlow)"
-          opacity={0.85}
+    // 容器: 响应式正方形 + 水平居中
+    <div className="w-full max-w-[480px] mx-auto" style={{ aspectRatio: '1 / 1' }}>
+      <div className="relative w-full h-full">
+        {/* ── SVG 层: 圆环 + 流动光点 ── */}
+        <svg
+          viewBox={`0 0 ${SIZE} ${SIZE}`}
+          preserveAspectRatio="xMidYMid meet"
+          className="absolute inset-0 w-full h-full"
         >
-          <animate attributeName="stroke-dashoffset" from="0" to="-260" dur="9s" repeatCount="indefinite" />
-        </path>
+          <defs>
+            <linearGradient id="loopGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              {AI_GRADIENT_STOPS.map((c, i) => (
+                <stop key={i} offset={`${(i / (AI_GRADIENT_STOPS.length - 1)) * 100}%`} stopColor={c} />
+              ))}
+            </linearGradient>
+            <filter id="loopGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="4" result="b" />
+              <feMerge>
+                <feMergeNode in="b" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+            {/* motion path（不可见，仅供 animateMotion 使用） */}
+            <path id="loopMotionPath" d={motionPath} fill="none" stroke="none" />
+          </defs>
 
-        {/* 沿环流动的光点 */}
-        {[0, 1, 2].map((i) => (
-          <circle key={i} r={4} fill={AI_GRADIENT_STOPS[i % AI_GRADIENT_STOPS.length]} filter="url(#loopGlow)">
-            <animateMotion dur="12s" repeatCount="indefinite" begin={`${i * 4}s`} path={ringPath} />
-          </circle>
-        ))}
-      </svg>
+          {/* 底环 — 静态参考圆 */}
+          <circle
+            cx={CENTER}
+            cy={CENTER}
+            r={RADIUS}
+            fill="none"
+            stroke="rgba(0,0,0,0.06)"
+            strokeWidth={2}
+          />
 
-      {/* 中心指标 */}
-      <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-        <motion.div
-          initial={{ scale: 0.8, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ type: 'spring', stiffness: 200, damping: 18 }}
-          className="flex flex-col items-center"
-        >
-          <span
-            className="text-6xl font-extrabold tracking-tight tabular-nums bg-clip-text text-transparent leading-none"
-            style={{ backgroundImage: `linear-gradient(135deg, ${AI_GRADIENT_STOPS[0]}, ${AI_GRADIENT_STOPS[2]}, ${AI_GRADIENT_STOPS[3]})` }}
+          {/* 渐变流动环 — 用 <circle> 确保正圆 */}
+          <circle
+            cx={CENTER}
+            cy={CENTER}
+            r={RADIUS}
+            fill="none"
+            stroke="url(#loopGrad)"
+            strokeWidth={3}
+            strokeLinecap="round"
+            strokeDasharray="14 12"
+            filter="url(#loopGlow)"
+            opacity={0.85}
           >
-            {activeCases}
-          </span>
-          <span className="text-[11px] font-medium text-ink-faint mt-2 tracking-wide">活跃案例</span>
-          <span className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-faint">
-            <motion.span
-              className="w-1.5 h-1.5 rounded-full"
-              style={{ background: '#34c759' }}
-              animate={{ scale: [1, 1.5, 1], opacity: [1, 0.5, 1] }}
-              transition={{ duration: 1.8, repeat: Infinity }}
-            />
-            闭环运转中
-          </span>
-        </motion.div>
-      </div>
+            <animate attributeName="stroke-dashoffset" from="0" to="-260" dur="9s" repeatCount="indefinite" />
+          </circle>
 
-      {/* 阶段节点 */}
-      {LOOP_STAGES.map((stage, i) => {
-        const angle = i * step
-        const { x, y } = polar(angle, RADIUS)
-        const count = counts[stage.key] ?? 0
-        const color = AI_GRADIENT_STOPS[i % AI_GRADIENT_STOPS.length]
-        return (
-          <motion.button
-            key={stage.key}
-            onClick={() => onNodeClick?.(stage.key)}
-            initial={{ opacity: 0, scale: 0.5 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ type: 'spring', stiffness: 260, damping: 20, delay: i * 0.05 }}
-            whileHover={{ scale: 1.12 }}
-            whileTap={{ scale: 0.95 }}
-            className="absolute flex flex-col items-center gap-1 group"
-            style={{ left: x, top: y, transform: 'translate(-50%, -50%)' }}
+          {/* 沿环流动的光点 */}
+          {[0, 1, 2].map((i) => (
+            <circle
+              key={i}
+              r={4}
+              fill={AI_GRADIENT_STOPS[i % AI_GRADIENT_STOPS.length]}
+              filter="url(#loopGlow)"
+            >
+              <animateMotion dur="12s" repeatCount="indefinite" begin={`${i * 4}s`}>
+                <mpath href="#loopMotionPath" />
+              </animateMotion>
+            </circle>
+          ))}
+        </svg>
+
+        {/* ── 中心指标 — absolute inset-0 + flex 居中, 与圆心严格对齐 ── */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+          <motion.div
+            initial={{ scale: 0.8, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ type: 'spring', stiffness: 200, damping: 18 }}
+            className="flex flex-col items-center"
           >
             <span
-              className="relative flex items-center justify-center rounded-2xl bg-white border shadow-[0_2px_12px_rgba(0,0,0,0.06)] transition-shadow group-hover:shadow-[0_4px_20px_rgba(0,0,0,0.12)]"
-              style={{ width: NODE_R * 2, height: NODE_R * 2, borderColor: `${color}30` }}
+              className="text-6xl font-extrabold tracking-tight tabular-nums bg-clip-text text-transparent leading-none"
+              style={{ backgroundImage: `linear-gradient(135deg, ${AI_GRADIENT_STOPS[0]}, ${AI_GRADIENT_STOPS[2]}, ${AI_GRADIENT_STOPS[3]})` }}
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">
-                <path d={stage.icon} />
-              </svg>
-              {count > 0 && (
-                <span
-                  className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full text-[10px] font-bold text-white tabular-nums"
-                  style={{ background: color }}
+              {activeCases}
+            </span>
+            <span className="text-[11px] font-medium text-ink-faint mt-2 tracking-wide">活跃案例</span>
+            <span className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-faint">
+              <motion.span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ background: '#34c759' }}
+                animate={{ scale: [1, 1.5, 1], opacity: [1, 0.5, 1] }}
+                transition={{ duration: 1.8, repeat: Infinity }}
+              />
+              闭环运转中
+            </span>
+          </motion.div>
+        </div>
+
+        {/* ── 阶段节点 — 图标中心精确在圆周上 ── */}
+        {LOOP_STAGES.map((stage, i) => {
+          const angle = i * step
+          const { x, y } = polar(angle, RADIUS)
+          const count = counts[stage.key] ?? 0
+          const color = AI_GRADIENT_STOPS[i % AI_GRADIENT_STOPS.length]
+          const xPct = pct(x)
+          const yPct = pct(y)
+
+          return (
+            <Fragment key={stage.key}>
+              {/*
+               * 图标节点:
+               *   - left/top 用百分比（响应式圆周位置）
+               *   - marginLeft/marginTop 用负像素（将图标中心对齐到圆周点）
+               *     （不用 transform: translate, 避免与 framer-motion 的 scale 动画冲突）
+               *   - width/height 固定像素（图标尺寸不随容器缩放）
+               */}
+              <motion.button
+                onClick={() => onNodeClick?.(stage.key)}
+                initial={{ opacity: 0, scale: 0.5 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ type: 'spring', stiffness: 260, damping: 20, delay: i * 0.05 }}
+                whileHover={{ scale: 1.12 }}
+                whileTap={{ scale: 0.95 }}
+                className="absolute flex items-center justify-center rounded-2xl bg-white border shadow-[0_2px_12px_rgba(0,0,0,0.06)] hover:shadow-[0_4px_20px_rgba(0,0,0,0.12)] transition-shadow"
+                style={{
+                  left: `${xPct}%`,
+                  top: `${yPct}%`,
+                  width: NODE_R * 2,
+                  height: NODE_R * 2,
+                  marginLeft: -NODE_R,
+                  marginTop: -NODE_R,
+                  borderColor: `${color}30`,
+                }}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke={color}
+                  strokeWidth={1.8}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="w-6 h-6 pointer-events-none"
                 >
-                  {count > 99 ? '99+' : count}
-                </span>
-              )}
-            </span>
-            <span className="text-[11px] font-medium text-ink-soft group-hover:text-ink transition-colors whitespace-nowrap">
-              {stage.label}
-            </span>
-          </motion.button>
-        )
-      })}
+                  <path d={stage.icon} />
+                </svg>
+                {count > 0 && (
+                  <span
+                    className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full text-[10px] font-bold text-white tabular-nums"
+                    style={{ background: color }}
+                  >
+                    {count > 99 ? '99+' : count}
+                  </span>
+                )}
+              </motion.button>
+
+              {/*
+               * 标签:
+               *   - 独立绝对定位，不影响图标中心
+               *   - 水平居中: translate(-50%, 0)
+               *   - 垂直位置: 图标底部 + 固定间距
+               */}
+              <span
+                className="absolute text-[11px] font-medium text-ink-soft whitespace-nowrap pointer-events-none"
+                style={{
+                  left: `${xPct}%`,
+                  top: `calc(${yPct}% + ${NODE_R + LABEL_GAP}px)`,
+                  transform: 'translate(-50%, 0)',
+                }}
+              >
+                {stage.label}
+              </span>
+            </Fragment>
+          )
+        })}
+      </div>
     </div>
   )
 }

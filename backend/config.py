@@ -78,7 +78,8 @@ class Settings(BaseSettings):
     ttl_scan_interval: int = 30             # TTL 过期扫描间隔（秒）
 
     class Config:
-        env_file = ".env"
+        env_file = "../.env"
+        extra = "ignore"
         env_prefix = "SHARED_MEMORY_"
 
 settings = Settings()

@@ -1,5 +1,5 @@
 # ── 阶段 1: Maven 构建 ──
-FROM maven:3.9-eclipse-temurin-11 AS builder
+FROM hub.rat.dev/library/maven:3.9-eclipse-temurin-11 AS builder
 
 WORKDIR /build
 COPY pom.xml .
@@ -9,7 +9,7 @@ COPY src ./src
 RUN mvn package -DskipTests -B
 
 # ── 阶段 2: Flink 运行时 ──
-FROM flink:1.18.1-scala_2.12-java11
+FROM docker.m.daocloud.io/library/flink:1.18.1-scala_2.12-java11
 
 # 复制构建好的 JAR 到 Flink lib 目录
 COPY --from=builder /build/target/flink-jobs-1.0.0.jar /opt/flink/lib/

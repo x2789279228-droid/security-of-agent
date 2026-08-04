@@ -10,7 +10,7 @@ from collections import defaultdict
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
@@ -48,12 +48,20 @@ from response_engine import (
     approval_queue, policy_engine, response_registry,
     ApprovalStatus, ssh_transport,
 )
+from response_engine.db_safety import db_safety_policy
+from response_engine.ddos_policy import (
+    ddos_policy, DDoSAttackContext, DDoSResponseDecision,
+)
+from trusted_action_gateway.tag_router import router as tag_router_router
 from source_registry import source_registry
 from kafka_consumer import kafka_consumer_manager
 from kafka_producer import kafka_producer
 
 response_orchestrator = get_orchestrator()
 response_logger = get_response_logger()
+
+# 挂载 Trusted Action Gateway 路由 (在 app = FastAPI(...) 之后调用, 见下文)
+# db_safety_policy / ddos_policy 已在 imports 中导入
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -67,19 +75,33 @@ agent_d = AgentD()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting up...")
-    await init_db()
-    await sliding_window.connect()
-    await summary.ensure_client()
-    await embedder.ensure_client()
-    # Connect Redis for context_stream
-    redis_client = await sliding_window.get_redis()
-    if redis_client:
-        embedder.set_redis(redis_client)
-        context_stream.set_redis(redis_client)
-        # 异常检测基线持久化
-        anomaly_detector.set_redis(redis_client)
-        await anomaly_detector.load_baselines_from_redis()
-    logger.info("安全审计模式: 所有事件全量存储，无有损压缩 + 异常基线持久化")
+
+    # ── 数据库初始化 (降级模式: PG 不可用时仍可启动) ──
+    db_ok = True
+    try:
+        await init_db()
+    except Exception as e:
+        db_ok = False
+        logger.warning(f"Database init failed — running in DEGRADED mode: {e}")
+        logger.warning("APIs requiring DB will return empty results / 503")
+
+    # ── Redis 连接 (可选) ──
+    redis_ok = True
+    try:
+        await sliding_window.connect()
+        await summary.ensure_client()
+        await embedder.ensure_client()
+        redis_client = await sliding_window.get_redis()
+        if redis_client:
+            embedder.set_redis(redis_client)
+            context_stream.set_redis(redis_client)
+            anomaly_detector.set_redis(redis_client)
+            await anomaly_detector.load_baselines_from_redis()
+    except Exception as e:
+        redis_ok = False
+        logger.warning(f"Redis init failed — running without Redis: {e}")
+
+    logger.info(f"安全审计模式: db={'OK' if db_ok else 'DEGRADED'} redis={'OK' if redis_ok else 'OFF'}")
     if not settings.llm_api_key:
         logger.warning("LLM API key not set — LLM calls will return fallback responses")
     if not settings.embedding_api_key:
@@ -98,12 +120,13 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Response transport mode: stub (set RESPONSE_SSH_HOST to enable real execution)")
 
-    # 播种安全知识库
-    try:
-        async with async_session() as rag_session:
-            await seed_knowledge_base(rag_session)
-    except Exception as e:
-        logger.warning(f"Knowledge base seeding failed (will retry): {e}")
+    # 播种安全知识库 (数据库不可用时跳过)
+    if db_ok:
+        try:
+            async with async_session() as rag_session:
+                await seed_knowledge_base(rag_session)
+        except Exception as e:
+            logger.warning(f"Knowledge base seeding failed (will retry): {e}")
 
     # 数据源注册表初始化
     source_registry.load_from_config()
@@ -132,17 +155,27 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("HTTP 直连模式: 设置 SHARED_MEMORY_KAFKA_ENABLED=true 启用 Kafka")
 
-    # 启动定时调度器
-    await scheduler.start(async_session)
-    logger.info("Scheduler started")
+    # 启动定时调度器 (数据库不可用时跳过)
+    if db_ok:
+        try:
+            await scheduler.start(async_session)
+            logger.info("Scheduler started")
+        except Exception as e:
+            logger.warning(f"Scheduler start failed: {e}")
+    else:
+        logger.warning("Scheduler skipped (database unavailable)")
 
     # 可观测性: 注册看门狗诊断回调 + 启用 span 持久化
-    from observability.health_monitor import health_monitor
-    from observability.watchdog import watchdog
-    from observability.pipeline_tracer import pipeline_tracer
-    health_monitor.set_diagnose_callback(watchdog.diagnose)
-    pipeline_tracer.enable_persist()
-    logger.info("Observability: health monitor + watchdog + pipeline tracer initialized")
+    try:
+        from observability.health_monitor import health_monitor
+        from observability.watchdog import watchdog
+        from observability.pipeline_tracer import pipeline_tracer
+        health_monitor.set_diagnose_callback(watchdog.diagnose)
+        if db_ok:
+            pipeline_tracer.enable_persist()
+        logger.info("Observability: health monitor + watchdog + pipeline tracer initialized")
+    except Exception as e:
+        logger.warning(f"Observability init failed: {e}")
 
     yield
 
@@ -157,6 +190,67 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 app = FastAPI(title="共享记忆服务层", version="1.0.0", lifespan=lifespan)
+
+# 挂载 Trusted Action Gateway 路由 (A4 / 分步提权 / 审计轨迹)
+app.include_router(tag_router_router, prefix="/api")
+
+# ── 全局 DB 异常处理器 — DB 不可用时返回空数据, 避免 502 ──
+import asyncio
+from fastapi.responses import JSONResponse
+
+DB_EXCEPTION_NAMES = {
+    "OperationalError", "InterfaceError", "ConnectionDoesNotExistError",
+    "ConnectionRefusedError", "ConnectionResetError", "ConnectionAbortedError",
+    "TimeoutError", "asyncio.TimeoutError",
+}
+
+def _is_db_exception(exc: Exception) -> bool:
+    """判断是否为 DB 相关异常"""
+    # 检查异常类名
+    for cls in type(exc).__mro__:
+        if cls.__name__ in DB_EXCEPTION_NAMES:
+            return True
+    # 检查异常消息
+    msg = str(exc).lower()
+    db_keywords = ["connection", "database", "postgres", "pg_", "asyncpg",
+                   "session", "sqlalchemy", "could not connect", "connection refused",
+                   "connection was closed", "no server", "not connected"]
+    for kw in db_keywords:
+        if kw in msg:
+            return True
+    return False
+
+@app.exception_handler(Exception)
+async def global_db_exception_handler(request, exc):
+    """全局异常处理器 — DB 异常返回空数据, 其他异常正常抛出"""
+    if _is_db_exception(exc):
+        path = request.url.path
+        logger.warning(f"DB error in {path} — returning empty data: {type(exc).__name__}: {exc}")
+        # 根据路径推断返回类型
+        # 列表型端点 (返回 list)
+        if any(p in path for p in ["/logs/events", "/cases", "/work-orders",
+                                    "/post-mortems", "/feedback", "/rules/",
+                                    "/memories", "/tree/nodes", "/phishing/history",
+                                    "/drill", "/anomalies", "/chains", "/security/events",
+                                    "/audit", "/observability/diagnostics",
+                                    "/agent-traces", "/eval/runs"]):
+            return JSONResponse(status_code=200, content=[])
+        # 统计型端点 (返回 dict)
+        if any(p in path for p in ["/stats", "/tree/stats", "/tree/consolidate",
+                                    "/rag/stats", "/feedback/stats", "/feedback/suggestions",
+                                    "/audit-llm/stats", "/phishing/stats", "/llm/cost",
+                                    "/sigma/stats", "/cad/accuracy"]):
+            return JSONResponse(status_code=200, content={"total": 0, "items": []})
+        # SSE 流不在这里处理 (StreamingResponse)
+        # 默认返回空 dict
+        return JSONResponse(status_code=200, content={"error": "database unavailable",
+                                                       "items": [], "total": 0})
+    # 非 DB 异常, 让 FastAPI 默认处理 (返回 500)
+    from fastapi.encoders import jsonable_encoder
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "type": type(exc).__name__},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -824,25 +918,29 @@ async def list_events(
     limit: int = 50, offset: int = 0,
     session: AsyncSession = Depends(get_session)
 ):
-    """查询已接入的安全事件"""
-    stmt = select(SecurityEvent).order_by(desc(SecurityEvent.created_at))
-    if session_id:
-        stmt = stmt.where(SecurityEvent.session_id == session_id)
-    if severity:
-        stmt = stmt.where(SecurityEvent.severity == severity)
-    stmt = stmt.limit(limit).offset(offset)
-    result = await session.execute(stmt)
-    rows = result.scalars().all()
-    return [
-        {
-            "id": e.id, "session_id": e.session_id,
-            "event_type": e.event_type, "severity": e.severity,
-            "src_ip": e.src_ip, "dst_ip": e.dst_ip,
-            "message": e.message, "analyzed": e.analyzed,
-            "created_at": e.created_at.isoformat(),
-        }
-        for e in rows
-    ]
+    """查询已接入的安全事件 (数据库不可用时返回空列表, 避免 502)"""
+    try:
+        stmt = select(SecurityEvent).order_by(desc(SecurityEvent.created_at))
+        if session_id:
+            stmt = stmt.where(SecurityEvent.session_id == session_id)
+        if severity:
+            stmt = stmt.where(SecurityEvent.severity == severity)
+        stmt = stmt.limit(limit).offset(offset)
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+        return [
+            {
+                "id": e.id, "session_id": e.session_id,
+                "event_type": e.event_type, "severity": e.severity,
+                "src_ip": e.src_ip, "dst_ip": e.dst_ip,
+                "message": e.message, "analyzed": e.analyzed,
+                "created_at": e.created_at.isoformat(),
+            }
+            for e in rows
+        ]
+    except Exception as e:
+        logger.warning(f"list_events DB error — returning empty list: {e}")
+        return []
 
 # ── Original Endpoints ──
 
@@ -1404,6 +1502,33 @@ async def simulate_threat(
         event_id=req.event_id if req.event_id else None,
         session_id=threat_info["session_id"],
     )
+
+    # 若是 DDoS 攻击, 补充完整决策详情 (便于前端展示)
+    if req.threat_type == "DDoS_TRAFFIC":
+        ctx = DDoSAttackContext(
+            src_ips=[req.src_ip] if req.src_ip else [],
+            src_cidrs=[],
+            target_ip=req.dst_ip,
+            target_service=req.threat_type,
+            traffic_pps=0,
+            traffic_gbps=0.0,
+            evidence_confidence=req.confidence,
+        )
+        ddos_result = ddos_policy.evaluate(ctx)
+        result["ddos_summary"] = {
+            "category": ddos_result.category.value,
+            "decision": ddos_result.decision.value,
+            "allowed_actions": ddos_result.allowed_actions,
+            "denied_actions": ddos_result.denied_actions,
+            "reason": ddos_result.reason,
+            "recommendations": ddos_result.recommendations,
+            "require_human_approval": ddos_result.require_human_approval,
+            "require_canary": ddos_result.require_canary,
+            "require_auto_rollback": ddos_result.require_auto_rollback,
+            "require_health_check": ddos_result.require_health_check,
+            "scrubbing_device_required": ddos_result.scrubbing_device_required,
+        }
+
     return result
 
 @app.get("/api/response/policies")
@@ -1584,6 +1709,57 @@ async def clear_cooldowns(
     """清除所有策略冷却状态（人工干预用）"""
     policy_engine.clear_cooldowns()
     return {"status": "cooldowns_cleared"}
+
+# ── DDoS / A4 预检端点 (供前端展示决策详情, 不执行) ──
+
+class DDoSPreviewRequest(BaseModel):
+    src_ips: list[str] = Field(default_factory=list)
+    src_cidrs: list[str] = Field(default_factory=list)
+    target_ip: str = ""
+    target_service: str = ""
+    traffic_pps: int = 0
+    traffic_gbps: float = 0.0
+    evidence_confidence: float = 0.0
+
+@app.post("/api/response/ddos-preview")
+async def ddos_preview(req: DDoSPreviewRequest):
+    """预演 DDoS 决策 — 不执行任何动作, 只返回策略结果"""
+    ctx = DDoSAttackContext(
+        src_ips=req.src_ips,
+        src_cidrs=req.src_cidrs,
+        target_ip=req.target_ip,
+        target_service=req.target_service,
+        traffic_pps=req.traffic_pps,
+        traffic_gbps=req.traffic_gbps,
+        evidence_confidence=req.evidence_confidence,
+    )
+    result = ddos_policy.evaluate(ctx)
+    return result.to_dict()
+
+class A4CheckRequest(BaseModel):
+    tool_name: str
+    parameters: dict = Field(default_factory=dict)
+    target: str = ""
+    asset_type: str = ""
+
+@app.post("/api/response/a4-check")
+async def a4_check(req: A4CheckRequest):
+    """预检 A4 危险动作 — 不执行, 只返回决策"""
+    decision = db_safety_policy.check_action(
+        tool_name=req.tool_name,
+        parameters=req.parameters,
+        target=req.target,
+        asset_type=req.asset_type,
+    )
+    return decision.to_dict()
+
+@app.get("/api/response/a4-prohibited-tools")
+async def list_a4_prohibited_tools():
+    """列出 A4 永久禁止工具清单"""
+    return {
+        "prohibited_tools": db_safety_policy.list_prohibited_tools(),
+        "allowed_db_actions": db_safety_policy.list_allowed_db_actions(),
+    }
 
 # ── RAG 知识库端点 ──
 

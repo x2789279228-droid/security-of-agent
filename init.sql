@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS memories (
     id SERIAL PRIMARY KEY,
     agent_id VARCHAR(50) NOT NULL DEFAULT 'shared',
     content TEXT NOT NULL,
-    embedding vector,
+    embedding vector(1024),
     metadata JSONB DEFAULT '{}',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS security_events (
     message TEXT DEFAULT '',
     raw_data JSONB DEFAULT '{}',
     analyzed BOOLEAN DEFAULT FALSE,
+    status VARCHAR(20) DEFAULT 'open',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -86,7 +87,7 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
     threat_types JSONB DEFAULT '[]',
     severity VARCHAR(20) DEFAULT 'medium',
     tags JSONB DEFAULT '[]',
-    embedding vector,
+    embedding vector(1024),
     token_count INTEGER DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

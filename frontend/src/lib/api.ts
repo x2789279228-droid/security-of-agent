@@ -506,4 +506,152 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ rule_content: ruleContent, event_ids: eventIds, limit }),
     }),
+
+  // ── TAG (Trusted Action Gateway) 端点 ──
+
+  /** TAG 健康检查 (含执行模式 + 已注册工具) */
+  tagHealth: () =>
+    fetchJSON<any>('/tag/health'),
+
+  /** 列出 TAG 已注册工具 */
+  tagListTools: () =>
+    fetchJSON<{ tools: any[] }>('/tag/tools'),
+
+  /** 创建动作计划 — 完整 10 步流程 (含 A4 预检/分步提权/幂等/执行/审计) */
+  tagCreateAction: (data: {
+    tool_name: string
+    target: string
+    parameters?: Record<string, any>
+    incident_id: string
+    agent_identity: string
+    evidence_ids?: string[]
+    plan_version?: string
+    asset_info?: Record<string, any>
+    trace_id?: string
+    request_id?: string
+    token_jti?: string
+  }) =>
+    fetchJSON<any>('/tag/actions', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  /** 查询动作状态 */
+  tagGetAction: (actionId: string) =>
+    fetchJSON<any>(`/tag/actions/${actionId}`),
+
+  /** 请求回滚 — 幂等 */
+  tagRollback: (actionId: string, operator = 'admin') =>
+    fetchJSON<any>(`/tag/actions/${actionId}/rollback?operator=${operator}`, {
+      method: 'POST',
+    }),
+
+  /** 申请分步授权 */
+  tagRequestGrant: (data: {
+    subject: string
+    incident_id: string
+    tool_name: string
+    target_scope: Record<string, any>
+    parameter_constraints?: Record<string, any>
+    evidence_ids?: string[]
+    approval_level?: string
+    automation_level?: string  // A0/A1/A2/A3
+    ttl_seconds?: number
+    max_executions?: number
+    created_by?: string
+  }) =>
+    fetchJSON<any>('/tag/grants', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  /** 批准分步授权 */
+  tagApproveGrant: (grantId: string, approver = 'cad', notes = '') =>
+    fetchJSON<any>(`/tag/grants/${grantId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ approver, notes }),
+    }),
+
+  /** 拒绝分步授权 */
+  tagDenyGrant: (grantId: string, denyer = 'cad', reason = '') =>
+    fetchJSON<any>(`/tag/grants/${grantId}/deny`, {
+      method: 'POST',
+      body: JSON.stringify({ denyer, reason }),
+    }),
+
+  /** 撤销分步授权 */
+  tagRevokeGrant: (grantId: string, revokedBy = 'admin') =>
+    fetchJSON<any>(`/tag/grants/${grantId}/revoke`, {
+      method: 'POST',
+      body: JSON.stringify({ revoked_by: revokedBy }),
+    }),
+
+  /** 查询 TAG 审计轨迹 */
+  tagAudit: (params: {
+    trace_id?: string
+    incident_id?: string
+    action_id?: string
+    limit?: number
+    offset?: number
+  } = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(params).filter(([_, v]) => v !== undefined && v !== '')
+        .map(([k, v]) => [k, String(v)]),
+    ).toString()
+    return fetchJSON<any[]>(`/tag/audit${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 查询熔断状态 */
+  tagCircuitState: (scopeType: string, scopeKey: string) =>
+    fetchJSON<any>(`/tag/circuit/${scopeType}/${scopeKey}`),
+
+  /** 解除熔断 */
+  tagResetCircuit: (scopeType: string, scopeKey: string, resetBy = 'admin') =>
+    fetchJSON<any>(`/tag/circuit/${scopeType}/${scopeKey}/reset`, {
+      method: 'POST',
+      body: JSON.stringify({ reset_by: resetBy }),
+    }),
+
+  /** 设置执行模式 (shadow / sandbox / production) */
+  tagSetMode: (mode: 'shadow' | 'sandbox' | 'production') =>
+    fetchJSON<any>('/tag/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+
+  // ── DDoS / A4 预检端点 (不执行, 只返回决策) ──
+
+  /** 预演 DDoS 决策 — 不执行, 只返回策略结果 */
+  ddosPreview: (data: {
+    src_ips?: string[]
+    src_cidrs?: string[]
+    target_ip?: string
+    target_service?: string
+    traffic_pps?: number
+    traffic_gbps?: number
+    evidence_confidence?: number
+  }) =>
+    fetchJSON<any>('/response/ddos-preview', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  /** 预检 A4 危险动作 — 不执行, 只返回决策 */
+  a4Check: (data: {
+    tool_name: string
+    parameters?: Record<string, any>
+    target?: string
+    asset_type?: string
+  }) =>
+    fetchJSON<any>('/response/a4-check', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  /** 列出 A4 永久禁止工具 + 数据库安全白名单 */
+  a4ProhibitedTools: () =>
+    fetchJSON<{
+      prohibited_tools: string[]
+      allowed_db_actions: string[]
+    }>('/response/a4-prohibited-tools'),
 }
