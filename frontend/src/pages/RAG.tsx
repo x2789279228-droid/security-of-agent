@@ -3,6 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { PageTransition } from '../components/common/PageTransition'
 import { QualityPanel } from '../components/rag/QualityPanel'
 import { TracePanel } from '../components/rag/TracePanel'
+import { SourceOverview } from '../components/rag/SourceOverview'
+import { ImportActions } from '../components/rag/ImportActions'
+import { CVEQuickCheck } from '../components/rag/CVEQuickCheck'
 import { api } from '../lib/api'
 
 type Tab = 'search' | 'docs' | 'verify' | 'manage' | 'quality' | 'traces'
@@ -30,6 +33,18 @@ const THREAT_OPTIONS = [
   { value: 'DEFENSE_EVASION', label: '防御绕过' },
   { value: 'WEB_ATTACK', label: 'Web攻击' },
   { value: 'SUPPLY_CHAIN', label: '供应链攻击' },
+]
+
+const SOURCE_OPTIONS = [
+  { value: '', label: '所有知识库' },
+  { value: 'mitre-attack', label: 'MITRE ATT&CK' },
+  { value: 'capec', label: 'CAPEC 攻击模式' },
+  { value: 'cve', label: 'CVE 漏洞库' },
+  { value: 'kev', label: '0day/已知被利用' },
+  { value: 'vulnerability', label: '漏洞知识库' },
+  { value: 'policy', label: '监管政策库' },
+  { value: 'playbook', label: '应急 Playbook' },
+  { value: 'internal', label: '内部知识' },
 ]
 
 function classNames(...classes: (string | false | undefined | null)[]) {
@@ -63,6 +78,8 @@ export default function RAG() {
   const [query, setQuery] = useState('')
   const [threatType, setThreatType] = useState('')
   const [topK, setTopK] = useState(5)
+  // 知识库类型过滤（SourceOverview 卡片与搜索/文档管理下拉共用）
+  const [sourceFilter, setSourceFilter] = useState('')
 
   // Docs
   const [docs, setDocs] = useState<any[]>([])
@@ -73,27 +90,28 @@ export default function RAG() {
   const [bulkStatus, setBulkStatus] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => {
-    loadStats()
-  }, [])
-
   const loadStats = useCallback(async () => {
     try {
-      const [s, d] = await Promise.all([api.ragStats(), api.ragDocuments()])
+      const [s, d] = await Promise.all([api.ragStats(), api.ragDocuments('', sourceFilter)])
       setStats(s)
       setDocs(d?.documents || [])
     } catch (e: any) { setError(e.message) }
-  }, [])
+  }, [sourceFilter])
+
+  // 挂载 + source 过滤变化时刷新
+  useEffect(() => {
+    loadStats()
+  }, [loadStats])
 
   const doSearch = useCallback(async () => {
     if (!query && !threatType) { setError('请输入查询内容或选择威胁类型'); return }
     setLoading(true); setError(''); setResult(null)
     try {
-      const data = await api.ragSearch({ query, threat_type: threatType, top_k: topK })
+      const data = await api.ragSearch({ query, threat_type: threatType, top_k: topK, source: sourceFilter })
       setResult(data)
     } catch (e: any) { setError(e.message) }
     finally { setLoading(false) }
-  }, [query, threatType, topK])
+  }, [query, threatType, topK, sourceFilter])
 
   const doVerify = async () => {
     setLoading(true); setError(''); setResult(null)
@@ -179,12 +197,15 @@ export default function RAG() {
         </div>
         <div className="mb-8" />
 
+        {/* ═══ 知识库类型分布卡片（点击过滤检索/文档管理） ═══ */}
+        <SourceOverview activeSource={sourceFilter} onSelect={setSourceFilter} />
+
         {/* ═══ 知识库为空提示 ═══ */}
         {isEmpty && (
           <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
             className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl">
             <p className="text-sm font-semibold text-amber-800 mb-1">知识库为空 — 立即载入安全知识</p>
-            <p className="text-xs text-amber-600 mb-3">从 MITRE 官方源获取完整攻击知识库，或使用预置知识快速填充</p>
+            <p className="text-xs text-amber-600 mb-3">从 MITRE 官方源获取完整攻击知识库，或导入 CVE/KEV/政策/精选漏洞库</p>
             <div className="flex gap-2 flex-wrap">
               <button onClick={async () => {
                 setLoading(true); setError(''); setResult(null)
@@ -213,6 +234,42 @@ export default function RAG() {
               <button onClick={doSeed} disabled={loading}
                 className="px-4 py-2 text-xs font-sans font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50">
                 {loading ? '播种中...' : '填充预置知识 (31篇)'}
+              </button>
+              <button onClick={async () => {
+                setLoading(true); setError(''); setResult(null)
+                try {
+                  const r = await api.ragImportKEV()
+                  setResult(`0day/KEV 导入完成: ${r.imported} 篇新文档, 联动 ${r.updated}`)
+                  await loadStats()
+                } catch (e: any) { setError(e.message) }
+                finally { setLoading(false) }
+              }} disabled={loading}
+                className="px-4 py-2 text-xs font-sans font-medium bg-rose-600 text-white rounded-lg hover:bg-rose-700 disabled:opacity-50">
+                {loading ? '导入中...' : '导入 0day/KEV'}
+              </button>
+              <button onClick={async () => {
+                setLoading(true); setError(''); setResult(null)
+                try {
+                  const r = await api.ragImportPolicy()
+                  setResult(`监管政策库导入完成: ${r.imported} 篇`)
+                  await loadStats()
+                } catch (e: any) { setError(e.message) }
+                finally { setLoading(false) }
+              }} disabled={loading}
+                className="px-4 py-2 text-xs font-sans font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50">
+                {loading ? '导入中...' : '导入监管政策库'}
+              </button>
+              <button onClick={async () => {
+                setLoading(true); setError(''); setResult(null)
+                try {
+                  const r = await api.ragImportVulnerability()
+                  setResult(`精选漏洞库导入完成: ${r.imported} 篇`)
+                  await loadStats()
+                } catch (e: any) { setError(e.message) }
+                finally { setLoading(false) }
+              }} disabled={loading}
+                className="px-4 py-2 text-xs font-sans font-medium bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50">
+                {loading ? '导入中...' : '导入精选漏洞库'}
               </button>
             </div>
           </motion.div>
@@ -250,10 +307,14 @@ export default function RAG() {
         {/* ═══ Tab: 知识检索 ═══ */}
         {activeTab === 'search' && (
           <div className="space-y-4">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <input type="text" placeholder="搜索查询（如 C2通信、暴力破解）" value={query}
                 onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && doSearch()}
-                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                className="flex-1 min-w-[160px] px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+              <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}
+                className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                {SOURCE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
               <select value={threatType} onChange={e => setThreatType(e.target.value)}
                 className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
                 <option value="">所有类型</option>
@@ -270,6 +331,9 @@ export default function RAG() {
                 {loading ? '搜索中...' : '搜索'}
               </button>
             </div>
+
+            {/* CVE 速查 */}
+            <CVEQuickCheck />
 
             {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
 
@@ -310,8 +374,12 @@ export default function RAG() {
         {/* ═══ Tab: 文档管理 ═══ */}
         {activeTab === 'docs' && (
           <div className="space-y-4">
-            <div className="flex gap-2 flex-wrap">
+            <div className="flex gap-2 flex-wrap items-center">
               <button onClick={loadStats} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">刷新列表</button>
+              <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}
+                className="px-3 py-1.5 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                {SOURCE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
               <button onClick={doSeed} disabled={loading}
                 className="px-3 py-1.5 text-xs font-sans font-medium bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 disabled:opacity-50">
                 {loading ? '播种中...' : '重新播种预置知识'}
@@ -446,6 +514,15 @@ export default function RAG() {
                   {loading ? '导入中...' : '导入全部 (ATT&CK+CAPEC)'}
                 </button>
               </div>
+            </div>
+
+            {/* ── CVE/KEV/政策/精选漏洞 导入 ── */}
+            <div className="border border-line rounded-xl p-4">
+              <p className="text-sm font-semibold text-ink mb-2">导入漏洞 / 政策知识库</p>
+              <p className="text-xs text-ink-soft mb-3">
+                CVE（NVD 聚焦）· 0day/已知被利用（CISA KEV）· 监管政策 · 手工精选漏洞 — 均幂等，可重复导入
+              </p>
+              <ImportActions onImported={loadStats} />
             </div>
 
             {/* ── 一键填充预置知识 ── */}

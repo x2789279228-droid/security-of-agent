@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from sqlalchemy import select, and_, or_, func as sql_func, text
+from sqlalchemy import Numeric, select, and_, or_, func as sql_func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,9 @@ class Retriever:
         threat_type: str = "",
         severity: str = "",
         source: str = "",
+        cve_id: str = "",
+        cvss_min: Optional[float] = None,
+        product: str = "",
         top_k: int = 5,
         min_score: float = 0.6,
     ) -> RetrievalResult:
@@ -52,7 +55,10 @@ class Retriever:
             query_embedding: 向量查询（预计算）
             threat_type: 威胁类型过滤
             severity: 严重度过滤
-            source: 来源过滤
+            source: 来源过滤（支持逗号分隔多值，如 "cve,vulnerability"）
+            cve_id: CVE-ID 精确过滤（metadata_->>'cve_id' = :x）
+            cvss_min: 最低 CVSS 分值过滤（(metadata_->>'cvss_score')::numeric >= :x）
+            product: 受影响产品过滤（metadata_->'products' ? :x）
             top_k: 返回条数
             min_score: 最低相似度
 
@@ -66,20 +72,38 @@ class Retriever:
             return await self._vector_search(
                 session, query_embedding, threat_type, severity, source,
                 top_k, min_score, query,
+                cve_id=cve_id, cvss_min=cvss_min, product=product,
             )
 
         # 策略 2: 文本查询 + 过滤
-        if query or threat_type or severity or source:
+        if query or threat_type or severity or source or cve_id or cvss_min or product:
             return await self._filter_search(
                 session, query, threat_type, severity, source, top_k,
+                cve_id=cve_id, cvss_min=cvss_min, product=product,
             )
 
         return RetrievalResult()
+
+    async def retrieve_cve(
+        self,
+        session: AsyncSession,
+        cve_id: str,
+        top_k: int = 3,
+    ) -> RetrievalResult:
+        """按 CVE-ID 精确检索知识库（验证器 CVE 专项、速查用）"""
+        return await self.retrieve(
+            session, cve_id=cve_id.strip().upper(), top_k=top_k, min_score=0.0,
+        )
+
+    def _split_sources(self, source: str) -> list[str]:
+        """逗号分隔的 source 参数 → 列表（空返回空列表）"""
+        return [s.strip() for s in source.split(",") if s.strip()] if source else []
 
     async def _vector_search(
         self, session: AsyncSession, embedding: list[float],
         threat_type: str, severity: str, source: str,
         top_k: int, min_score: float, query: str,
+        cve_id: str = "", cvss_min: Optional[float] = None, product: str = "",
     ) -> RetrievalResult:
         """向量相似度检索"""
         from models import KnowledgeChunk
@@ -98,14 +122,30 @@ class Retriever:
         filter_clauses = ["TRUE"]
         bind_params: dict = {}
         if threat_type:
-            filter_clauses.append("threat_types @> CAST(:threat_type AS jsonb)")
+            filter_clauses.append("c.threat_types @> CAST(:threat_type AS jsonb)")
             bind_params["threat_type"] = json.dumps([threat_type])
         if severity:
-            filter_clauses.append("severity = :severity")
+            filter_clauses.append("c.severity = :severity")
             bind_params["severity"] = severity
-        if source:
-            filter_clauses.append("source = :source")
-            bind_params["source"] = source
+        sources = self._split_sources(source)
+        if len(sources) == 1:
+            filter_clauses.append("c.source = :source")
+            bind_params["source"] = sources[0]
+        elif len(sources) > 1:
+            placeholders = ", ".join(f":src{i}" for i in range(len(sources)))
+            filter_clauses.append(f"c.source IN ({placeholders})")
+            for i, s in enumerate(sources):
+                bind_params[f"src{i}"] = s
+        if cve_id:
+            # metadata 在 knowledge_docs 上，join 后走 d.metadata 过滤
+            filter_clauses.append("d.metadata->>'cve_id' = :cve_id")
+            bind_params["cve_id"] = cve_id.upper()
+        if cvss_min is not None:
+            filter_clauses.append("(d.metadata->>'cvss_score')::numeric >= :cvss_min")
+            bind_params["cvss_min"] = float(cvss_min)
+        if product:
+            filter_clauses.append("d.metadata->'products' ? :product")
+            bind_params["product"] = product
 
         where_sql = " AND ".join(filter_clauses)
         limit = top_k * 2
@@ -116,12 +156,13 @@ class Retriever:
         vec_literal = f"'{vec_str}'::vector"
 
         sql = sa_text(f"""
-            SELECT id, doc_id, content, title, source,
-                   threat_types, severity, tags,
-                   (embedding <=> {vec_literal}) AS distance
-            FROM knowledge_chunks
-            WHERE {where_sql}
-              AND embedding IS NOT NULL
+            SELECT c.id, c.doc_id, c.content, c.title, c.source,
+                   c.threat_types, c.severity, c.tags, d.metadata,
+                   (c.embedding <=> {vec_literal}) AS distance
+            FROM knowledge_chunks c
+            JOIN knowledge_docs d ON d.id = c.doc_id
+            WHERE c.embedding IS NOT NULL
+              AND {where_sql}
             ORDER BY distance ASC
             LIMIT {limit}
         """)
@@ -148,6 +189,7 @@ class Retriever:
                 "threat_types": row[5] or [],
                 "severity": row[6] or "",
                 "tags": row[7] or [],
+                "metadata": row[8] if row[8] is not None else {},
                 "score": round(score, 4),
                 "strategy": "vector",
             })
@@ -164,9 +206,10 @@ class Retriever:
         self, session: AsyncSession,
         query: str, threat_type: str, severity: str, source: str,
         top_k: int,
+        cve_id: str = "", cvss_min: Optional[float] = None, product: str = "",
     ) -> RetrievalResult:
         """按条件过滤 + 文本模糊匹配"""
-        from models import KnowledgeChunk
+        from models import KnowledgeChunk, KnowledgeDoc
 
         conditions = []
         if query:
@@ -174,22 +217,35 @@ class Retriever:
         if threat_type:
             # jsonb 列必须用 @> 运算符（JSON.contains() 会生成不支持的 LIKE）
             conditions.append(
-                text("threat_types @> CAST(:threat_type AS jsonb)").bindparams(
+                text("knowledge_chunks.threat_types @> CAST(:threat_type AS jsonb)").bindparams(
                     threat_type=json.dumps([threat_type])
                 )
             )
         if severity:
             conditions.append(KnowledgeChunk.severity == severity)
-        if source:
-            conditions.append(KnowledgeChunk.source == source)
+        sources = self._split_sources(source)
+        if sources:
+            conditions.append(KnowledgeChunk.source.in_(sources))
+        # cve_id / cvss_min / product 都存于 knowledge_docs.metadata（chunk 无 metadata 列），
+        # 通过 doc_id 关联过滤并随结果带回 doc metadata
+        if cve_id:
+            conditions.append(KnowledgeDoc.metadata_["cve_id"].astext == cve_id.upper())
+        if cvss_min is not None:
+            conditions.append(
+                KnowledgeDoc.metadata_["cvss_score"].astext.cast(Numeric) >= float(cvss_min)
+            )
+        if product:
+            conditions.append(KnowledgeDoc.metadata_["products"].has_key(product))
 
-        stmt = select(KnowledgeChunk)
+        stmt = select(KnowledgeChunk, KnowledgeDoc.metadata_).join(
+            KnowledgeDoc, KnowledgeDoc.id == KnowledgeChunk.doc_id
+        )
         if conditions:
             stmt = stmt.where(and_(*conditions))
         stmt = stmt.limit(top_k)
 
         result = await session.execute(stmt)
-        rows = result.scalars().all()
+        rows = result.all()
 
         chunks = [
             {
@@ -201,10 +257,11 @@ class Retriever:
                 "threat_types": r.threat_types,
                 "severity": r.severity,
                 "tags": r.tags,
+                "metadata": meta if meta is not None else {},
                 "score": 1.0,
                 "strategy": "filter",
             }
-            for r in rows
+            for r, meta in rows
         ]
 
         return RetrievalResult(

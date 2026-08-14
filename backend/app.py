@@ -40,6 +40,8 @@ from rag import (
     kb_manager, retriever, security_chunker, seed_knowledge_base,
     evidence_verifier, RAGContextBuilder,
     import_enterprise_attack, import_capec,
+    import_cves, import_kev, import_policy, import_vuln_seed,
+    import_lock,
     get_import_status, set_import_status, ImportStatus,
 )
 from response_engine import (
@@ -120,10 +122,12 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Response transport mode: stub (set RESPONSE_SSH_HOST to enable real execution)")
 
-    # 播种安全知识库 (数据库不可用时跳过)
+    # 播种安全知识库 + 幂等建索引 (数据库不可用时跳过)
     if db_ok:
         try:
+            from rag.knowledge_base import ensure_kb_indexes
             async with async_session() as rag_session:
+                await ensure_kb_indexes(rag_session)
                 await seed_knowledge_base(rag_session)
         except Exception as e:
             logger.warning(f"Knowledge base seeding failed (will retry): {e}")
@@ -1768,6 +1772,9 @@ class RAGSearchRequest(BaseModel):
     threat_type: str = ""
     severity: str = ""
     source: str = ""
+    cve_id: str = ""
+    cvss_min: float = 0.0
+    product: str = ""
     top_k: int = 5
     min_score: float = 0.0
 
@@ -1787,6 +1794,9 @@ async def rag_search(
         threat_type=req.threat_type,
         severity=req.severity,
         source=req.source,
+        cve_id=req.cve_id,
+        cvss_min=req.cvss_min if req.cvss_min > 0 else None,
+        product=req.product,
         top_k=req.top_k,
         min_score=req.min_score,
     )
@@ -1800,15 +1810,19 @@ async def rag_search(
 async def rag_list_documents(
     threat_type: str = Query(""),
     source: str = Query(""),
+    severity: str = Query(""),
     limit: int = Query(20),
     offset: int = Query(0),
     session: AsyncSession = Depends(get_session)
 ):
-    """列出知识库文档"""
+    """列出知识库文档（未指定 source 时排除 cve/kev 大批量源，避免文档管理页被淹没）"""
+    from rag.kb_types import BULK_SOURCES
     docs = await kb_manager.search_documents(
         session,
         threat_type=threat_type,
         source=source,
+        severity=severity,
+        exclude_sources=BULK_SOURCES if not source else None,
         limit=limit,
         offset=offset,
     )
@@ -2005,6 +2019,120 @@ async def rag_import_all(
     except Exception as e:
         s.fail(str(e))
         raise
+
+@app.post("/api/rag/import/cve")
+async def rag_import_cve(
+    limit: int = Query(0, description="最大导入数(0=全部)"),
+    days: int = Query(0, description="时间窗口天数(0=config 默认)"),
+    cvss_min: float = Query(0.0, description="最低 CVSS 分值(0=config 默认)"),
+    incremental_days: int = Query(0, description=">0 时按 lastModified 增量 upsert(调度器用)"),
+    session: AsyncSession = Depends(get_session),
+):
+    """从 NVD 聚焦导入 CVE 漏洞库（近 days 天 + CVSS≥cvss_min）"""
+    if days <= 0:
+        days = settings.cve_window_days
+    if cvss_min <= 0:
+        cvss_min = settings.cve_min_cvss
+    async with import_lock:
+        s = ImportStatus()
+        s.start("cve")
+        set_import_status(s)
+        try:
+            result = await import_cves(
+                session, limit=limit, days=days, cvss_min=cvss_min,
+                incremental_days=incremental_days,
+            )
+            s.finish(result.imported, result.skipped, result.errors, result.error_details)
+            return {"status": "ok" if result.errors == 0 else "partial", "source": "cve", **result.to_dict()}
+        except Exception as e:
+            s.fail(str(e))
+            raise
+
+@app.post("/api/rag/import/kev")
+async def rag_import_kev(
+    session: AsyncSession = Depends(get_session),
+):
+    """从 CISA KEV 导入 0day/已知被利用漏洞库（按 cve_id 与既有文档联动标记）"""
+    async with import_lock:
+        s = ImportStatus()
+        s.start("kev")
+        set_import_status(s)
+        try:
+            result = await import_kev(session)
+            s.finish(result.imported, result.skipped, result.errors, result.error_details)
+            return {"status": "ok" if result.errors == 0 else "partial", "source": "kev", **result.to_dict()}
+        except Exception as e:
+            s.fail(str(e))
+            raise
+
+@app.post("/api/rag/import/policy")
+async def rag_import_policy(
+    force: bool = Query(False, description="True 时覆盖已有政策文档"),
+    session: AsyncSession = Depends(get_session),
+):
+    """导入安全监管政策库（内嵌数据，幂等）"""
+    async with import_lock:
+        s = ImportStatus()
+        s.start("policy")
+        set_import_status(s)
+        try:
+            result = await import_policy(session, force=force)
+            s.finish(result.imported, result.skipped, result.errors, result.error_details)
+            return {"status": "ok" if result.errors == 0 else "partial", "source": "policy", **result.to_dict()}
+        except Exception as e:
+            s.fail(str(e))
+            raise
+
+@app.post("/api/rag/import/vulnerability")
+async def rag_import_vulnerability(
+    force: bool = Query(False, description="True 时覆盖已有精选漏洞文档"),
+    session: AsyncSession = Depends(get_session),
+):
+    """导入漏洞知识库（手工精选高影响漏洞，幂等）"""
+    async with import_lock:
+        s = ImportStatus()
+        s.start("vulnerability")
+        set_import_status(s)
+        try:
+            result = await import_vuln_seed(session, force=force)
+            s.finish(result.imported, result.skipped, result.errors, result.error_details)
+            return {"status": "ok" if result.errors == 0 else "partial", "source": "vulnerability", **result.to_dict()}
+        except Exception as e:
+            s.fail(str(e))
+            raise
+
+@app.get("/api/rag/cve/{cve_id}")
+async def rag_cve_lookup(
+    cve_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """CVE 速查：按 cve_id 返回知识库文档（cve/kev/vulnerability 三源中最新一条）"""
+    from rag.kb_types import SOURCE_CVE, SOURCE_KEV, SOURCE_VULN
+    doc = await kb_manager.find_doc_by_metadata(
+        session, {"cve_id": cve_id.strip().upper()},
+        sources=[SOURCE_CVE, SOURCE_KEV, SOURCE_VULN],
+    )
+    if not doc:
+        raise HTTPException(404, f"CVE {cve_id} not found in knowledge base")
+    return doc
+
+@app.get("/api/rag/sources")
+async def rag_sources(
+    session: AsyncSession = Depends(get_session),
+):
+    """知识库类型分布：source + 中文标签 + 文档数（前端分布卡片用）"""
+    from rag.kb_types import KB_LABELS, ALL_KB_SOURCES
+    stats = await kb_manager.get_stats(session)
+    by_source = stats.get("by_source", {})
+    items = []
+    for src in ALL_KB_SOURCES:
+        items.append({
+            "source": src,
+            "label": KB_LABELS.get(src, src),
+            "documents": by_source.get(src, {}).get("documents", 0),
+            "chunks": by_source.get(src, {}).get("chunks", 0),
+        })
+    return {"sources": items}
 
 # ── 质量评估端点 ──
 

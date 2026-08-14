@@ -157,11 +157,12 @@ class ToolBuilder:
         }
 
     def _build_knowledge_params(self, params: dict, session_id: str) -> dict:
-        """构造安全知识库检索参数"""
+        """构造安全知识库检索参数（source 逗号分隔多库，由 decomposer 按威胁类型推荐）"""
         return {
             "query": params.get("query", ""),
             "threat_type": params.get("threat_type", ""),
             "severity": params.get("severity", ""),
+            "source": params.get("source", ""),
             "top_k": params.get("top_k", 5),
         }
 

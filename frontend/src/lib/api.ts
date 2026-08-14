@@ -234,6 +234,30 @@ export const api = {
   ragImportStatus: () =>
     fetchJSON<any>('/rag/import/status'),
 
+  /** 聚焦导入 NVD CVE（近 days 天 + CVSS≥cvss_min） */
+  ragImportCVE: (limit = 0, days = 365, cvssMin = 7) =>
+    fetchJSON<any>(`/rag/import/cve?limit=${limit}&days=${days}&cvss_min=${cvssMin}`, { method: 'POST' }),
+
+  /** 导入 CISA KEV（0day / 已知被利用漏洞） */
+  ragImportKEV: () =>
+    fetchJSON<any>('/rag/import/kev', { method: 'POST' }),
+
+  /** 导入安全监管政策库（force=是否覆盖已有条目） */
+  ragImportPolicy: (force = false) =>
+    fetchJSON<any>(`/rag/import/policy?force=${force}`, { method: 'POST' }),
+
+  /** 导入手工精选漏洞库（force=是否覆盖已有条目） */
+  ragImportVulnerability: (force = false) =>
+    fetchJSON<any>(`/rag/import/vulnerability?force=${force}`, { method: 'POST' }),
+
+  /** CVE 速查（按 CVE-ID 精确查询） */
+  ragCve: (cveId: string) =>
+    fetchJSON<any>(`/rag/cve/${encodeURIComponent(cveId)}`),
+
+  /** 获取知识库分类统计（source + 中文标签 + 文档/分块数） */
+  ragSources: () =>
+    fetchJSON<{ sources: Array<{ source: string; label: string; documents: number; chunks: number }> }>('/rag/sources'),
+
   // ── 质量评估 ──
 
   /** 评估一次 RAG 检索质量 */

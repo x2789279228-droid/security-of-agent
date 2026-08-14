@@ -5,11 +5,15 @@
 支持状态查询，供前端轮询显示进度。
 """
 import time
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# 全局导入锁：调度器与手动导入共用，防止并发导入互相覆盖单槽 ImportStatus
+import_lock = asyncio.Lock()
 
 
 class ImportStatus:

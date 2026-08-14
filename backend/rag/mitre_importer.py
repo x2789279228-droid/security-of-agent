@@ -256,7 +256,7 @@ async def import_enterprise_attack(
                     threat_types=threat_types,
                     severity=severity,
                     tags=tags,
-                    embedding=[0.0],
+                    embedding=None,
                     token_count=chunk_data["token_count"],
                 )
                 session.add(chunk)
@@ -274,10 +274,10 @@ async def import_enterprise_attack(
         f"{result.imported} imported, {result.skipped} skipped, {result.errors} errors"
     )
 
-    # 异步计算 embedding
+    # 异步计算 embedding（后台任务自建 session，独立于请求生命周期）
     if result.imported > 0:
         from .seeder import _compute_missing_embeddings
         asyncio_create = __import__("asyncio").create_task
-        asyncio_create(_compute_missing_embeddings(session))
+        asyncio_create(_compute_missing_embeddings(None))
 
     return result

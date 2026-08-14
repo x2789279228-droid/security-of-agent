@@ -8,6 +8,7 @@
   - 日志分析模式与 IOC 指标
   - 漏洞分类与处置指南
 """
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -980,7 +981,7 @@ async def seed_knowledge_base(session: AsyncSession):
 
 
 async def _compute_missing_embeddings(session_factory_or_session):
-    """为没有 embedding 的 chunk 计算向量"""
+    """为没有 embedding 的 chunk 计算向量（循环分批，可中断续跑）"""
     try:
         from models import KnowledgeChunk
         from sqlalchemy import select
@@ -996,32 +997,53 @@ async def _compute_missing_embeddings(session_factory_or_session):
         logger.warning(f"Embedding computation failed (will retry later): {e}")
 
 
+# 向量回填全局锁：防止多个导入/种子任务并发回填互相踩踏
+_BACKFILL_LOCK = asyncio.Lock()
+_BACKFILL_BATCH = 50        # 每批处理的 chunk 数
+_BACKFILL_SLEEP = 0.3       # 批间限流间隔（秒）
+
+
 async def _do_compute(session, model, embedder):
-    """批量计算 embedding"""
+    """批量计算 embedding — 循环分批直到全部回填，批间限流，可中断续跑
+
+    每批处理完即 commit，未计算块会被下一次查询自然选中（where 条件
+    排除 embedding IS NULL / [0.0]），因此断点续跑无需额外游标。
+    """
     from sqlalchemy import select, func
 
-    total = (await session.execute(
-        select(func.count(model.id)).where(
-            model.embedding.is_(None) | (model.embedding == [0.0])
-        )
-    )).scalar() or 0
+    async with _BACKFILL_LOCK:
+        total = (await session.execute(
+            select(func.count(model.id)).where(
+                model.embedding.is_(None) | (model.embedding == [0.0])
+            )
+        )).scalar() or 0
 
-    if total == 0:
-        return
+        if total == 0:
+            return
 
-    stmt = select(model).where(
-        model.embedding.is_(None) | (model.embedding == [0.0])
-    ).limit(50)
-    result = await session.execute(stmt)
-    chunks = result.scalars().all()
+        logger.info(f"Computing embeddings for {total} chunks (batch={_BACKFILL_BATCH})...")
+        computed = 0
+        while True:
+            stmt = select(model).where(
+                model.embedding.is_(None) | (model.embedding == [0.0])
+            ).limit(_BACKFILL_BATCH)
+            result = await session.execute(stmt)
+            chunks = result.scalars().all()
+            if not chunks:
+                break
 
-    logger.info(f"Computing embeddings for {len(chunks)} chunks...")
-    for chunk in chunks:
-        try:
-            vec = await embedder.embed(chunk.content[:1000])
-            chunk.embedding = vec
-        except Exception as e:
-            logger.warning(f"Embedding failed for chunk {chunk.id}: {e}")
+            for chunk in chunks:
+                try:
+                    vec = await embedder.embed(chunk.content[:1000])
+                    chunk.embedding = vec
+                    computed += 1
+                except Exception as e:
+                    logger.warning(f"Embedding failed for chunk {chunk.id}: {e}")
 
-    await session.commit()
-    logger.info(f"Embeddings computed for {len(chunks)} chunks")
+            await session.commit()
+            logger.info(f"Embedding backfill: {computed}/{total} (batch {len(chunks)})")
+            if len(chunks) < _BACKFILL_BATCH:
+                break
+            await asyncio.sleep(_BACKFILL_SLEEP)
+
+        logger.info(f"Embedding backfill complete: {computed} chunks")

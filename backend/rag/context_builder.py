@@ -4,8 +4,9 @@ RAG 上下文构建器 — 将检索结果格式化为 LLM 可用的上下文
 功能:
   1. 格式化检索块为结构化文本
   2. 添加来源引用（减少幻觉的关键）
-  3. 按相关性排序
-  4. 控制在 token 预算内
+  3. 带 metadata 的块（CVE/KEV/政策等）追加结构化引用行 + 时效提示
+  4. 按相关性排序
+  5. 控制在 token 预算内
 
 集成到审计流水线:
   - SubAuditor: 审核前注入相关知识
@@ -13,11 +14,52 @@ RAG 上下文构建器 — 将检索结果格式化为 LLM 可用的上下文
   - Reviewer: 验证结论
 """
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from .retriever import RetrievalResult
 
 logger = logging.getLogger(__name__)
+
+# 超过该天数的 CVE/漏洞知识标注"可能过期"，避免 LLM 依据过期数据断言"无修复"
+_STALENESS_DAYS = 180
+
+
+def _metadata_reference_lines(chunk: dict) -> list[str]:
+    """从 chunk.metadata 编译结构化引用行（CVE/发布时间/利用状态/参考链接）"""
+    metadata = chunk.get("metadata") or {}
+    if not isinstance(metadata, dict) or not metadata:
+        return []
+
+    lines: list[str] = []
+    cve_id = metadata.get("cve_id")
+    if cve_id:
+        lines.append(f"CVE: {cve_id}")
+
+    published = metadata.get("published") or metadata.get("date_added") or ""
+    if published:
+        shown = str(published)[:10]
+        lines.append(f"发布时间: {shown}")
+        try:
+            pub_dt = datetime.fromisoformat(shown).replace(tzinfo=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - pub_dt).days
+            if age_days > _STALENESS_DAYS:
+                lines.append("⚠ 数据可能过期，请核实最新版本与修复状态")
+        except ValueError:
+            pass
+
+    if metadata.get("exploit_available") or metadata.get("known_exploited"):
+        lines.append("利用状态: 已在野外利用(KEV)")
+
+    fix_version = metadata.get("fix_version")
+    if fix_version:
+        lines.append(f"修复版本: {fix_version}")
+
+    refs = metadata.get("references") or []
+    if refs and isinstance(refs, list):
+        lines.append("参考: " + "; ".join(str(r) for r in refs[:2]))
+
+    return lines
 
 
 class RAGContextBuilder:
@@ -74,7 +116,14 @@ class RAGContextBuilder:
                 block += f" | {type_info}"
             if severity:
                 block += f" | 严重度: {severity}"
-            block += f"\n> ID: {chunk_id}\n\n{content}\n"
+            block += f"\n> ID: {chunk_id}"
+
+            # 结构化引用行（CVE/KEV/政策等 metadata）：来源/发布时间/利用状态/参考链接/时效提示
+            meta_lines = _metadata_reference_lines(chunk)
+            if meta_lines:
+                block += "\n> " + " | ".join(meta_lines)
+
+            block += f"\n\n{content}\n"
 
             estimated = len(block) // 2
             if tokens_used + estimated > limit:

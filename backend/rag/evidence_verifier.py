@@ -8,6 +8,10 @@
   4. 标记无依据断言为"疑似幻觉"
   5. 返回验证报告供下游降权
 
+CVE 专项（减少漏洞类幻觉）:
+  断言中命中 CVE-\d{4}-\d{4,} 时，先按 cve_id 精确检索并置顶普通检索结果，
+  并在验证 prompt 顶部提示 LLM 优先核对 CVE-ID/发布时间/受影响产品/利用状态。
+
 集成点:
   - 在 ChunkVerdict.validate_evidence() 之后调用
   - 在 Executor._synthesize_from_chunks() 中注入
@@ -15,6 +19,7 @@
 """
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -23,6 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .retriever import Retriever, RetrievalResult
 from .context_builder import rag_context_builder
 from summary_compression import summary
+
+# 匹配标准 CVE-ID（如 CVE-2021-44228），用于 CVE 精确验证
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}")
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +93,20 @@ class EvidenceVerifier:
             min_score=0.5,
         )
 
+        # CVE 专项：断言含 CVE-ID 时按 cve_id 精确检索并置顶
+        cve_pinned = False
+        cve_match = _CVE_RE.search(claim.upper())
+        if cve_match:
+            cve_result = await self.retriever.retrieve_cve(
+                session, cve_match.group(0), top_k=2,
+            )
+            if cve_result.chunks:
+                seen = {c["id"] for c in result.chunks}
+                pinned = [c for c in cve_result.chunks if c["id"] not in seen]
+                result.chunks = pinned + result.chunks
+                result.chunks = result.chunks[:5]
+                cve_pinned = True
+
         if not result.chunks:
             return VerifierReport(
                 claim=claim[:200],
@@ -95,6 +117,11 @@ class EvidenceVerifier:
 
         # 2. 构建验证 prompt
         prompt = rag_context_builder.build_verification_prompt(claim, result)
+        if cve_pinned:
+            prompt = (
+                "已精确匹配到 CVE 记录，请优先核对 CVE-ID、发布时间、受影响产品与利用状态是否一致。\n\n"
+                + prompt
+            )
 
         # 3. LLM 验证
         try:

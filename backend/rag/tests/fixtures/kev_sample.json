@@ -1,0 +1,33 @@
+{
+  "title": "CISA Catalog of Known Exploited Vulnerabilities",
+  "catalogVersion": "2024.01.01",
+  "count": 2,
+  "vulnerabilities": [
+    {
+      "cveID": "CVE-2021-44228",
+      "vendorProject": "Apache",
+      "product": "Log4j",
+      "vulnerabilityName": "Apache Log4j Remote Code Execution",
+      "dateAdded": "2021-12-10",
+      "dueDate": "2022-01-14",
+      "knownRansomwareCampaignUse": "Known",
+      "notes": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+      "requiredAction": "Apply updates per vendor instructions.",
+      "shortDescription": "Apache Log4j2 contains a JNDI injection vulnerability where an attacker with control over log messages can execute arbitrary code.",
+      "cwes": []
+    },
+    {
+      "cveID": "CVE-2023-4966",
+      "vendorProject": "Citrix",
+      "product": "NetScaler ADC",
+      "vulnerabilityName": "Citrix Bleed",
+      "dateAdded": "2023-10-16",
+      "dueDate": "2023-10-31",
+      "knownRansomwareCampaignUse": "Known",
+      "notes": "https://support.citrix.com/article/CTX579459",
+      "requiredAction": "Apply mitigations per vendor instructions or disconnect the device from the internet.",
+      "shortDescription": "Sensitive information disclosure in NetScaler ADC and NetScaler Gateway.",
+      "cwes": ["CWE-200"]
+    }
+  ]
+}

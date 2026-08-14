@@ -1,0 +1,128 @@
+{
+  "resultsPerPage": 2000,
+  "startIndex": 0,
+  "totalResults": 2,
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2021-44228",
+        "sourceIdentifier": "nvd@nist.gov",
+        "published": "2021-12-10T10:15:00.000",
+        "lastModified": "2022-01-15T12:00:00.000",
+        "vulnStatus": "Analyzed",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Apache Log4j2 2.0-beta9 through 2.15.0 JNDI features used in configuration, log messages, and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints. An attacker who can control log messages or log message parameters can execute arbitrary code loaded from LDAP servers when message lookup substitution is enabled."
+          },
+          {
+            "lang": "es",
+            "value": "Las funciones JNDI de Apache Log4j2 2.0-beta9 hasta 2.15.0 usadas en la configuración, mensajes de registro y parámetros no protegen contra endpoints LDAP y otros relacionados con JNDI controlados por el atacante."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "nvd@nist.gov",
+              "type": "Primary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+                "baseScore": 9.8,
+                "baseSeverity": "CRITICAL"
+              }
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "nvd@nist.gov",
+            "description": [
+              { "lang": "en", "value": "CWE-502" },
+              { "lang": "en", "value": "CWE-20" }
+            ]
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "cpeMatch": [
+                  {
+                    "criteria": "cpe:2.3:a:apache:log4j:2.0:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "abc123",
+                    "vulnerable": true
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "references": [
+          { "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228" },
+          { "url": "https://logging.apache.org/log4j/2.x/security.html" }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2017-0144",
+        "sourceIdentifier": "nvd@nist.gov",
+        "published": "2017-03-14T10:00:00.000",
+        "lastModified": "2021-06-01T00:00:00.000",
+        "vulnStatus": "Analyzed",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "The SMBv1 server in Microsoft Windows allows remote attackers to execute arbitrary code via crafted packets."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV2": [
+            {
+              "source": "nvd@nist.gov",
+              "baseSeverity": "HIGH",
+              "cvssData": {
+                "version": "2.0",
+                "vectorString": "AV:N/AC:L/Au:N/C:C/I:C/A:C",
+                "baseScore": 10.0
+              }
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "description": [
+              { "lang": "en", "value": "CWE-20" }
+            ]
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "cpeMatch": [
+                  {
+                    "criteria": "cpe:2.3:o:microsoft:windows_7:-:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "def456",
+                    "vulnerable": true
+                  },
+                  {
+                    "criteria": "cpe:2.3:o:microsoft:windows_8:*:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "ghi789",
+                    "vulnerable": false
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "references": [
+          { "url": "https://msrc.microsoft.com/update-guide/en-US/vulnerability/CVE-2017-0144" }
+        ]
+      }
+    }
+  ]
+}

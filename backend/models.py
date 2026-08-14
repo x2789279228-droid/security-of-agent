@@ -1,5 +1,6 @@
 ﻿from datetime import datetime, timezone
 from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, Boolean, Float, ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncAttrs
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import DeclarativeBase
@@ -87,10 +88,10 @@ class KnowledgeDoc(Base):
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False)
     source = Column(String(50), default="internal")
-    threat_types = Column(JSON, default=list)
+    threat_types = Column(JSONB, default=list)
     severity = Column(String(20), default="medium")
-    tags = Column(JSON, default=list)
-    metadata_ = Column("metadata", JSON, default=dict)
+    tags = Column(JSONB, default=list)
+    metadata_ = Column("metadata", JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -104,9 +105,9 @@ class KnowledgeChunk(Base):
     content = Column(Text, nullable=False)
     title = Column(String(200), default="")
     source = Column(String(50), default="")
-    threat_types = Column(JSON, default=list)
+    threat_types = Column(JSONB, default=list)
     severity = Column(String(20), default="medium")
-    tags = Column(JSON, default=list)
+    tags = Column(JSONB, default=list)
     embedding = Column(Vector(None))
     token_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

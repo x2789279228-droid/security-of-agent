@@ -26,7 +26,14 @@ from .evidence_verifier import evidence_verifier, EvidenceVerifier
 from .seeder import seed_knowledge_base
 from .mitre_importer import import_enterprise_attack, MITREImportResult
 from .capec_importer import import_capec, CAPECImportResult
-from .import_status import get_import_status, set_import_status, ImportStatus
+from .cve_importer import import_cves, CVEImportResult
+from .kev_importer import import_kev, KEVImportResult
+from .policy_importer import import_policy, PolicyImportResult, POLICY_LIBRARY
+from .vuln_seed import import_vuln_seed, VulnImportResult, VULN_SEED
+from .import_status import (
+    import_lock,
+    get_import_status, set_import_status, ImportStatus,
+)
 
 __all__ = [
     "kb_manager", "KnowledgeBaseManager",
@@ -37,4 +44,10 @@ __all__ = [
     "seed_knowledge_base",
     "import_enterprise_attack", "MITREImportResult",
     "import_capec", "CAPECImportResult",
+    "import_cves", "CVEImportResult",
+    "import_kev", "KEVImportResult",
+    "import_policy", "PolicyImportResult", "POLICY_LIBRARY",
+    "import_vuln_seed", "VulnImportResult", "VULN_SEED",
+    "import_lock",
+    "get_import_status", "set_import_status", "ImportStatus",
 ]

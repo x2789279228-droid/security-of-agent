@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     fw_ssh_user_readonly: str = ""           # 只读 SSH 账号（nmap/查询用）
     ttl_scan_interval: int = 30             # TTL 过期扫描间隔（秒）
 
+    # ── 知识库导入（NVD / CISA KEV / 定时更新） ──
+    kb_auto_update: bool = True              # 调度器是否执行每日知识库增量更新
+    nvd_api_key: str = ""                    # NVD API key（提限 50 req/30s；空则 ~5 req/30s）
+    nvd_url: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    kev_url: str = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+    nvd_proxy: str = ""                      # 显式代理（如 http://127.0.0.1:7897）；空=直连
+    nvd_rate_limit_sleep: float = 6.0        # 无 key 时请求间限流（秒）
+    cve_window_days: int = 365               # CVE 聚焦导入默认时间窗口
+    cve_min_cvss: float = 7.0                # CVE 聚焦导入默认 CVSS 阈值
+    kb_update_interval: int = 86400          # 知识库自动更新周期（秒）
+
     class Config:
         env_file = "../.env"
         extra = "ignore"

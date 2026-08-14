@@ -30,6 +30,36 @@ from audit_types import (
 
 logger = logging.getLogger(__name__)
 
+# ── 威胁类型 → 推荐知识库（RAG source，逗号分隔多库） ──
+# 按需取库：漏洞/利用类查 cve+kev+vulnerability，手法类查 mitre+capec，DDoS 查 capec 等
+SOURCE_BY_THREAT: dict[str, str] = {
+    "WEB_ATTACK": "cve,vulnerability,capec",
+    "MALWARE_DETECT": "cve,vulnerability,mitre-attack",
+    "PRIVILEGE_ESCALATION": "cve,vulnerability,mitre-attack",
+    "CREDENTIAL_ACCESS": "capec,mitre-attack",
+    "BRUTE_FORCE": "capec,mitre-attack",
+    "DDoS_TRAFFIC": "capec,mitre-attack",
+    "C2_BEACON": "mitre-attack,playbook",
+    "DATA_EXFIL": "mitre-attack,capec",
+    "LATERAL_MOVE": "mitre-attack,playbook",
+    "PERSISTENCE": "mitre-attack",
+    "DISCOVERY": "mitre-attack,capec",
+    "PORT_SCAN": "mitre-attack,capec",
+    "DEFENSE_EVASION": "mitre-attack",
+    "SUPPLY_CHAIN": "cve,vulnerability",
+}
+
+
+def _recommend_knowledge_source(event_type: str) -> str:
+    """按事件/威胁类型推荐知识库来源（未命中返回空=全库检索）"""
+    if not event_type:
+        return ""
+    et = event_type.upper()
+    for key, sources in SOURCE_BY_THREAT.items():
+        if key in et:
+            return sources
+    return ""
+
 
 # ── 规则引擎（非LLM快速决策路径） ──
 
@@ -133,9 +163,10 @@ def _get_subtasks_standard(session_id: str, event: dict,
         task_id=f"t{idx}",
         type=SUBTASK_KNOWLEDGE_SEARCH,
         params={"query": f"{event_type} 攻击特征 检测方法",
-                "threat_type": event_type, "severity": event.get("severity", "")},
+                "threat_type": event_type, "severity": event.get("severity", ""),
+                "source": _recommend_knowledge_source(event_type)},
         priority=3,
-        description=f"检索 {event_type} 相关安全知识 (MITRE/CAPEC)",
+        description=f"检索 {event_type} 相关安全知识 (多知识库)",
     ))
 
     return tasks
@@ -219,9 +250,10 @@ def _get_subtasks_deep(session_id: str, event: dict,
         task_id=f"t{idx}",
         type=SUBTASK_KNOWLEDGE_SEARCH,
         params={"query": f"{event_type} 攻击手法 检测指标 IOC 响应建议",
-                "threat_type": event_type, "severity": event.get("severity", "")},
+                "threat_type": event_type, "severity": event.get("severity", ""),
+                "source": _recommend_knowledge_source(event_type)},
         priority=4,
-        description=f"深度检索 {event_type} 安全知识 (MITRE/CAPEC)",
+        description=f"深度检索 {event_type} 安全知识 (多知识库)",
     ))
 
     # t7: 深度LLM分析（依赖前序结果）

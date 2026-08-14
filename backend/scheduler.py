@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from anomaly_detector import anomaly_detector, EntityBaseline
 from event_store import event_store, EventFilter
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,11 @@ class Scheduler:
             asyncio.create_task(self._watchdog_patrol_loop()),
             asyncio.create_task(self._sla_check_loop(db_session_factory)),
             asyncio.create_task(self._fp_analytics_loop(db_session_factory)),
+            asyncio.create_task(self._kb_update_loop(db_session_factory)),
         ]
-        logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds, watchdog=%ds, sla=%ds, fp=%ds",
+        logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds, watchdog=%ds, sla=%ds, fp=%ds, kb_update=%ds",
                      SNAPSHOT_INTERVAL, LONG_CHAIN_INTERVAL, 3600, WATCHDOG_INTERVAL,
-                     SLA_CHECK_INTERVAL, FP_ANALYTICS_INTERVAL)
+                     SLA_CHECK_INTERVAL, FP_ANALYTICS_INTERVAL, settings.kb_update_interval)
 
     async def stop(self):
         """停止所有后台任务"""
@@ -344,6 +346,62 @@ class Scheduler:
                 break
             except Exception as e:
                 logger.warning(f"[FP Analytics] Failed: {e}")
+
+    # ── 7. 知识库每日增量更新 ──
+
+    async def _kb_update_loop(self, db_factory):
+        """
+        每日知识库增量更新（NVD 近 7 天增量 upsert + CISA KEV 刷新）
+
+        - 启动先跑一次，之后按 settings.kb_update_interval 周期执行
+        - settings.kb_auto_update=False 时直接退出
+        - ImportStatus.running 时跳过本次（避免与手动导入互踩）
+        - 复用 import_lock，与手动导入端点共用同一把锁
+        - 单次失败仅告警，不阻塞其他后台任务
+        """
+        if not settings.kb_auto_update:
+            logger.info("[KB auto-update] disabled (kb_auto_update=False)")
+            return
+        while self._running:
+            try:
+                await self._run_kb_update(db_factory)
+                await asyncio.sleep(settings.kb_update_interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[KB auto-update] failed (will retry): {e}")
+                await asyncio.sleep(settings.kb_update_interval)
+
+    async def _run_kb_update(self, db_factory):
+        """执行一次知识库增量更新（CVE 近 7 天 lastMod 增量 + KEV 全量刷新）"""
+        from rag.import_status import import_lock, get_import_status
+        from rag.cve_importer import import_cves
+        from rag.kev_importer import import_kev
+
+        status = get_import_status()
+        if status and status.running:
+            logger.info("[KB auto-update] skipped: another import in progress")
+            return
+
+        async with import_lock:
+            async with db_factory() as session:
+                cve_result = await import_cves(
+                    session,
+                    incremental_days=7,
+                    cvss_min=settings.cve_min_cvss,
+                )
+                logger.info(
+                    f"[KB auto-update] CVE incremental(+7d): "
+                    f"imported={cve_result.imported} updated={cve_result.updated} "
+                    f"skipped={cve_result.skipped} errors={cve_result.errors}"
+                )
+
+                kev_result = await import_kev(session)
+                logger.info(
+                    f"[KB auto-update] KEV refresh: "
+                    f"imported={kev_result.imported} linked={kev_result.updated} "
+                    f"skipped={kev_result.skipped} errors={kev_result.errors}"
+                )
 
 
 scheduler = Scheduler()

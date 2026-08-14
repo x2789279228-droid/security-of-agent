@@ -284,10 +284,11 @@ async def _knowledge_search(
     query: str = "",
     threat_type: str = "",
     severity: str = "",
+    source: str = "",
     top_k: int = 5,
     **kwargs,
 ) -> list[dict]:
-    """检索安全知识库（knowledge_chunks 表，MITRE ATT&CK / CAPEC / 预置知识）"""
+    """检索安全知识库（knowledge_chunks 表，多知识库：mitre-attack/capec/cve/kev/vulnerability/policy/playbook）"""
     from rag import retriever as rag_retriever
 
     query_embedding = None
@@ -300,6 +301,7 @@ async def _knowledge_search(
         query_embedding=query_embedding,
         threat_type=threat_type,
         severity=severity,
+        source=source,
         top_k=top_k,
         min_score=0.4,
     )
@@ -384,7 +386,7 @@ def init_tool_registry():
     )
     tool_registry.register(
         "knowledge.search", _knowledge_search,
-        description="检索安全知识库（MITRE ATT&CK / CAPEC / 威胁情报），支持按威胁类型过滤 + LLM 重排",
+        description="检索安全知识库（MITRE ATT&CK / CAPEC 攻击模式 / CVE 漏洞 / 0day-KEV / 监管政策 / 应急Playbook），支持按威胁类型与知识库类型(source)过滤 + LLM 重排",
         category="search", estimated_ms=500,
     )
     tool_registry.register(
