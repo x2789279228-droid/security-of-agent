@@ -1,4 +1,4 @@
-﻿fastapi>=0.115,<1
+fastapi>=0.115,<1
 uvicorn>=0.34,<1
 sqlalchemy>=2.0,<3
 aiosqlite>=0.20,<1        # 测试/本地模式 (sqlite+aiosqlite)
@@ -14,9 +14,9 @@ sse-starlette>=2.2,<3
 aiokafka>=0.12,<1
 paramiko>=3.4,<4
 cryptography>=42.0,<44
-# 鈹€鈹€ NDR 鎵╁睍渚濊禆 鈹€鈹€
-scapy>=2.5,<3              # 缃戠粶娴侀噺閲囬泦涓庡崗璁В鏋?
-aiohttp>=3.9,<4            # 寮傛 HTTP 瀹㈡埛绔紙TAXII/MISP/CAPE API锛?
-geoip2>=4.8,<5             # GeoIP 鍦扮悊浣嶇疆鏌ヨ锛堝彲閫夛紝闇€ MaxMind 鏁版嵁搴擄級
-# 鈹€鈹€ 鍙€? TLS 瑙ｅ瘑浠ｇ悊 (encrypted_traffic/mitm_proxy.py, 榛樿鍏抽棴) 鈹€鈹€
+# ── NDR 扩展依赖 ──
+scapy>=2.5,<3              # 网络流量采集与协议解析
+aiohttp>=3.9,<4            # 异步 HTTP 客户端（TAXII/MISP/CAPE API）
+geoip2>=4.8,<5             # GeoIP 地理位置查询（可选，需 MaxMind 数据库）
+# ── 可选: TLS 解密代理 (encrypted_traffic/mitm_proxy.py, 默认关闭) ──
 # mitmproxy>=10,<12
