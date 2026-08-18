@@ -6,6 +6,10 @@ frontend/.env
 # TLS/SSL 证书（由 tools/gen-kafka-certs.sh 生成）
 certs/
 
+# Nginx Basic Auth 凭证（由 tools/gen-htpasswd.sh 生成, 含密码哈希）
+config/nginx/flink.htpasswd
+config/nginx/flink-credentials.txt
+
 # 数据库与构建产物
 database.db
 database.db-shm
@@ -22,6 +26,9 @@ dist/
 build/
 .venv/
 venv/
+.coverage
+coverage.xml
+htmlcov/
 
 # Node / 前端
 frontend/node_modules/
@@ -50,12 +57,13 @@ check_ssh.ps1
 check_sshd.ps1
 fix_ssh.ps1
 
-# 开发调试脚本(不入库)
+# 开发调试脚本(不入库) — 仅限仓库根目录,
+# 前缀斜杠防止误伤 backend/security_guard/check_result.py 等正式模块
 benchmark_logs.py
-check_*.py
+/check_*.py
 quick_test.py
 inject_test_data.py
 convert_to_json.py
 demo_e2e.py
 demo_start.bat
-test_*.py
+/*test_*.py

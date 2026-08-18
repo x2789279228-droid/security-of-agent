@@ -205,9 +205,11 @@ async def _verify_rate_limit(
 
     src_ip = params.get("src_ip", "")
     policy_name = f"RE_RateLimit_{src_ip.replace('.', '_')}"
-    ps_cmd = (
-        "powershell -NoProfile -Command "
-        f'"Get-NetQosPolicy -Name \'{policy_name}\' -ErrorAction SilentlyContinue"'
+    # 必须用 EncodedCommand 形式 — 命令白名单 WIN-004 仅放行该形态,
+    # 裸 -Command 会被 GLOBAL_FORBIDDEN(引号/管道) 拒绝导致验证恒失败
+    from .response_registry import _ps_cmd
+    ps_cmd = _ps_cmd(
+        f"Get-NetQosPolicy -Name '{policy_name}' -ErrorAction SilentlyContinue"
     )
     out = await exec_fn(ps_cmd)
     stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)

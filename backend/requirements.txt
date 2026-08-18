@@ -4,6 +4,7 @@ sqlalchemy>=2.0,<3
 asyncpg>=0.30,<1
 pgvector>=0.3,<1
 redis>=5.2,<6
+PyJWT>=2.8,<3
 pydantic>=2.10,<3
 pydantic-settings>=2.7,<3
 httpx>=0.28,<1
@@ -12,3 +13,9 @@ sse-starlette>=2.2,<3
 aiokafka>=0.12,<1
 paramiko>=3.4,<4
 cryptography>=42.0,<44
+# ── NDR 扩展依赖 ──
+scapy>=2.5,<3              # 网络流量采集与协议解析
+aiohttp>=3.9,<4            # 异步 HTTP 客户端（TAXII/MISP/CAPE API）
+geoip2>=4.8,<5             # GeoIP 地理位置查询（可选，需 MaxMind 数据库）
+# ── 可选: TLS 解密代理 (encrypted_traffic/mitm_proxy.py, 默认关闭) ──
+# mitmproxy>=10,<12

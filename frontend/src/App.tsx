@@ -13,6 +13,12 @@ const SecurityAudit = lazy(() => import('./pages/SecurityAudit'))
 const Response = lazy(() => import('./pages/Response'))
 const RAG = lazy(() => import('./pages/RAG'))
 const Operations = lazy(() => import('./pages/Operations'))
+// NDR 扩展
+const Traffic = lazy(() => import('./pages/Traffic'))
+const Encrypted = lazy(() => import('./pages/Encrypted'))
+const Intel = lazy(() => import('./pages/Intel'))
+const Sandbox = lazy(() => import('./pages/Sandbox'))
+const EDR = lazy(() => import('./pages/EDR'))
 
 function PageLoader() {
   return (
@@ -43,6 +49,13 @@ export default function App() {
           <Route path={ROUTES.RESPONSE} element={<Suspense fallback={<PageLoader />}><Response /></Suspense>} />
           <Route path={ROUTES.OPERATIONS} element={<Suspense fallback={<PageLoader />}><Operations /></Suspense>} />
           <Route path={ROUTES.RAG} element={<Suspense fallback={<PageLoader />}><RAG /></Suspense>} />
+          {/* NDR 扩展 */}
+          <Route path={ROUTES.TRAFFIC} element={<Suspense fallback={<PageLoader />}><Traffic /></Suspense>} />
+          <Route path={ROUTES.ENCRYPTED} element={<Suspense fallback={<PageLoader />}><Encrypted /></Suspense>} />
+          <Route path={ROUTES.INTEL} element={<Suspense fallback={<PageLoader />}><Intel /></Suspense>} />
+          <Route path={ROUTES.SANDBOX} element={<Suspense fallback={<PageLoader />}><Sandbox /></Suspense>} />
+          <Route path={ROUTES.EDR} element={<Suspense fallback={<PageLoader />}><EDR /></Suspense>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -2,6 +2,15 @@
 Agent 基类 — 安全审计版
 
 提供安全审计上下文构建方法 build_security_context()。
+
+本模块暴露两个基类:
+  - BaseAgent: 旧 A/B/C/D Agent 的基类，强抽象 process(session, user_input, ...)
+               适配"用户输入→处理→结果"的会话流式 Agent
+  - BaseAuditComponent: D3 改造新增 — 适配 Audit-LLM 流水线组件
+                       (Decomposer / SubAuditor 等) 的轻量基类
+                       仅提供 __init__(agent_id, display_name) + llm_chat()
+                       不强制 process 语义，让流水线组件保留各自的主 API
+                       (Decomposer.decompose / SubAuditor.audit)，同时统一 trace
 """
 import logging
 from abc import ABC, abstractmethod
@@ -15,6 +24,7 @@ from summary_compression import embedder, summary
 from event_store import event_store, EventFilter, StoredEvent
 
 logger = logging.getLogger(__name__)
+
 
 class BaseAgent(ABC):
     def __init__(self, agent_id: str, display_name: str):
@@ -139,4 +149,37 @@ class BaseAgent(ABC):
     async def llm_chat(self, messages: list[dict]) -> str:
         from trace_hook import set_trace_context
         set_trace_context(operation="agent_chat", caller=self.agent_id)
+        return await summary.llm.chat(messages)
+
+
+class BaseAuditComponent:
+    """Audit-LLM 流水线组件基类 (D3 改造新增)
+
+    设计目的:
+      Decomposer / SubAuditor 等流水线组件不是"会话 Agent"，
+      其核心 API 不是 process(user_input) 而是 decompose(event) / audit(chunk) 等。
+      旧 BaseAgent 的 @abstractmethod process 会破坏其语义。
+
+    本类提供与 BaseAgent 相同的:
+      - __init__(agent_id, display_name)
+      - llm_chat(messages) 统一 trace 入口（带 caller 标识）
+
+    不强制实现任何业务方法，让子类自由定义自己的主 API。
+
+    用法:
+        class Decomposer(BaseAuditComponent):
+            def __init__(self):
+                super().__init__(agent_id="decomposer", display_name="分解者")
+            async def decompose(self, event, ...): ...
+            # 用 self.llm_chat(...) 即可统一 trace 调用
+    """
+
+    def __init__(self, agent_id: str, display_name: str):
+        self.agent_id = agent_id
+        self.display_name = display_name
+
+    async def llm_chat(self, messages: list[dict]) -> str:
+        """统一 LLM 调用入口，自动注入 caller 标识到 trace"""
+        from trace_hook import set_trace_context
+        set_trace_context(operation="audit_component", caller=self.agent_id)
         return await summary.llm.chat(messages)

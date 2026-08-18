@@ -1,7 +1,11 @@
 #!/bin/bash
 # Kafka Topic 差异化保留策略初始化
-# 在 Kafka 启动后执行: bash tools/init-kafka-topics.sh [bootstrap-server]
-# 默认: localhost:9092
+#
+# 推荐在 Kafka 容器内执行 (宿主机没有 kafka CLI):
+#   docker compose exec -T kafka bash < tools/init-kafka-topics.sh
+# 或在装有 kafka CLI 的主机上:
+#   bash tools/init-kafka-topics.sh [bootstrap-server]
+# 默认 bootstrap: localhost:9092 (容器内 PLAINTEXT 监听)
 
 BOOTSTRAP="${1:-localhost:9092}"
 KAFKA_CONFIGS="kafka-configs --bootstrap-server $BOOTSTRAP"
@@ -57,6 +61,58 @@ $KAFKA_TOPICS --create --if-not-exists --topic security-logs-dlq --partitions 1 
 $KAFKA_CONFIGS --alter --topic security-logs-dlq \
   --add-config retention.ms=2592000000,cleanup.policy=delete
 
+# CEP 部分匹配预警: 保留 7 天（后端 kafka_consumer 消费）
+$KAFKA_TOPICS --create --if-not-exists --topic security-cep-partial --partitions 1 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic security-cep-partial \
+  --add-config retention.ms=604800000,cleanup.policy=delete
+
+# CEP 模式定义下发: 保留 30 天（配置类消息）
+$KAFKA_TOPICS --create --if-not-exists --topic security-cep-patterns --partitions 1 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic security-cep-patterns \
+  --add-config retention.ms=2592000000,cleanup.policy=compact
+
+# ── NDR 扩展 Topic ──
+
+# 网络流: 保留 7 天（高吞吐）
+$KAFKA_TOPICS --create --if-not-exists --topic ndr-flows --partitions 3 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic ndr-flows \
+  --add-config retention.ms=604800000,retention.bytes=1073741824,cleanup.policy=delete
+
+# 流聚合结果 (FlowAggregationJob 输出): 保留 7 天
+$KAFKA_TOPICS --create --if-not-exists --topic ndr-flows-aggregated --partitions 2 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic ndr-flows-aggregated \
+  --add-config retention.ms=604800000,cleanup.policy=delete
+
+# TLS 会话: 保留 7 天
+$KAFKA_TOPICS --create --if-not-exists --topic ndr-tls-sessions --partitions 2 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic ndr-tls-sessions \
+  --add-config retention.ms=604800000,cleanup.policy=delete
+
+# TLS 指纹富化 (TlsFingerprintJob 输出): 保留 7 天
+$KAFKA_TOPICS --create --if-not-exists --topic ndr-tls-enriched --partitions 2 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic ndr-tls-enriched \
+  --add-config retention.ms=604800000,cleanup.policy=delete
+
+# PCAP 元数据: 保留 30 天（量小）
+$KAFKA_TOPICS --create --if-not-exists --topic ndr-pcap-meta --partitions 1 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic ndr-pcap-meta \
+  --add-config retention.ms=2592000000,cleanup.policy=delete
+
+# EDR Sysmon: 保留 7 天
+$KAFKA_TOPICS --create --if-not-exists --topic edr-sysmon --partitions 2 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic edr-sysmon \
+  --add-config retention.ms=604800000,retention.bytes=536870912,cleanup.policy=delete
+
+# EDR Windows Event Log: 保留 7 天
+$KAFKA_TOPICS --create --if-not-exists --topic edr-winevent --partitions 2 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic edr-winevent \
+  --add-config retention.ms=604800000,retention.bytes=536870912,cleanup.policy=delete
+
+# Suricata EVE JSON: 保留 3 天（高吞吐）
+$KAFKA_TOPICS --create --if-not-exists --topic suricata-eve --partitions 3 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic suricata-eve \
+  --add-config retention.ms=259200000,retention.bytes=536870912,cleanup.policy=delete
+
 echo ""
 echo "=== Topic 保留策略 ==="
 echo "  security-logs-raw:          3 天  (512MB)"
@@ -67,5 +123,10 @@ echo "  security-alerts:           30 天"
 echo "  security-audit-queue:       7 天"
 echo "  security-audit-results:    30 天"
 echo "  security-logs-dlq:         30 天"
+echo "  security-cep-partial:       7 天"
+echo "  security-cep-patterns:     30 天  (compact)"
+echo "  ndr-flows / -aggregated:    7 天"
+echo "  ndr-tls-sessions / -enriched: 7 天"
+echo "  ndr-pcap-meta:             30 天"
 echo ""
 echo "=== 完成 ==="

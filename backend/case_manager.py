@@ -149,6 +149,7 @@ class CaseManager:
             }
 
         old_status = case.status
+        before_snapshot = {"status": old_status, "assignee": case.assignee}
         case.status = new_status
         case.updated_at = datetime.now(timezone.utc)
 
@@ -162,6 +163,20 @@ class CaseManager:
                     evt.status = "false_positive"
 
         await session.commit()
+
+        # P0.H 操作审计 trail
+        try:
+            from audit_trail import log_action
+            await log_action(
+                session, actor=by or "anonymous", action="case.transition",
+                target_type="case", target_id=str(case_id),
+                before=before_snapshot,
+                after={"status": new_status, "assignee": case.assignee},
+                reason=f"{old_status} → {new_status}",
+            )
+        except Exception as e:
+            logger.warning(f"[Case] audit_trail log failed: {e}")
+
         logger.info(f"[Case] {case.case_number}: {old_status} → {new_status} (by={by})")
         return {"success": True, "old_status": old_status, "new_status": new_status}
 
@@ -172,11 +187,28 @@ class CaseManager:
         case = await session.get(SecurityCase, case_id)
         if not case:
             return {"success": False, "error": "案例不存在"}
+        old_assignee = case.assignee
+        before_snapshot = {"assignee": old_assignee, "status": case.status}
         case.assignee = assignee
         case.updated_at = datetime.now(timezone.utc)
+        new_status = case.status
         if case.status == "open":
             case.status = "investigating"
+            new_status = "investigating"
         await session.commit()
+
+        try:
+            from audit_trail import log_action
+            await log_action(
+                session, actor=assignee or "anonymous", action="case.assign",
+                target_type="case", target_id=str(case_id),
+                before=before_snapshot,
+                after={"assignee": assignee, "status": new_status},
+                reason=f"指派 {assignee}",
+            )
+        except Exception as e:
+            logger.warning(f"[Case] audit_trail log failed: {e}")
+
         return {"success": True, "assignee": assignee}
 
     async def set_disposition(
@@ -187,11 +219,24 @@ class CaseManager:
         case = await session.get(SecurityCase, case_id)
         if not case:
             return {"success": False, "error": "案例不存在"}
+        before_snapshot = {"disposition": case.disposition or ""}
         case.disposition = disposition
         case.disposition_by = by
         case.disposition_at = datetime.now(timezone.utc)
         case.updated_at = datetime.now(timezone.utc)
         await session.commit()
+
+        try:
+            from audit_trail import log_action
+            await log_action(
+                session, actor=by or "anonymous", action="case.disposition",
+                target_type="case", target_id=str(case_id),
+                before=before_snapshot, after={"disposition": disposition},
+                reason="写入处置结论",
+            )
+        except Exception as e:
+            logger.warning(f"[Case] audit_trail log failed: {e}")
+
         logger.info(f"[Case] {case.case_number}: disposition set by {by}")
         return {"success": True}
 
@@ -234,10 +279,15 @@ class CaseManager:
 
         timeline = []
 
-        # 事件
-        for eid in (case.event_ids or []):
-            evt = await session.get(SecurityEvent, eid)
-            if evt:
+        # 事件（批量查询，避免 N+1）
+        if case.event_ids:
+            stmt = (
+                select(SecurityEvent)
+                .where(SecurityEvent.id.in_(case.event_ids))
+                .order_by(SecurityEvent.created_at)
+            )
+            result = await session.execute(stmt)
+            for evt in result.scalars().all():
                 timeline.append({
                     "time": evt.created_at.isoformat() if evt.created_at else "",
                     "type": "event",
@@ -310,9 +360,34 @@ class CaseManager:
         self, session: AsyncSession, event: SecurityEvent
     ) -> SecurityCase:
         severity = event.severity or "medium"
+        # P0.A: 根据目标资产关键性自动提升案例优先级
         priority = {"critical": "critical", "high": "high"}.get(severity, "medium")
+        try:
+            from asset import asset_correlator
+            recommended = await asset_correlator.recommend_case_priority(
+                session, event.dst_ip or "", priority
+            )
+            if recommended:
+                priority = recommended
+        except Exception as e:
+            logger.debug(f"[Case] asset correlation skipped: {e}")
+
         raw = event.raw_data or {}
         threat_type = event.event_type or raw.get("event", "UNKNOWN")
+
+        # P0.A: 富化资产元数据写入案例
+        asset_snapshot = None
+        try:
+            from asset import asset_correlator
+            asset_snapshot = await asset_correlator.enrich_case_target(
+                session, event.dst_ip or ""
+            )
+        except Exception:
+            pass
+
+        case_meta = {}
+        if asset_snapshot:
+            case_meta["dst_asset"] = asset_snapshot
 
         case = SecurityCase(
             case_number=self._gen_case_number(),
@@ -327,6 +402,7 @@ class CaseManager:
             event_ids=[event.id],
             event_count=1,
             sla_deadline=datetime.now(timezone.utc) + timedelta(hours=SLA_HOURS.get(priority, 24)),
+            metadata_=case_meta,
         )
         session.add(case)
         await session.flush()
@@ -370,9 +446,9 @@ class CaseManager:
 
     @staticmethod
     def _gen_case_number() -> str:
-        import random
+        import uuid
         now = datetime.now()
-        return f"CASE-{now.strftime('%Y%m%d')}-{random.randint(100, 999)}"
+        return f"CASE-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
     @staticmethod
     def _case_to_dict(case: SecurityCase) -> dict:

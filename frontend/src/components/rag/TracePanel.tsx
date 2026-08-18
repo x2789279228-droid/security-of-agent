@@ -10,6 +10,10 @@ const OPERATION_LABELS: Record<string, string> = {
   review: '复核裁决',
   sub_audit: '子任务审计',
   verify: '证据验证',
+  rerank: '知识重排',
+  post_mortem: '事件复盘',
+  watchdog_diagnose: '自动诊断',
+  audit_component: '流水线组件',
   agent_chat: 'Agent 对话',
   chat: '通用调用',
 }
@@ -17,10 +21,16 @@ const OPERATION_LABELS: Record<string, string> = {
 const CALLER_LABELS: Record<string, string> = {
   audit_pipeline: '审计流水线',
   evidence_verifier: '证据验证器',
+  post_mortem_service: '复盘服务',
+  watchdog: '看门狗',
   agent_a: '分析 Agent',
   agent_b: '决策 Agent',
   agent_c: '报告 Agent',
   agent_d: '审查 Agent',
+  decomposer: '分解者',
+  tool_builder: '工具构建',
+  executor: '执行者',
+  reviewer: '复核者',
 }
 
 function fmtTokens(n: number): string {

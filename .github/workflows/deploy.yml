@@ -1,0 +1,82 @@
+# ════════════════════════════════════════════
+# Deploy — staging / production 部署 (预构建镜像 + 远程 compose)
+#
+# ⚠️ 当前状态: 默认禁用 (暂无远程服务器)
+# 启用步骤:
+#   1. 仓库 Settings → Environments 创建 staging / production
+#      (production 勾选 Required reviewers 人工审批)
+#   2. 为两个环境配置 secrets:
+#      DEPLOY_HOST / DEPLOY_USER / DEPLOY_PORT / DEPLOY_SSH_KEY
+#      (密钥建议: ED25519, 目标机仅允许该公钥)
+#   3. 目标机 /opt/soc 下放置 .env (含全部口令/密钥)
+#   4. 删除下方 job 的 `if: false` 一行
+#   5. 首次在目标机执行: git clone <repo> /opt/soc 或手工放置 compose 文件
+# ════════════════════════════════════════════
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 部署目标环境
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: GHCR 镜像标签 (main / sha-xxxxxx / 1.2.3)
+        required: true
+        default: main
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    if: false   # ← 部署目标就绪后删除本行启用
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 同步 compose 文件到目标机 (配置变更随代码发布)
+      - name: Sync compose files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: docker-compose.yml,docker-compose.prod.yml
+          target: /opt/soc
+
+      - name: Pull images & redeploy
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: GITHUB_TOKEN,IMAGE_TAG
+          script: |
+            set -e
+            cd /opt/soc
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+            docker image prune -f >/dev/null 2>&1 || true
+            echo "deployed image_tag=$IMAGE_TAG"
+      - name: Verify health
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            sleep 10
+            curl -fsS http://localhost:8001/api/health || { echo "backend health check failed"; exit 1; }
+            curl -fsS -o /dev/null http://localhost:3001 || { echo "frontend check failed"; exit 1; }

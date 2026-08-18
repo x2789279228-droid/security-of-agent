@@ -102,6 +102,10 @@ class WorkOrderService:
         if order.approval_status != "pending":
             return {"success": False, "error": f"工单已审批: {order.approval_status}"}
 
+        before_snapshot = {
+            "approval_status": order.approval_status,
+            "status": order.status,
+        }
         order.approval_status = "approved"
         order.approved_by = approved_by
         order.approved_at = datetime.now(timezone.utc)
@@ -112,6 +116,19 @@ class WorkOrderService:
         # 审批通过后自动执行关联的响应动作
         if order.case_id:
             await self._execute_approved_actions(session, order)
+
+        # P0.H 操作审计
+        try:
+            from audit_trail import log_action
+            await log_action(
+                session, actor=approved_by, action="order.approve",
+                target_type="work_order", target_id=str(order_id),
+                before=before_snapshot,
+                after={"approval_status": "approved", "status": "in_progress"},
+                reason=f"审批工单 {order.order_number}",
+            )
+        except Exception as e:
+            logger.warning(f"[WorkOrder] audit_trail log failed: {e}")
 
         logger.info(f"[WorkOrder] {order.order_number} APPROVED by {approved_by}")
         return {"success": True, "approved_by": approved_by}
@@ -127,12 +144,29 @@ class WorkOrderService:
         if order.approval_status != "pending":
             return {"success": False, "error": f"工单已审批: {order.approval_status}"}
 
+        before_snapshot = {
+            "approval_status": order.approval_status,
+            "status": order.status,
+        }
         order.approval_status = "rejected"
         order.approved_by = rejected_by
         order.reject_reason = reason
         order.status = "cancelled"
         order.updated_at = datetime.now(timezone.utc)
         await session.commit()
+
+        try:
+            from audit_trail import log_action
+            await log_action(
+                session, actor=rejected_by, action="order.reject",
+                target_type="work_order", target_id=str(order_id),
+                before=before_snapshot,
+                after={"approval_status": "rejected", "status": "cancelled"},
+                reason=reason or f"拒绝工单 {order.order_number}",
+            )
+        except Exception as e:
+            logger.warning(f"[WorkOrder] audit_trail log failed: {e}")
+
         logger.info(f"[WorkOrder] {order.order_number} REJECTED by {rejected_by}: {reason}")
         return {"success": True}
 
@@ -191,6 +225,14 @@ class WorkOrderService:
             except Exception:
                 pass
 
+            # P0.B: 上报 SLA tracker (供 P1.C 升级引擎订阅)
+            try:
+                from ops_metrics.sla_tracker import sla_tracker
+                for b in breached:
+                    await sla_tracker.record_breach(b)
+            except Exception as e:
+                logger.warning(f"[WorkOrder] sla_tracker record failed: {e}")
+
         return breached
 
     async def _execute_approved_actions(self, session: AsyncSession, order: WorkOrder):
@@ -209,9 +251,9 @@ class WorkOrderService:
 
     @staticmethod
     def _gen_order_number() -> str:
-        import random
+        import uuid
         now = datetime.now()
-        return f"WO-{now.strftime('%Y%m%d')}-{random.randint(100, 999)}"
+        return f"WO-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
     @staticmethod
     def _order_to_dict(o: WorkOrder) -> dict:

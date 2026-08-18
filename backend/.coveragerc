@@ -1,0 +1,13 @@
+# pytest-cov 配置 — CI 覆盖率门禁 (backend/tests 内运行)
+# 基线 21% → 门禁 20% 防回归; 目标提升至 60% (路线图阶段4)
+[run]
+source = .
+omit =
+    tests/*
+    __pycache__/*
+    */__pycache__/*
+    .pytest_cache/*
+
+[report]
+show_missing = True
+skip_covered = True

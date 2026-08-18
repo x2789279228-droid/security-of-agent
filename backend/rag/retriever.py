@@ -110,20 +110,20 @@ class Retriever:
         where_sql = " AND ".join(filter_clauses)
         limit = top_k * 2
 
-        # 用 pgvector 的 <=> 算子做数据库端排序
-        # 向量格式: '[0.1,0.2,...]'::vector
+        # 用 pgvector 的 <=> 算子做数据库端排序（参数化查询）
         vec_str = "[" + ",".join(f"{v:.6f}" for v in embedding) + "]"
-        vec_literal = f"'{vec_str}'::vector"
+        bind_params["vec"] = vec_str
+        bind_params["limit"] = limit
 
         sql = sa_text(f"""
             SELECT id, doc_id, content, title, source,
                    threat_types, severity, tags,
-                   (embedding <=> {vec_literal}) AS distance
+                   (embedding <=> CAST(:vec AS vector)) AS distance
             FROM knowledge_chunks
             WHERE {where_sql}
               AND embedding IS NOT NULL
             ORDER BY distance ASC
-            LIMIT {limit}
+            LIMIT :limit
         """)
 
         try:

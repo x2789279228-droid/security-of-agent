@@ -54,7 +54,8 @@ class RedisBackend(StorageBackend):
 
     async def connect(self):
         import redis.asyncio as aioredis
-        self.redis = await aioredis.from_url(self.url, decode_responses=True)
+        # from_url 是同步工厂函数, 返回 Redis 客户端 (不可 await)
+        self.redis = aioredis.from_url(self.url, decode_responses=True)
         await self.redis.ping()
         logger.info("RedisBackend connected")
 

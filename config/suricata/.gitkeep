@@ -1,0 +1,2 @@
+# Suricata 自定义规则目录（挂载到容器 /etc/suricata/custom）
+# 在此放置 *.rules 文件以加载自定义检测规则

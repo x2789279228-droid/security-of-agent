@@ -123,6 +123,8 @@ class EventStore:
                 "_anomaly_score": anomaly_score,
                 "_correlation_id": correlation_id,
             },
+            # 同步写入独立 anomaly_score 列，供 SQL 层直接过滤（见 get_unreviewed_anomalies）
+            anomaly_score=anomaly_score,
             analyzed=False,
         )
         session.add(evt)
@@ -191,6 +193,11 @@ class EventStore:
         events = []
         for evt in rows:
             raw = evt.raw_data or {}
+            # anomaly_score 优先读取独立列（迁移后路径），回退到 raw_data（向后兼容）
+            anomaly_score = (
+                evt.anomaly_score if evt.anomaly_score is not None
+                else raw.get("_anomaly_score", 0.0)
+            )
             events.append(StoredEvent(
                 id=evt.id,
                 session_id=evt.session_id,
@@ -200,7 +207,7 @@ class EventStore:
                 dst_ip=evt.dst_ip or "",
                 message=evt.message or "",
                 raw_data=raw,
-                anomaly_score=raw.get("_anomaly_score", 0.0),
+                anomaly_score=anomaly_score,
                 correlation_id=raw.get("_correlation_id", ""),
                 created_at=evt.created_at.isoformat(),
             ))
@@ -226,6 +233,11 @@ class EventStore:
             return None
 
         raw = evt.raw_data or {}
+        # anomaly_score 优先读取独立列
+        anomaly_score = (
+            evt.anomaly_score if evt.anomaly_score is not None
+            else raw.get("_anomaly_score", 0.0)
+        )
         return StoredEvent(
             id=evt.id,
             session_id=evt.session_id,
@@ -235,7 +247,7 @@ class EventStore:
             dst_ip=evt.dst_ip or "",
             message=evt.message or "",
             raw_data=raw,
-            anomaly_score=raw.get("_anomaly_score", 0.0),
+            anomaly_score=anomaly_score,
             correlation_id=raw.get("_correlation_id", ""),
             created_at=evt.created_at.isoformat(),
         )
@@ -247,40 +259,83 @@ class EventStore:
         min_score: float = 0.5,
         limit: int = 50,
     ) -> list[StoredEvent]:
-        """获取未审核的异常事件（供 Agent-D 使用）"""
-        stmt = (
-            select(SecurityEvent)
-            .where(
-                SecurityEvent.session_id == session_id,
-                SecurityEvent.analyzed == False,
+        """获取未审核的异常事件（供 Agent-D 使用）
+
+        改造后：anomaly_score 下沉为 SecurityEvent 独立列 + 索引，
+        min_score 过滤直接在 SQL 完成，避免低分事件挤占 limit 名额导致漏报。
+        历史 SQL fallback：若部署未执行迁移（anomaly_score 列缺失），
+        回退到 Python 层过滤模式保证向后兼容。
+        """
+        # 优先走 SQL 层（anomaly_score 列存在时）
+        try:
+            stmt = (
+                select(SecurityEvent)
+                .where(
+                    SecurityEvent.session_id == session_id,
+                    SecurityEvent.analyzed == False,
+                    SecurityEvent.anomaly_score >= min_score,
+                )
+                .order_by(desc(SecurityEvent.created_at))
+                .limit(limit)
             )
-            .order_by(desc(SecurityEvent.created_at))
-            .limit(limit)
-        )
-        result = await session.execute(stmt)
-        rows = result.scalars().all()
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
 
-        events = []
-        for evt in rows:
-            raw = evt.raw_data or {}
-            score = raw.get("_anomaly_score", 0.0)
-            if score < min_score:
-                continue
-            events.append(StoredEvent(
-                id=evt.id,
-                session_id=evt.session_id,
-                event_type=evt.event_type,
-                severity=evt.severity,
-                src_ip=evt.src_ip or "",
-                dst_ip=evt.dst_ip or "",
-                message=evt.message or "",
-                raw_data=raw,
-                anomaly_score=score,
-                correlation_id=raw.get("_correlation_id", ""),
-                created_at=evt.created_at.isoformat(),
-            ))
+            events = []
+            for evt in rows:
+                raw = evt.raw_data or {}
+                events.append(StoredEvent(
+                    id=evt.id,
+                    session_id=evt.session_id,
+                    event_type=evt.event_type,
+                    severity=evt.severity,
+                    src_ip=evt.src_ip or "",
+                    dst_ip=evt.dst_ip or "",
+                    message=evt.message or "",
+                    raw_data=raw,
+                    anomaly_score=evt.anomaly_score,
+                    correlation_id=raw.get("_correlation_id", ""),
+                    created_at=evt.created_at.isoformat() if evt.created_at else "",
+                ))
+            return events
+        except Exception as e:
+            # 兼容回退：列不存在或 SQL 失败时回到旧 Python 层过滤模式
+            logger.warning(
+                f"SQL anomaly_score filter failed ({e}), "
+                f"falling back to Python-layer filter (likely missing column)"
+            )
+            stmt = (
+                select(SecurityEvent)
+                .where(
+                    SecurityEvent.session_id == session_id,
+                    SecurityEvent.analyzed == False,
+                )
+                .order_by(desc(SecurityEvent.created_at))
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
 
-        return events
+            events = []
+            for evt in rows:
+                raw = evt.raw_data or {}
+                score = raw.get("_anomaly_score", 0.0)
+                if score < min_score:
+                    continue
+                events.append(StoredEvent(
+                    id=evt.id,
+                    session_id=evt.session_id,
+                    event_type=evt.event_type,
+                    severity=evt.severity,
+                    src_ip=evt.src_ip or "",
+                    dst_ip=evt.dst_ip or "",
+                    message=evt.message or "",
+                    raw_data=raw,
+                    anomaly_score=score,
+                    correlation_id=raw.get("_correlation_id", ""),
+                    created_at=evt.created_at.isoformat() if evt.created_at else "",
+                ))
+            return events
 
     async def get_stats(
         self,

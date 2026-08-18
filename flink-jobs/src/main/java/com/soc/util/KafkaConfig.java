@@ -51,6 +51,15 @@ public class KafkaConfig {
     }
 
     /**
+     * 获取 Kafka Bootstrap 服务器地址
+     *
+     * @return bootstrap servers 字符串
+     */
+    public static String getBootstrapServers() {
+        return KAFKA_BOOTSTRAP;
+    }
+
+    /**
      * 获取 Kafka 消费者配置
      *
      * @param groupId 消费者组 ID

@@ -28,6 +28,7 @@ LONG_CHAIN_INTERVAL = 1800     # 长周期关联间隔（30分钟）
 WATCHDOG_INTERVAL = 600        # 看门狗巡检间隔（10分钟）
 SLA_CHECK_INTERVAL = 300       # SLA 超时扫描间隔（5分钟）
 FP_ANALYTICS_INTERVAL = 3600   # 误报统计间隔（1小时）
+KPI_DAILY_INTERVAL = 86400    # KPI 日快照间隔（24小时,默认凌晨触发）
 
 
 class Scheduler:
@@ -56,10 +57,12 @@ class Scheduler:
             asyncio.create_task(self._watchdog_patrol_loop()),
             asyncio.create_task(self._sla_check_loop(db_session_factory)),
             asyncio.create_task(self._fp_analytics_loop(db_session_factory)),
+            asyncio.create_task(self._kpi_daily_loop(db_session_factory)),
+            asyncio.create_task(self._llm_budget_reset_loop()),
         ]
-        logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds, watchdog=%ds, sla=%ds, fp=%ds",
+        logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds, watchdog=%ds, sla=%ds, fp=%ds, kpi=%ds",
                      SNAPSHOT_INTERVAL, LONG_CHAIN_INTERVAL, 3600, WATCHDOG_INTERVAL,
-                     SLA_CHECK_INTERVAL, FP_ANALYTICS_INTERVAL)
+                     SLA_CHECK_INTERVAL, FP_ANALYTICS_INTERVAL, KPI_DAILY_INTERVAL)
 
     async def stop(self):
         """停止所有后台任务"""
@@ -344,6 +347,49 @@ class Scheduler:
                 break
             except Exception as e:
                 logger.warning(f"[FP Analytics] Failed: {e}")
+
+    # ── 7. KPI 日快照 ──
+
+    async def _kpi_daily_loop(self, db_factory):
+        """每日生成 KPI 快照（默认凌晨 02:00 触发前一天聚合）"""
+        while self._running:
+            try:
+                # 计算到下一个 02:00 的等待时间
+                now = datetime.now(timezone.utc)
+                next_run = now.replace(hour=2, minute=5, second=0, microsecond=0)
+                if next_run <= now:
+                    next_run = next_run + timedelta(days=1)
+                wait_seconds = (next_run - now).total_seconds()
+                await asyncio.sleep(min(wait_seconds, KPI_DAILY_INTERVAL))
+
+                from ops_metrics.kpi_calculator import kpi_calculator
+                async with db_factory() as session:
+                    result = await kpi_calculator.snapshot_daily(session)
+                    logger.info(f"[KPI] daily snapshot: {result.get('metrics_written')} metrics")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[KPI] daily snapshot failed: {e}")
+
+    # ── 8. LLM 增强器预算日重置 ──
+
+    async def _llm_budget_reset_loop(self):
+        """每日凌晨重置 LLM 增强器各模块预算计数 (UTC 00:00 触发)"""
+        while self._running:
+            try:
+                now = datetime.now(timezone.utc)
+                next_run = now.replace(hour=0, minute=0, second=10, microsecond=0)
+                if next_run <= now:
+                    next_run = next_run + timedelta(days=1)
+                wait_seconds = (next_run - now).total_seconds()
+                await asyncio.sleep(wait_seconds)
+
+                from llm_enhancer import reset_daily_budgets
+                reset_daily_budgets()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[LLM] budget reset failed: {e}")
 
 
 scheduler = Scheduler()

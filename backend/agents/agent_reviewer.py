@@ -79,6 +79,51 @@ class Reviewer:
         )
         return verdict
 
+    def _extract_rag_for_review(self, audit_result: AuditResult) -> str:
+        """
+        从 audit_result.tool_results 中提取 knowledge.search 工具返回的知识库片段
+
+        为什么单独提取：原实现中 RAG 片段只在 tool_data_raw[:3000] 中体现，
+        经常被截断 — 而 prompt 第 6 条防幻觉检查（知识库一致性）依赖完整
+        知识库描述。本方法把 RAG 检索结果格式化为独立 section，
+        让 Reviewer LLM 能完整看到知识库内容并真正执行一致性比对。
+
+        格式化策略：
+          - 仅取 knowledge.search 工具的成功结果
+          - 每个片段输出 title / threat_types / severity / content（截断到 400 字符）
+          - 总长度上限 2500 字符，避免 prompt 膨胀
+        """
+        if not audit_result or not audit_result.tool_results:
+            return ""
+
+        sections: list[str] = []
+        budget = 2500
+        for tr in audit_result.tool_results:
+            if tr.tool != "knowledge.search" or not tr.success or not tr.data:
+                continue
+            if not isinstance(tr.data, list):
+                continue
+            for chunk in tr.data:
+                if not isinstance(chunk, dict):
+                    continue
+                title = chunk.get("title", "") or "(无标题)"
+                threat_types = chunk.get("threat_types", []) or []
+                severity = chunk.get("severity", "") or ""
+                content = (chunk.get("content", "") or "")[:400]
+                entry = (
+                    f"- **{title}**\n"
+                    f"  威胁类型: {threat_types if threat_types else '(未标注)'}\n"
+                    f"  严重度: {severity}\n"
+                    f"  内容: {content}\n"
+                )
+                if len("\n".join(sections)) + len(entry) > budget:
+                    sections.append("... (达到展示上限，已截断)")
+                    break
+                sections.append(entry)
+            if any("达到展示上限" in s for s in sections):
+                break
+        return "\n".join(sections).strip()
+
     async def _llm_review(
         self,
         raw_event: dict,
@@ -99,6 +144,13 @@ class Reviewer:
 
         audit_json = json.dumps(audit_result.to_dict(), ensure_ascii=False, indent=2)
 
+        # D1 修复：单独提取 RAG 知识库片段注入到 prompt
+        # 原实现中 RAG 检索结果只在 tool_data_raw[:3000] 中体现，经常被截断，
+        # 导致 prompt 第 6 条防幻觉检查（知识库一致性）实际无法执行。
+        # 现从 audit_result.tool_results 中完整提取 knowledge.search 返回的 chunk，
+        # 注入到独立 prompt section。
+        rag_section = self._extract_rag_for_review(audit_result)
+
         prompt = f"""你是安全审计复核专家。请复核以下审计结论的完整性和准确性。
 
 ## 原始事件
@@ -116,7 +168,10 @@ class Reviewer:
 ## Executor 生成的审计结论
 {audit_json}
 
-## 工具返回的原始数据
+## 安全知识库检索结果 (RAG — 完整片段，未截断)
+{rag_section if rag_section else '（未检索到相关知识）'}
+
+## 工具返回的原始数据（截断预览）
 {tool_data_raw[:3000]}
 
 ## 复核要求
@@ -128,7 +183,7 @@ class Reviewer:
 3. **证据来源** — 每条威胁判定是否标注了具体的事件ID或数据来源？
 4. **虚假关联** — 是否存在把两个无关事件强行关联成攻击链的情况？
 5. **置信度通胀** — 证据不充分时是否给出了过高的置信度？
-6. **知识库一致性** — 结论是否与安全知识库（MITRE ATT&CK / CAPEC）的参考信息一致？如果工具返回了 knowledge.search 结果，请核对结论是否偏离知识库描述
+6. **知识库一致性** — 结论是否与上方"安全知识库检索结果"section 中的 MITRE ATT&CK / CAPEC 描述一致？逐条对照威胁类型、严重度、攻击手法，偏离则标记幻觉风险
 
 ### 其他检查项
 7. **完整性** — Executor 是否覆盖了所有子任务？
@@ -136,23 +191,23 @@ class Reviewer:
 9. **是否需要人工介入** — 是否存在 AI 难以判断的复杂情况？
 
 ## 输出格式（严格 JSON）
-{{{{
+{{
     "conclusion": "threat_confirmed/false_positive/suspicious",
     "confidence": 0.0-1.0,
 
-    "hallucination_check": {{{{
+    "hallucination_check": {{
         "has_unsubstantiated_claims": true/false,
         "unsubstantiated_details": ["具体哪些断言缺少证据"],
         "data_consistency": "consistent/partially_consistent/inconsistent",
         "confidence_overinflation": true/false
-    }}}},
+    }},
 
     "missed_threats": [{{"description":"...","evidence":"...","severity":"..."}}],
     "evidence_chain": ["证据1","证据2",...],
     "human_intervention": true/false,
     "final_summary": "最终判断摘要",
     "reviewer_notes": "复核过程中的关键发现（特别是幻觉风险相关）"
-}}}}"""
+}}"""
 
         from trace_hook import set_trace_context
         set_trace_context(operation="review")
@@ -187,7 +242,7 @@ class Reviewer:
                 final_summary=parsed.get("final_summary", ""),
                 reviewer_notes=parsed.get("reviewer_notes", ""),
             )
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             logger.warning(f"Failed to parse review result: {e}")
             return FinalVerdict(
                 conclusion="suspicious",

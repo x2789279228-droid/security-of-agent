@@ -321,7 +321,6 @@ class AnomalyDetector:
             total_score += rarity * 0.20
             if rarity > 0.8:
                 reasons.append(f"罕见事件类型: {event_type} (出现率<1%)")
-        self.global_event_types[event_type] += 1
 
         # 3. 时序异常
         temporal = self._calc_temporal_anomaly(hour)

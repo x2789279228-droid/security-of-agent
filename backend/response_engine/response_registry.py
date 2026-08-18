@@ -292,7 +292,11 @@ async def _block_ip(src_ip: str, reason: str = "", duration_minutes: int = 60, *
             f'Start-Sleep -Seconds {duration_minutes * 60}\n'
             f'netsh advfirewall firewall delete rule name="{rule_name}"'
         )
-        asyncio.create_task(ssh_transport.run(_ps_cmd(unblock_script), powershell=False))
+        # 超时必须覆盖整个等待期, 否则 SSH 会话在解封前被 kill
+        asyncio.create_task(ssh_transport.run(
+            _ps_cmd(unblock_script), powershell=False,
+            timeout=duration_minutes * 60 + 120,
+        ))
         logger.info(f"[SSH] Auto-unblock scheduled for {src_ip} in {duration_minutes}min")
 
     return result
@@ -315,25 +319,33 @@ async def _isolate_host(host_ip: str, reason: str = "", **kwargs) -> dict:
     host_ip = _validate_ip(host_ip)
     rule_name_in = f"RE_Isolate_In_{host_ip.replace('.','_')}"
     rule_name_out = f"RE_Isolate_Out_{host_ip.replace('.','_')}"
-    cmd = (
+    safe_reason = _sanitize_powershell_string(reason[:200])
+    cmd_in = (
         f'netsh advfirewall firewall add rule '
         f'name="{rule_name_in}" direction=in action=block '
-        f'remoteip="{host_ip}" description="ISOLATE: {reason}" && '
+        f'remoteip="{host_ip}" description="ISOLATE: {safe_reason}"'
+    )
+    cmd_out = (
         f'netsh advfirewall firewall add rule '
         f'name="{rule_name_out}" direction=out action=block '
-        f'remoteip="{host_ip}" description="ISOLATE: {reason}"'
+        f'remoteip="{host_ip}" description="ISOLATE: {safe_reason}"'
     )
-    return await _exec(cmd, "isolate_host", host_ip=host_ip, rule_names=[rule_name_in, rule_name_out])
+    result_in = await _exec(cmd_in, "isolate_host", host_ip=host_ip, rule_names=[rule_name_in])
+    if not result_in.get("success"):
+        return result_in
+    result_out = await _exec(cmd_out, "isolate_host", host_ip=host_ip, rule_names=[rule_name_in, rule_name_out])
+    return result_out
 
 
 async def _restore_host(host_ip: str, reason: str = "", **kwargs) -> dict:
     """恢复主机 — 删除隔离规则"""
     safe_ip = host_ip.replace('.', '_')
-    cmd = (
-        f'netsh advfirewall firewall delete rule name="RE_Isolate_In_{safe_ip}" && '
-        f'netsh advfirewall firewall delete rule name="RE_Isolate_Out_{safe_ip}"'
-    )
-    return await _exec(cmd, "restore_host", host_ip=host_ip)
+    cmd_in = f'netsh advfirewall firewall delete rule name="RE_Isolate_In_{safe_ip}"'
+    cmd_out = f'netsh advfirewall firewall delete rule name="RE_Isolate_Out_{safe_ip}"'
+    result_in = await _exec(cmd_in, "restore_host", host_ip=host_ip)
+    result_out = await _exec(cmd_out, "restore_host", host_ip=host_ip)
+    return {"success": result_in.get("success", False) or result_out.get("success", False),
+            "results": [result_in, result_out]}
 
 
 # ── 3. rate_limit / remove_rate_limit (通过 QoS 策略) ──

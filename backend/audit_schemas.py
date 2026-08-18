@@ -81,13 +81,11 @@ class SubAuditorOutputSchema(BaseModel):
     def check_severity(cls, v: str) -> str:
         return v.lower().strip()
 
-    @field_validator("threat_claims")
-    @classmethod
-    def check_claims_consistency(cls, v, info):
-        threat_detected = info.data.get("threat_detected", False)
-        if threat_detected and not v:
-            raise ValueError("threat_detected=true 但 threat_claims 为空")
-        return v
+    # 注：原先 threat_detected=True 且 threat_claims=[] 时强制 raise，
+    # 反幻觉设计意图正确，但实践会逼迫 LLM 为通过 schema 而捏造 claim
+    # （伪造 evidence_ids 与 evidence_quotes），反而破坏 GroundingVerifier 的输入。
+    # 改为允许通过 — 上层 sub_auditor.audit 通过 hallucination_risk 阈值机制
+    # 对"疑似威胁但无证据"语义进行软惩罚，避免诱发 LLM 幻觉。
 
 
 # ═══════════════════════════════════════════
@@ -161,6 +159,7 @@ def extract_json(text: str) -> Optional[dict]:
     - 纯 JSON
     - ```json ... ``` 代码块
     - JSON 前后有解释文字
+    - 单引号 / 尾逗号 / 未加引号键（通过 stabilizer.json_repair 兜底）
     """
     text = text.strip()
 
@@ -186,6 +185,15 @@ def extract_json(text: str) -> Optional[dict]:
             return json.loads(text[start:end + 1])
         except json.JSONDecodeError:
             pass
+
+    # 兜底: 使用 stabilizer 的 JsonRepair 修复畸形 JSON
+    try:
+        from stabilizer.json_repair import JsonRepair
+        repaired, _ = JsonRepair().repair(text)
+        if repaired is not None:
+            return repaired
+    except Exception:
+        pass
 
     return None
 

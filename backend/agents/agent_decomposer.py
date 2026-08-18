@@ -27,6 +27,8 @@ from audit_types import (
     SUBTASK_DEEP_ANALYZE, SUBTASK_RECHECK,
     SUBTASK_GET_WINDOW, SUBTASK_ENTITY_LINK,
 )
+# D3: 继承 BaseAuditComponent 统一 LLM 调用入口的 trace
+from .base import BaseAuditComponent
 
 logger = logging.getLogger(__name__)
 
@@ -251,9 +253,9 @@ def _get_subtasks_deep(session_id: str, event: dict,
 
 # ── Decomposer 主类 ──
 
-class Decomposer:
+class Decomposer(BaseAuditComponent):
     """
-    分解者
+    分解者 (D3: 继承 BaseAuditComponent 统一 trace 入口)
 
     decompose() 输出: {
         "audit_depth": "quick|standard|deep",
@@ -261,6 +263,12 @@ class Decomposer:
         "llm_analysis": "LLM的初步判断（如需要）",
     }
     """
+
+    def __init__(self):
+        super().__init__(
+            agent_id="decomposer",
+            display_name="分解者 (Decomposer)",
+        )
 
     async def decompose(
         self,
@@ -449,9 +457,9 @@ class Decomposer:
 2. 判断需要调哪些工具来确认
 3. 输出 JSON: {{"初步判断":"威胁/疑似/正常","需要关注的IP":[],"需要查询的方向":[],"分析理由":"..."}}"""
 
-        from trace_hook import set_trace_context
-        set_trace_context(operation="decompose")
-        result = await summary.llm.chat([
+        # D3: 统一使用 self.llm_chat（继承自 BaseAuditComponent）
+        # 原 set_trace_context 调用已合并到 llm_chat，避免重复设置
+        result = await self.llm_chat([
             {"role": "system", "content": "你是安全分析专家，输出JSON格式。"},
             {"role": "user", "content": prompt},
         ])

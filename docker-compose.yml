@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -8,9 +6,9 @@ services:
     environment:
       POSTGRES_DB: shared_memory
       POSTGRES_USER: admin
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -24,10 +22,14 @@ services:
     image: redis:7-alpine
     container_name: shared-memory-redis
     restart: always
+    # 强制密码 + protected-mode;端口仅绑 127.0.0.1 供本机调试,容器间走 Docker 内网
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}", "--protected-mode", "yes"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -41,12 +43,15 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9095
-      # 三监听: PLAINTEXT 容器内(9092) / SSL 加密(9093) / PLAINTEXT_HOST 宿主机(9094)
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,SSL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9095,PLAINTEXT_HOST://0.0.0.0:9094
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,SSL://kafka:9093,PLAINTEXT_HOST://localhost:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SSL:SSL,PLAINTEXT_HOST:PLAINTEXT
+      # 三监听: PLAINTEXT 容器内(9092,不对外) / SASL_SSL 外部加密+认证(9093) / PLAINTEXT_HOST 本机工具(9094,仅127.0.0.1)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,SASL_SSL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9095,PLAINTEXT_HOST://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,SASL_SSL://${KAFKA_PUBLIC_HOST:?KAFKA_PUBLIC_HOST must be set in .env}:9093,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # ── SASL/SCRAM 认证 (外部日志源必须持账号+证书才能推送, 账号创建见 tools/create-kafka-users.sh) ──
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_jaas.conf
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       # ── 数据保留策略（全局默认 7 天 + 1GB 上限） ──
@@ -55,22 +60,26 @@ services:
       KAFKA_LOG_SEGMENT_BYTES: 107374182
       KAFKA_LOG_CLEANUP_POLICY: delete
       KAFKA_LOG_COMPRESSION_TYPE: lz4
-      # ── SSL/TLS 配置（证书由 tools/gen-kafka-certs.sh 生成） ──
-      KAFKA_SSL_KEYSTORE_LOCATION: /etc/kafka/certs/broker-keystore.p12
-      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_PASSWORD:-soc-kafka-2024}
-      KAFKA_SSL_KEY_PASSWORD: ${KAFKA_SSL_PASSWORD:-soc-kafka-2024}
-      KAFKA_SSL_TRUSTSTORE_LOCATION: /etc/kafka/certs/ca-cert.pem
-      KAFKA_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_PASSWORD:-soc-kafka-2024}
+      # ── SSL/TLS 配置（证书由 tools/gen-kafka-certs.sh 生成, SASL_SSL 监听器复用） ──
+      # cp-kafka 约定: FILENAME + 凭据文件, 镜像 entrypoint 自动装配 ssl.*.location
+      KAFKA_SSL_KEYSTORE_FILENAME: broker-keystore.p12
+      KAFKA_SSL_KEYSTORE_CREDENTIALS: broker-keystore-creds
+      KAFKA_SSL_KEY_CREDENTIALS: broker-key-creds
+      KAFKA_SSL_TRUSTSTORE_FILENAME: ca-truststore.p12
+      KAFKA_SSL_TRUSTSTORE_CREDENTIALS: truststore-creds
+      KAFKA_SSL_KEYSTORE_TYPE: PKCS12
+      KAFKA_SSL_TRUSTSTORE_TYPE: PKCS12
       KAFKA_SSL_CLIENT_AUTH: none
       KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: ""
       CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
     ports:
-      - "9092:9092"
+      # 9092 不映射宿主(仅容器网络); 9093 对外(SASL_SSL 保护); 9094 仅本机
       - "9093:9093"
-      - "9094:9094"
+      - "127.0.0.1:9094:9094"
     volumes:
       - kafka_data:/var/lib/kafka/data
-      - ./certs/kafka:/etc/kafka/certs:ro
+      - ./certs/kafka:/etc/kafka/secrets
+      - ./config/kafka/kafka_jaas.conf:/etc/kafka/kafka_jaas.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
       interval: 10s
@@ -78,17 +87,22 @@ services:
       retries: 10
       start_period: 30s
 
-  # ── Kafka UI (竞赛演示可视化) ──
+  # ── Kafka UI (竞赛演示可视化, 登录认证保护) ──
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: provectuslabs/kafka-ui:v0.7.2
     container_name: soc-kafka-ui
     restart: always
     environment:
       KAFKA_CLUSTERS_0_NAME: SOC-Kafka
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       DYNAMIC_CONFIG_ENABLED: "true"
+      # 登录认证: 未认证不允许访问
+      AUTH_TYPE: "LOGIN_FORM"
+      SPRING_SECURITY_USER_NAME: ${KAFKA_UI_USER:-admin}
+      SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD:?KAFKA_UI_PASSWORD must be set in .env}
     ports:
-      - "8082:8080"
+      # 注: 不用 8082/8083 —— 宿主机 QQ 会抢占这些端口造成连接随机分流
+      - "18082:8080"
     depends_on:
       kafka:
         condition: service_healthy
@@ -104,13 +118,14 @@ services:
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
     ports:
-      - "8085:8081"
+      - "127.0.0.1:8085:8081"
     depends_on:
       kafka:
         condition: service_healthy
 
   # ── Flink 流处理引擎 ──
   flink-jobmanager:
+    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:-dev}
     build:
       context: ./flink-jobs
       dockerfile: Dockerfile
@@ -122,13 +137,14 @@ services:
         jobmanager.rpc.address: flink-jobmanager
         state.checkpoints.dir: file:///tmp/flink-checkpoints
       KAFKA_BOOTSTRAP: kafka:9092
-    ports:
-      - "8081:8081"
+    # REST/Dashboard 不映射宿主: 外部经 frontend:3002 (Basic Auth) 访问,
+    # 作业提交用 `docker compose exec flink-jobmanager /opt/flink/submit-jobs.sh`
     depends_on:
       kafka:
         condition: service_healthy
 
   flink-taskmanager:
+    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:-dev}
     build:
       context: ./flink-jobs
       dockerfile: Dockerfile
@@ -144,6 +160,7 @@ services:
       - flink-jobmanager
 
   backend:
+    image: ghcr.io/x2789279228-droid/soc-backend:${IMAGE_TAG:-dev}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -152,12 +169,16 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      SHARED_MEMORY_DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:-admin123}@postgres:5432/shared_memory
-      SHARED_MEMORY_REDIS_URL: redis://redis:6379/0
+      SHARED_MEMORY_DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/shared_memory
+      SHARED_MEMORY_REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
       # 必填：请在运行前设置 API Key，否则 LLM/Embedding 将返回降级响应
       SHARED_MEMORY_LLM_API_KEY: ${SHARED_MEMORY_LLM_API_KEY:?LLM_API_KEY_REQUIRED}
       SHARED_MEMORY_LLM_BASE_URL: ${SHARED_MEMORY_LLM_BASE_URL:-https://api.xiaomimimo.com/v1}
       SHARED_MEMORY_LLM_MODEL: ${SHARED_MEMORY_LLM_MODEL:-mimo-v2.5}
+      # LLM 成本控制 (日预算 / 输入输出单价, 单位 ¥/千tokens; 0=不估算费用)
+      SHARED_MEMORY_LLM_DAILY_BUDGET_TOKENS: ${SHARED_MEMORY_LLM_DAILY_BUDGET_TOKENS:-5000000}
+      SHARED_MEMORY_LLM_PRICE_INPUT_PER_1K_TOKENS: ${SHARED_MEMORY_LLM_PRICE_INPUT_PER_1K_TOKENS:-0.001}
+      SHARED_MEMORY_LLM_PRICE_OUTPUT_PER_1K_TOKENS: ${SHARED_MEMORY_LLM_PRICE_OUTPUT_PER_1K_TOKENS:-0.002}
       SHARED_MEMORY_EMBEDDING_API_KEY: ${SHARED_MEMORY_EMBEDDING_API_KEY:?EMBEDDING_API_KEY_REQUIRED}
       SHARED_MEMORY_EMBEDDING_BASE_URL: ${SHARED_MEMORY_EMBEDDING_BASE_URL:-https://maas-api.cn-huabei-1.xf-yun.com/v2}
       SHARED_MEMORY_EMBEDDING_MODEL: ${SHARED_MEMORY_EMBEDDING_MODEL:-mimo-v2.5}
@@ -166,7 +187,9 @@ services:
       SHARED_MEMORY_JWT_SECRET: ${SHARED_MEMORY_JWT_SECRET:?JWT_SECRET_REQUIRED}
       SHARED_MEMORY_ADMIN_USER: ${SHARED_MEMORY_ADMIN_USER:-admin}
       SHARED_MEMORY_ADMIN_PASSWORD: ${SHARED_MEMORY_ADMIN_PASSWORD:?ADMIN_PASSWORD_REQUIRED}
-      SHARED_MEMORY_ALLOWED_ORIGINS: ${SHARED_MEMORY_ALLOWED_ORIGINS:-["http://localhost:3001"]}
+      # 整体加引号: 插值结果 ["..."] 否则会被 YAML 解析成数组,
+      # 而 compose environment 值必须是标量; 后端按 JSON 字符串解析
+      SHARED_MEMORY_ALLOWED_ORIGINS: '${SHARED_MEMORY_ALLOWED_ORIGINS:-["http://localhost:3001"]}'
       # 响应引擎 SSH 传输配置
       SHARED_MEMORY_RESPONSE_TRANSPORT_MODE: ${SHARED_MEMORY_RESPONSE_TRANSPORT_MODE:-auto}
       SHARED_MEMORY_RESPONSE_SSH_HOST: ${SHARED_MEMORY_RESPONSE_SSH_HOST:-host.docker.internal}
@@ -193,16 +216,94 @@ services:
         condition: service_healthy
 
   frontend:
+    image: ghcr.io/x2789279228-droid/soc-frontend:${IMAGE_TAG:-dev}
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: shared-memory-frontend
     restart: always
     ports:
-      - "3001:80"
+      - "3001:80"     # Web 前端
+      - "3002:8080"   # Flink Dashboard 认证反代 (Basic Auth)
+    volumes:
+      # 生成方式见 tools/gen-htpasswd.sh
+      - ./config/nginx/flink.htpasswd:/etc/nginx/flink.htpasswd:ro
     depends_on:
       - backend
+      - flink-jobmanager
+
+  # ════════════════════════════════════════════
+  # NDR 扩展服务 (可选, 按需启用)
+  # ════════════════════════════════════════════
+
+  # ── Suricata IDS/IPS ──
+  suricata:
+    image: jasonish/suricata:8.0.6
+    container_name: soc-suricata
+    restart: unless-stopped
+    profiles: ["ndr"]
+    command: -i eth0 -o /var/log/suricata/eve.json
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      SURICATA_OPTIONS: "-v"
+    volumes:
+      - suricata_logs:/var/log/suricata
+      - suricata_rules:/var/lib/suricata/rules
+      - ./config/suricata:/etc/suricata/custom:ro
+    network_mode: host
+
+  # ── CAPE Sandbox (恶意软件动态分析) ──
+  # NOTE: `capev2/cape` 在 Docker Hub 不存在 (API 404)。启用 sandbox profile 前
+  # 请替换为真实可用的 CAPE 镜像并锁版本 (如 self-host 的 harbor/镜像仓库)。
+  cape:
+    image: capev2/cape:latest
+    container_name: soc-cape
+    restart: unless-stopped
+    profiles: ["sandbox"]
+    ports:
+      - "8090:8090"
+    volumes:
+      - cape_data:/data
+    environment:
+      CAPE_API_KEY: ${CAPE_API_KEY:-}
+
+  # ── MISP 威胁情报平台 ──
+  misp:
+    image: coolacid/misp-docker:core-v2.4.177a
+    container_name: soc-misp
+    restart: unless-stopped
+    profiles: ["intel"]
+    ports:
+      - "8443:443"
+    environment:
+      MYSQL_HOST: misp-db
+      MYSQL_DATABASE: misp
+      MYSQL_USER: misp
+      MYSQL_PASSWORD: ${MISP_DB_PASSWORD:?MISP_DB_PASSWORD must be set in .env}
+      MISP_ADMIN_EMAIL: admin@soc.local
+      MISP_ADMIN_PASSPHRASE: ${MISP_ADMIN_PASSWORD:?MISP_ADMIN_PASSWORD must be set in .env}
+    depends_on:
+      - misp-db
+
+  misp-db:
+    image: mysql:8.0
+    container_name: soc-misp-db
+    restart: unless-stopped
+    profiles: ["intel"]
+    environment:
+      MYSQL_DATABASE: misp
+      MYSQL_USER: misp
+      MYSQL_PASSWORD: ${MISP_DB_PASSWORD:?MISP_DB_PASSWORD must be set in .env}
+      MYSQL_ROOT_PASSWORD: ${MISP_ROOT_PASSWORD:?MISP_ROOT_PASSWORD must be set in .env}
+    volumes:
+      - misp_db_data:/var/lib/mysql
 
 volumes:
   pgdata:
   kafka_data:
+  suricata_logs:
+  suricata_rules:
+  cape_data:
+  misp_db_data:

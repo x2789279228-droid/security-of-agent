@@ -10,14 +10,19 @@
   python log_simulator.py --api http://localhost:8001  # 指定后端地址
 
   Kafka 模式 (推荐):
-  python log_simulator.py --kafka localhost:9092                # 输出到 Kafka
-  python log_simulator.py --kafka localhost:9092 --mode chain   # 攻击链 → Kafka
-  python log_simulator.py --kafka localhost:9092 --api-key soc-simulator-2024
+  python log_simulator.py --kafka localhost:9094                # 本机推送 (PLAINTEXT, 仅本机可达)
+  python log_simulator.py --kafka localhost:9094 --mode chain   # 攻击链 → Kafka
+  python log_simulator.py --kafka localhost:9094 --api-key soc-simulator-2024
+
+  外部 SASL_SSL 模式 (9093, SCRAM-SHA-512, 账号由 tools/create-kafka-users.sh 创建):
+  python log_simulator.py --kafka <主机IP>:9093 \
+      --sasl-user soc-log-source --sasl-password <密码> --ca-cert certs/kafka/ca-cert.pem
 """
 import argparse
 import asyncio
 import json
 import random
+import ssl
 import time
 import uuid
 
@@ -32,6 +37,13 @@ except ImportError:
 
 KAFKA_TOPIC_RAW = "security-logs-raw"
 DEFAULT_API_KEY = "soc-simulator-2024"
+
+# ── SASL_SSL 可选参数 (main() 中按 CLI 入参填充, 供 create_kafka_producer 读取) ──
+SASL_OPTS = {
+    "user": "",
+    "password": "",
+    "ca_cert": "",
+}
 
 # ── 正常事件模板 ──
 
@@ -158,15 +170,27 @@ def to_kafka_message(evt: dict, api_key: str, source_id: str) -> dict:
 
 
 async def create_kafka_producer(bootstrap: str) -> "AIOKafkaProducer":
-    """创建 Kafka 生产者"""
+    """创建 Kafka 生产者; SASL_OPTS 非空时启用 SASL_SSL(SCRAM-SHA-512)"""
     if not HAS_KAFKA:
         raise RuntimeError("aiokafka 未安装，请运行: pip install aiokafka")
-    producer = AIOKafkaProducer(
-        bootstrap_servers=bootstrap,
-        value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
-        key_serializer=lambda k: k.encode("utf-8") if k else None,
-        acks="all",
-    )
+    kwargs = {
+        "bootstrap_servers": bootstrap,
+        "value_serializer": lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
+        "key_serializer": lambda k: k.encode("utf-8") if k else None,
+        "acks": "all",
+    }
+    if SASL_OPTS["user"]:
+        ctx = ssl.create_default_context(cafile=SASL_OPTS["ca_cert"] or None)
+        # Broker 证书 SAN 可能不含公网地址 → 仅校验证书链, 不校验主机名
+        ctx.check_hostname = False
+        kwargs.update(
+            security_protocol="SASL_SSL",
+            sasl_mechanism="SCRAM-SHA-512",
+            sasl_plain_username=SASL_OPTS["user"],
+            sasl_plain_password=SASL_OPTS["password"],
+            ssl_context=ctx,
+        )
+    producer = AIOKafkaProducer(**kwargs)
     await producer.start()
     return producer
 
@@ -410,9 +434,22 @@ def main():
                         help="事件总数(0=无限)")
     parser.add_argument("--session", default="",
                         help="Session ID / Source ID(默认自动生成)")
+    parser.add_argument("--sasl-user", default="",
+                        help="Kafka SASL/SCRAM 用户名(外部 9093 推送必填)")
+    parser.add_argument("--sasl-password", default="",
+                        help="Kafka SASL/SCRAM 密码")
+    parser.add_argument("--ca-cert", default="",
+                        help="Kafka CA 证书路径 (如 certs/kafka/ca-cert.pem)")
     args = parser.parse_args()
 
     session_id = args.session or f"sim_{uuid.uuid4().hex[:12]}"
+
+    if args.sasl_user:
+        if not args.sasl_password:
+            parser.error("--sasl-user 需同时提供 --sasl-password")
+        SASL_OPTS["user"] = args.sasl_user
+        SASL_OPTS["password"] = args.sasl_password
+        SASL_OPTS["ca_cert"] = args.ca_cert
 
     # Kafka 模式
     if args.kafka:

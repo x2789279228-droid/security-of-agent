@@ -26,20 +26,50 @@ def estimate_tokens(text: str) -> int:
 
 
 class CostTracker:
-    """LLM 成本追踪器 — 每日预算 + 每事件费用"""
+    """LLM 成本追踪器 — 每日预算 + 每事件费用
 
-    def __init__(self, daily_budget_tokens: int = 5_000_000):
+    预算与单价来自 settings (SHARED_MEMORY_LLM_DAILY_BUDGET_TOKENS /
+    SHARED_MEMORY_LLM_PRICE_INPUT_PER_1K_TOKENS /
+    SHARED_MEMORY_LLM_PRICE_OUTPUT_PER_1K_TOKENS)。
+    输入/输出分别计价, 与主流 API 计费模型一致。
+    用量同时落库于 llm_traces (由 trace_hook 持久化), 内存仅作运行期门禁;
+    重启后用 restore_today_usage() 从 DB 重建当日用量, 保证预算门禁不因重启失效。
+    """
+
+    def __init__(
+        self,
+        daily_budget_tokens: int = 5_000_000,
+        price_input_per_1k: float = 0.0,
+        price_output_per_1k: float = 0.0,
+    ):
         self.daily_budget = daily_budget_tokens
+        self.price_input_per_1k = price_input_per_1k
+        self.price_output_per_1k = price_output_per_1k
         self._daily_usage: dict[str, int] = defaultdict(int)  # date → total_tokens
+        self._daily_prompt: dict[str, int] = defaultdict(int)  # date → prompt_tokens
+        self._daily_completion: dict[str, int] = defaultdict(int)  # date → completion_tokens
         self._event_costs: dict[int, int] = {}  # event_id → total_tokens
         self._call_count: dict[str, int] = defaultdict(int)  # date → call_count
 
-    def record(self, tokens: int, event_id: int = 0):
+    def record(self, tokens: int, event_id: int = 0,
+               prompt_tokens: int = 0, completion_tokens: int = 0):
         today = date.today().isoformat()
         self._daily_usage[today] += tokens
+        self._daily_prompt[today] += prompt_tokens or 0
+        self._daily_completion[today] += completion_tokens or 0
         self._call_count[today] += 1
         if event_id:
             self._event_costs[event_id] = self._event_costs.get(event_id, 0) + tokens
+
+    def restore_today_usage(self, tokens: int, calls: int = 0,
+                            prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        """从持久化数据恢复今日用量 (启动时调用, 覆盖而非累加)"""
+        today = date.today().isoformat()
+        self._daily_usage[today] = max(0, int(tokens or 0))
+        self._daily_prompt[today] = max(0, int(prompt_tokens or 0))
+        self._daily_completion[today] = max(0, int(completion_tokens or 0))
+        if calls:
+            self._call_count[today] = max(0, int(calls or 0))
 
     def is_over_budget(self) -> bool:
         today = date.today().isoformat()
@@ -49,19 +79,41 @@ class CostTracker:
         today = date.today().isoformat()
         return max(0, self.daily_budget - self._daily_usage[today])
 
+    def estimate_cost_jpy(self, prompt_tokens: int, completion_tokens: int) -> float:
+        """按输入/输出每千 token 单价估算费用(¥), 未配置单价返回 0"""
+        cost = 0.0
+        if self.price_input_per_1k > 0:
+            cost += (max(0, int(prompt_tokens or 0)) / 1000) * self.price_input_per_1k
+        if self.price_output_per_1k > 0:
+            cost += (max(0, int(completion_tokens or 0)) / 1000) * self.price_output_per_1k
+        return round(cost, 4)
+
     def stats(self) -> dict:
         today = date.today().isoformat()
+        used = self._daily_usage.get(today, 0)
+        prompt = self._daily_prompt.get(today, 0)
+        completion = self._daily_completion.get(today, 0)
         return {
             "daily_budget": self.daily_budget,
-            "today_usage": self._daily_usage.get(today, 0),
+            "today_usage": used,
+            "today_prompt": prompt,
+            "today_completion": completion,
             "today_calls": self._call_count.get(today, 0),
             "remaining": self.remaining_budget(),
             "over_budget": self.is_over_budget(),
+            "usage_pct": round(used / self.daily_budget * 100, 1) if self.daily_budget else 0.0,
+            "price_input_per_1k": self.price_input_per_1k,
+            "price_output_per_1k": self.price_output_per_1k,
+            "estimated_cost_jpy": self.estimate_cost_jpy(prompt, completion),
             "tracked_events": len(self._event_costs),
         }
 
 
-cost_tracker = CostTracker()
+cost_tracker = CostTracker(
+    daily_budget_tokens=settings.llm_daily_budget_tokens,
+    price_input_per_1k=settings.llm_price_input_per_1k_tokens,
+    price_output_per_1k=settings.llm_price_output_per_1k_tokens,
+)
 
 
 class LLMClient:
@@ -151,7 +203,11 @@ class LLMClient:
                 )
 
                 # 成本记录
-                cost_tracker.record(total_tokens, event_id=event_id)
+                cost_tracker.record(
+                    total_tokens, event_id=event_id,
+                    prompt_tokens=int(usage.get("prompt_tokens", prompt_tokens)),
+                    completion_tokens=int(usage.get("completion_tokens", estimate_tokens(content))),
+                )
 
                 # 缓存响应
                 self._response_cache[cache_key] = (content, time.time())

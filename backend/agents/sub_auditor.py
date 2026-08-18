@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from summary_compression import summary
+# D3: 继承 BaseAuditComponent 统一 LLM 调用入口的 trace
+from .base import BaseAuditComponent
 
 logger = logging.getLogger(__name__)
 
@@ -123,26 +125,48 @@ class ChunkVerdict:
         }
 
 
-class SubAuditor:
-    """子审核器（Grounding 强化版）"""
+class SubAuditor(BaseAuditComponent):
+    """子审核器（Grounding 强化版）
+
+    D3: 继承 BaseAuditComponent 而非 BaseAgent，避免被强制实现 process()，
+    保留以 audit(chunk) 为主 API 的语义，同时复用统一的 llm_chat trace 入口。
+    """
 
     MAX_RETRIES = 1  # 结构化验证失败时最多重试次数
 
-    async def audit(self, chunk) -> ChunkVerdict:
-        """审核单个事件块 — 强制 Grounding + 结构化验证"""
+    def __init__(self):
+        super().__init__(
+            agent_id="sub_auditor",
+            display_name="子审核器 (SubAuditor)",
+        )
+
+    async def audit(
+        self,
+        chunk,
+        knowledge_chunks: list[dict] | None = None,
+    ) -> ChunkVerdict:
+        """审核单个事件块 — 强制 Grounding + 结构化验证
+
+        Args:
+            chunk: 待审核事件块 (AuditChunk)
+            knowledge_chunks: 可选的安全知识库片段列表（来自 RAG 检索），
+                              用于启用 GroundingVerifier Layer 4 知识库一致性校验。
+                              为 None 时 Layer 4 视为"无知识库可验证"，返回一致性通过。
+        """
         block_text = chunk.to_prompt_block()
         event_count = len(chunk.events)
         all_ids = [e.get("id", e.get("event_id")) for e in chunk.events if e.get("id")]
 
         logger.info(
             f"SubAuditor auditing chunk {chunk.chunk_id}: "
-            f"{event_count} events, IDs={all_ids[:5]}..."
+            f"{event_count} events, IDs={all_ids[:5]}..., "
+            f"kb_chunks={len(knowledge_chunks) if knowledge_chunks else 0}"
         )
 
         prompt = self._build_prompt(block_text)
 
-        from trace_hook import set_trace_context
-        set_trace_context(operation="sub_audit")
+        # D3: 统一使用 self.llm_chat（已合并 set_trace_context 调用）
+        # 不再手动 from trace_hook import set_trace_context
 
         # 首次调用 + 结构化验证 + 可选重试
         parsed = None
@@ -157,12 +181,14 @@ class SubAuditor:
                     f"错误: {'; '.join(schema_errors)}\n"
                     f"请严格按 JSON 格式重新输出。"
                 )
-                raw_result = await summary.llm.chat([
+                # D3: 使用 self.llm_chat 统一 trace 入口
+                raw_result = await self.llm_chat([
                     {"role": "system", "content": self._system_prompt()},
                     {"role": "user", "content": retry_prompt},
                 ])
             else:
-                raw_result = await summary.llm.chat([
+                # D3: 使用 self.llm_chat 统一 trace 入口
+                raw_result = await self.llm_chat([
                     {"role": "system", "content": self._system_prompt()},
                     {"role": "user", "content": prompt},
                 ])
@@ -209,7 +235,11 @@ class SubAuditor:
         # 程序化 Grounding 验证
         try:
             from grounding_verifier import grounding_verifier
-            grounding = grounding_verifier.verify_chunk(claims, chunk.events)
+            grounding = grounding_verifier.verify_chunk(
+                claims, chunk.events,
+                knowledge_chunks=knowledge_chunks or [],
+                chunk_id=chunk.chunk_id,
+            )
             verdict.grounding_report = {
                 "overall_score": grounding.overall_score,
                 "grounded": grounding.grounded_claims,
@@ -235,6 +265,18 @@ class SubAuditor:
             logger.warning(
                 f"Chunk {chunk.chunk_id}: {validation['invalid_claims']} "
                 f"invalid claims, risk={verdict.hallucination_risk:.2f}"
+            )
+
+        # 疑似威胁但无证据 — 由 schema 改造带来的软惩罚机制：
+        # threat_detected=True 且 threat_claims=[] 表示 LLM 判定有威胁但无具体断言，
+        # 这可能是合理的"疑似"表达，也可能是 LLM 规避 schema 而做的弱化输出。
+        # 设置 0.5 幻觉风险下限，强制人工复核，但不当场视为"完全幻觉"。
+        if verdict.threat_detected and not verdict.threat_claims:
+            verdict.hallucination_risk = max(verdict.hallucination_risk, 0.5)
+            verdict.unsubstantiated = True
+            logger.info(
+                f"Chunk {chunk.chunk_id}: threat_detected=True but no claims "
+                f"(疑似无证据), hallucination_risk floored to 0.5"
             )
 
         if verdict.threat_detected:
@@ -267,24 +309,24 @@ class SubAuditor:
 3. 没有事件 ID + 字段引用支撑的断言将被程序化验证器自动丢弃
 
 ## 输出格式（严格 JSON，不要输出其他内容）
-{{{{
+{{
     "threat_detected": true/false,
     "threat_claims": [
-        {{{{
+        {{
             "type": "C2/DDoS/数据外泄/横向移动/端口扫描/暴力破解/其他",
             "confidence": 0.0-1.0,
             "evidence_ids": [事件ID1, 事件ID2],
             "evidence_quotes": ["从事件原始数据逐字引用的片段1", "片段2"],
             "severity": "critical/high/medium/low/info",
             "summary": "该威胁的具体描述（必须引用事件内容）"
-        }}}}
+        }}
     ],
     "confidence": 0.0-1.0,
     "severity": "critical/high/medium/low/info",
     "summary": "该块综合分析",
     "suspicious_entities": ["IP/用户"],
     "alert": "一句话告警（如有）"
-}}}}
+}}
 
 ## 注意
 1. 没有威胁时 threat_detected=false, threat_claims=[]

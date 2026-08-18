@@ -33,6 +33,7 @@ grounding_verifier.py — 程序化字段级溯源验证器
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +123,13 @@ class ClaimGroundingReport:
     chain_integrity: float = 1.0  # 链完整性 0-1
 
     # 综合评分
-    grounding_score: float        # 加权综合得分 0-1
-    verdict: str                  # "grounded" | "partially_grounded" | "ungrounded"
+    # 注：原代码此处缺少默认值，导致 ClaimGroundingReport 在 dataclass 装饰时
+    # raise TypeError: non-default argument follows default argument。
+    # 这使 grounding_verifier 模块无法被 import，SubAuditor 中的 verify_chunk
+    # 调用全部被 except 静默吞掉 — Layer 1-7 程序化校验实际从未生效。
+    # 补默认值后回归正常路径；正确值会在 _verify_single_claim 中被显式覆盖。
+    grounding_score: float = 1.0  # 加权综合得分 0-1
+    verdict: str = "ungrounded"   # "grounded" | "partially_grounded" | "ungrounded"
 
 
 @dataclass
@@ -480,6 +486,53 @@ class GroundingVerifier:
         text = text.lower().strip()
         text = re.sub(r"\s+", " ", text)
         return text
+
+    @staticmethod
+    def _normalize_timestamp(ts) -> float | None:
+        """
+        将事件时间戳归一为 epoch seconds (float)，用于比较
+
+        支持的输入类型：
+          - int/float (epoch seconds 或 epoch millis)
+          - ISO 8601 字符串 (含可选时区 / 'Z' 后缀)，例如：
+            "2026-08-01T12:00:00+00:00" / "2026-08-01T12:00:00Z" / "2026-08-01 12:00:00"
+          - datetime 对象
+
+        事件来源说明：tool_registry._event_store_query 在所有路径上均输出
+        `created_at.isoformat()` 形式的字符串（见 event_store.py:204），
+        因此 Layer 5 / Layer 7 必须支持 ISO 字符串解析，否则两层均为死代码。
+        """
+        if ts is None:
+            return None
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts.timestamp()
+        if isinstance(ts, (int, float)):
+            return ts / 1000.0 if ts > 1e12 else float(ts)
+        if isinstance(ts, str):
+            s = ts.strip()
+            if not s:
+                return None
+            # fromisoformat 不支持 'Z' 后缀，统一替换为 +00:00
+            s = s.replace("Z", "+00:00")
+            # 无时区信息时假定 UTC，避免本地时区偏移污染比较结果
+            try:
+                dt = datetime.fromisoformat(s)
+            except ValueError:
+                # 兜底尝试 SQL/常见格式
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                    try:
+                        dt = datetime.strptime(s, fmt)
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        return None
 
     # ───────────────────────────────────────
     # Layer 3: 实体一致性
@@ -841,14 +894,12 @@ class GroundingVerifier:
             if not event:
                 continue
             ts = event.get("timestamp") or event.get("created_at")
-            if ts is None:
+            ts_sec = self._normalize_timestamp(ts)
+            if ts_sec is None:
                 continue
-            # 支持 epoch millis 和 epoch seconds
-            if isinstance(ts, (int, float)):
-                ts_sec = ts / 1000 if ts > 1e12 else ts
-                age = now - ts_sec
-                if age > self._EVIDENCE_TTL_SECONDS:
-                    stale_ids.append(eid)
+            age = now - ts_sec
+            if age > self._EVIDENCE_TTL_SECONDS:
+                stale_ids.append(eid)
 
         freshness = 1.0 - (len(stale_ids) / max(len(evidence_ids), 1))
         return stale_ids, max(freshness, 0.0)
@@ -947,13 +998,7 @@ class GroundingVerifier:
             event = event_index.get(eid)
             if event:
                 ts = event.get("timestamp") or event.get("created_at")
-                if ts is not None:
-                    if isinstance(ts, (int, float)):
-                        timestamps.append(ts / 1000 if ts > 1e12 else ts)
-                    else:
-                        timestamps.append(None)
-                else:
-                    timestamps.append(None)
+                timestamps.append(self._normalize_timestamp(ts))
             else:
                 timestamps.append(None)
 

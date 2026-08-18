@@ -46,6 +46,7 @@ class RuleManager:
                     "attack_type": r.attack_type,
                     "confidence": r.confidence,
                     "action_recommend": r.action_recommend,
+                    "conditions": r.conditions,
                     "type": "sigma",
                 }
                 for r in sigma_detector.rules

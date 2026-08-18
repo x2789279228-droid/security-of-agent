@@ -127,7 +127,8 @@ class KafkaConsumerManager:
         """初始化 Redis 连接（用于幂等去重）"""
         try:
             import redis.asyncio as aioredis
-            self._redis = await aioredis.from_url(
+            # from_url 是同步工厂函数, 返回 Redis 客户端 (不可 await)
+            self._redis = aioredis.from_url(
                 settings.redis_url, decode_responses=True
             )
             await self._redis.ping()
@@ -154,11 +155,16 @@ class KafkaConsumerManager:
 
     # ── 幂等去重 ──
 
-    async def _is_duplicate(self, event_id: str) -> bool:
-        """检查消息是否已处理过（Redis SET NX）"""
+    async def _is_duplicate(self, event_id: str, topic: str = "") -> bool:
+        """检查消息是否已处理过（Redis SET NX）
+
+        去重键必须包含 topic: Flink 会把同一 eventId 同时发往 enriched 与
+        audit-queue 两个 topic (合法扇出), 若跨 topic 共享去重键, 后到的
+        一路会被误判为重复而跳过, 导致存储或审计链路静默丢失。
+        """
         if not self._redis or not event_id:
             return False
-        key = f"{DEDUP_PREFIX}{event_id}"
+        key = f"{DEDUP_PREFIX}{topic}:{event_id}" if topic else f"{DEDUP_PREFIX}{event_id}"
         try:
             added = await self._redis.set(key, "1", nx=True, ex=DEDUP_TTL)
             return not added  # set 返回 None 表示 key 已存在 → 重复
@@ -293,8 +299,8 @@ class KafkaConsumerManager:
                 # ⓪ 解密敏感字段
                 event = field_cipher.decrypt_message(event)
 
-                # ① 幂等去重
-                if await self._is_duplicate(event_id):
+                # ① 幂等去重（键含 topic, 见 _is_duplicate 说明）
+                if await self._is_duplicate(event_id, topic):
                     self._stats["dedup_skipped"] += 1
                     # 仍然提交 offset（跳过已处理的消息）
                     await consumer.commit()
@@ -414,7 +420,13 @@ class KafkaConsumerManager:
         from memory_tree import memory_tree
 
         session_id = event.get("sourceId", event.get("session_id", "kafka-" + str(event.get("eventId", ""))))
-        anomaly_score = event.get("_anomalyScore", event.get("anomalyScore", 0.0))
+        # Flink AnomalyDetectionJob 把评分写入嵌套的 rawData._anomalyScore,
+        # 兼容顶层键以支持其它生产者
+        raw = event.get("rawData") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        anomaly_score = event.get("_anomalyScore", raw.get("_anomalyScore", event.get("anomalyScore", 0.0)))
+        anomaly_reasons = event.get("_anomalyReasons", raw.get("_anomalyReasons", []))
 
         log_data = {
             "event": event.get("eventType", event.get("event", "UNKNOWN")),
@@ -427,7 +439,7 @@ class KafkaConsumerManager:
             "_anomaly": {
                 "score": anomaly_score,
                 "is_anomaly": anomaly_score >= 0.6,
-                "reasons": event.get("_anomalyReasons", []),
+                "reasons": anomaly_reasons,
                 "sigma": 0,
             },
             "_flink_processed": True,
@@ -469,7 +481,12 @@ class KafkaConsumerManager:
         from anomaly_detector import AnomalyReport
 
         session_id = event.get("sourceId", event.get("session_id", "kafka-audit"))
-        anomaly_score = event.get("_anomalyScore", event.get("anomalyScore", 0.3))
+        # Flink 评分位于嵌套 rawData._anomalyScore（同 _handle_enriched）
+        raw = event.get("rawData") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        anomaly_score = event.get("_anomalyScore", raw.get("_anomalyScore", event.get("anomalyScore", 0.3)))
+        anomaly_reasons = event.get("_anomalyReasons", raw.get("_anomalyReasons", []))
 
         log_data = {
             "event": event.get("eventType", event.get("event", "UNKNOWN")),
@@ -482,7 +499,7 @@ class KafkaConsumerManager:
             "_anomaly": {
                 "score": anomaly_score,
                 "is_anomaly": anomaly_score >= 0.6,
-                "reasons": event.get("_anomalyReasons", []),
+                "reasons": anomaly_reasons,
                 "sigma": 0,
             },
             "_flink_processed": True,
@@ -494,7 +511,7 @@ class KafkaConsumerManager:
             anomaly_score=anomaly_score,
             is_anomaly=anomaly_score >= 0.6,
             deviation_sigma=anomaly_score * 5,
-            reasons=event.get("_anomalyReasons", []),
+            reasons=anomaly_reasons,
         )
 
         async with db_session() as session:
@@ -544,7 +561,7 @@ class KafkaConsumerManager:
         if anomaly_score >= 0.5 or severity in ("critical", "high"):
             try:
                 # 资产重要性加成
-                from app import get_asset_weight
+                from routers.assets import get_asset_weight
                 dst_ip = alert.get("dstIp", alert.get("dst_ip", ""))
                 asset_weight = get_asset_weight(dst_ip)
                 if asset_weight > 1.0:

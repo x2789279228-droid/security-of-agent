@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Database
-    database_url: str = "postgresql+asyncpg://admin:admin123@localhost:5432/shared_memory"
+    database_url: str = "postgresql+asyncpg://localhost:5432/shared_memory"
     redis_url: str = "redis://localhost:6379/0"
 
     # LLM
@@ -76,6 +76,89 @@ class Settings(BaseSettings):
     protected_assets_labels: str = ""        # 对应标签（逗号分隔）
     fw_ssh_user_readonly: str = ""           # 只读 SSH 账号（nmap/查询用）
     ttl_scan_interval: int = 30             # TTL 过期扫描间隔（秒）
+
+    # ── NDR 流量采集 ──
+    capture_enabled: bool = False            # 启用网络流量采集
+    capture_interface: str = "eth0"          # 抓包网卡
+    capture_bpf_filter: str = ""             # BPF 过滤表达式（空=全量）
+    capture_method: str = "libpcap"          # libpcap | dpdk | af_packet
+    capture_snap_len: int = 262144           # 每包最大捕获字节
+    pcap_storage_path: str = "/data/pcap"    # PCAP 文件存储目录
+    pcap_rotation_mb: int = 100              # 单文件上限 (MB)
+    pcap_rotation_sec: int = 3600            # 单文件最长时长 (秒)
+    pcap_retention_days: int = 7             # 热存储保留天数
+    flow_idle_timeout: int = 300             # 流空闲超时 (秒)
+    flow_active_timeout: int = 3600          # 流最大存活 (秒)
+    sensor_id: str = "sensor-01"             # 探针标识
+
+    # ── 加密流量识别 ──
+    ja3_db_path: str = ""                    # JA3 已知指纹库路径（CSV）
+    mitm_enabled: bool = False               # 启用 TLS 解密代理
+    mitm_listen_port: int = 8443             # 解密代理监听端口
+    mitm_ca_cert: str = ""                   # CA 证书路径
+    mitm_ca_key: str = ""                    # CA 私钥路径
+    tls_risk_self_signed: float = 0.8        # 自签名证书风险权重
+    tls_risk_expired: float = 0.6            # 过期证书风险权重
+    tls_risk_unknown_ja3: float = 0.4        # 未知 JA3 指纹风险权重
+
+    # ── EDR 融合 ──
+    edr_enabled: bool = False                # 启用 EDR 数据接入
+    sysmon_kafka_topic: str = "edr-sysmon"   # Sysmon 日志 Kafka Topic
+    winevent_kafka_topic: str = "edr-winevent"  # Windows Event Log Topic
+    edr_correlation_window: int = 300        # 跨源关联时间窗口 (秒)
+
+    # ── 威胁情报 ──
+    intel_enabled: bool = False              # 启用威胁情报拉取
+    intel_poll_interval: int = 60            # 默认拉取间隔 (分钟)
+    misp_url: str = ""                       # MISP 实例地址
+    misp_api_key: str = ""                   # MISP API Key
+    misp_verify_ssl: bool = True
+    taxii_url: str = ""                      # TAXII 服务器地址
+    taxii_user: str = ""
+    taxii_password: str = ""
+    ioc_match_threshold: float = 0.8         # IOC 匹配置信度阈值
+
+    # ── 沙箱检测 ──
+    sandbox_enabled: bool = False            # 启用沙箱联动
+    sandbox_type: str = "cape"               # cape | cuckoo
+    sandbox_api_url: str = "http://localhost:8090"  # CAPE/Cuckoo API
+    sandbox_api_key: str = ""
+    sandbox_timeout: int = 300               # 分析超时 (秒)
+    sandbox_auto_submit: bool = False        # 高危告警自动提交样本
+    sandbox_auto_threshold: float = 0.8      # 自动提交置信度阈值
+
+    # ── NDR Kafka Topics ──
+    kafka_topic_flows: str = "ndr-flows"
+    kafka_topic_tls: str = "ndr-tls-sessions"
+    kafka_topic_pcap_meta: str = "ndr-pcap-meta"
+
+    # ── LLM 增强器 (P0.S 引入) ──
+    # 三大模块各自开关;默认 false 保留纯规则路径,任何时候关闭即降级
+    llm_traffic_enabled: bool = False              # 流量大模型
+    llm_phishing_enabled: bool = False             # 钓鱼大模型
+    llm_data_security_enabled: bool = False        # 数据安全大模型
+    # NDR 扩展模块 LLM 开关
+    llm_encrypted_traffic_enabled: bool = False    # 加密流量 LLM 语义判定
+    llm_edr_enabled: bool = False                  # EDR 跨源关联 LLM 叙事
+    llm_intel_enabled: bool = False                # 威胁情报 LLM 上下文摘要
+    llm_sandbox_enabled: bool = False              # 沙箱行为 LLM 解读
+    # 模块日预算 (¥/天).任一模块超限 → 该模块降级,不挤占其它模块
+    llm_traffic_budget_jpy_per_day: int = 5
+    llm_phishing_budget_jpy_per_day: int = 75
+    llm_data_security_budget_jpy_per_day: int = 5
+    llm_encrypted_traffic_budget_jpy_per_day: int = 5
+    llm_edr_budget_jpy_per_day: int = 5
+    llm_intel_budget_jpy_per_day: int = 3
+    llm_sandbox_budget_jpy_per_day: int = 5
+    # 全局 LLM 增强器并发上限 (保护 LLM API)
+    llm_enhancer_concurrency: int = 5
+    # LLM 增强器单次超时 (秒)
+    llm_enhancer_timeout_sec: int = 15
+
+    # ── LLM 成本控制 (P0.T 引入) ──
+    llm_daily_budget_tokens: int = 5_000_000              # 每日全局 token 预算, 超限降级
+    llm_price_input_per_1k_tokens: float = 0.0            # 输入每千 token 单价(¥), 0=不估算费用
+    llm_price_output_per_1k_tokens: float = 0.0           # 输出每千 token 单价(¥), 0=不估算费用
 
     class Config:
         env_file = ".env"

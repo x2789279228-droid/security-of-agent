@@ -89,14 +89,23 @@ alerts        audit-queue        events-enriched
 
 ### 1. 配置环境变量
 
-编辑 `.env`，填入真实的 API Key:
+复制 `.env.example` 为 `.env`，填入真实的 API Key 与**安全必填项**:
 
 ```env
 SHARED_MEMORY_LLM_API_KEY=your-key
 SHARED_MEMORY_EMBEDDING_API_KEY=your-key
 SHARED_MEMORY_JWT_SECRET=random-secret
 SHARED_MEMORY_ADMIN_PASSWORD=your-password
-SHARED_MEMORY_KAFKA_ENABLED=true
+POSTGRES_PASSWORD=your-strong-password
+REDIS_PASSWORD=your-redis-password
+KAFKA_UI_PASSWORD=your-kafka-ui-password
+KAFKA_PUBLIC_HOST=your-host-ip-or-domain   # 外部日志源经 SASL_SSL 连接的地址
+```
+
+首次部署还需生成 Flink Dashboard 的 Basic Auth 凭证:
+
+```bash
+bash tools/gen-htpasswd.sh admin your-flink-ui-password
 ```
 
 ### 2. 启动全部服务
@@ -107,29 +116,31 @@ docker-compose up -d --build
 
 服务地址:
 - 前端: http://localhost:3001
-- 后端 API: http://localhost:8001
+- 后端 API: http://localhost:8001 (JWT 保护)
 - API 文档: http://localhost:8001/docs
-- **Kafka UI**: http://localhost:8080 (Topic 监控 / 消息浏览)
-- **Flink Dashboard**: http://localhost:8081 (作业状态 / 吞吐量)
+- **Kafka UI**: http://localhost:18082 (登录认证, 账号见 `.env` 的 `KAFKA_UI_USER/PASSWORD`)
+- **Flink Dashboard**: http://localhost:3002 (Basic Auth, 凭证由 `tools/gen-htpasswd.sh` 生成)
+- Redis / PostgreSQL / Schema Registry 仅绑定 `127.0.0.1`, 不对外网暴露
 
 ### 3. 提交 Flink 作业
 
 ```bash
-# 进入 Flink JobManager 容器提交作业
+# 进入 Flink JobManager 容器提交作业 (REST 8081 不再映射宿主)
 docker exec soc-flink-jobmanager /opt/flink/submit-jobs.sh flink-jobmanager
 ```
 
 ### 4. 注入测试数据 (Kafka 模式)
 
 ```bash
+# 本机经 PLAINTEXT_HOST(9094, 仅 127.0.0.1) 推送
 # 攻击链 → Kafka → Flink CEP 检测
-python log_simulator.py --kafka localhost:9092 --mode chain
+python log_simulator.py --kafka localhost:9094 --mode chain
 
 # 持续日志流 → Kafka
-python log_simulator.py --kafka localhost:9092 --mode continuous --interval 2
+python log_simulator.py --kafka localhost:9094 --mode continuous --interval 2
 
 # 突发注入
-python log_simulator.py --kafka localhost:9092 --mode burst --count 50
+python log_simulator.py --kafka localhost:9094 --mode burst --count 50
 ```
 
 ### 5. 兼容旧版 HTTP 直连
@@ -137,6 +148,22 @@ python log_simulator.py --kafka localhost:9092 --mode burst --count 50
 ```bash
 # 不启用 Kafka 时仍可使用 HTTP 直连
 python log_simulator.py --mode chain --api http://localhost:8001
+```
+
+## CI/CD 与部署
+
+- **CI (合并门禁)**: 每次 PR / push main 自动执行 后端 pytest(覆盖率门禁) → 前端 lint+build → Flink 编译 → Docker 构建校验 (`publish.yml` 推送 GHCR 镜像 `ghcr.io/<owner>/soc-{backend,frontend,flink}`)。
+- **镜像版本**: main → `:main` + `:sha-<7>`; 打 `v*` 标签 → `:<semver>` + `:latest`; 生产必须显式指定 `IMAGE_TAG`。
+- **环境分离**: dev = `docker-compose.yml`(源码构建); prod = 叠加 `docker-compose.prod.yml`(拉取预构建镜像 + 关闭调试端口)。
+- **部署**: `deploy.yml` 手动触发, staging/production 双环境 (production 人工审批), 暂无远程服务器前默认禁用。
+- 详细手册见 [`docs/deployment.md`](docs/deployment.md)。
+
+```bash
+# 开发
+docker compose up -d --build
+# 生产
+IMAGE_TAG=1.2.3 docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+IMAGE_TAG=1.2.3 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 ## Kafka Topic 说明
@@ -150,6 +177,62 @@ python log_simulator.py --mode chain --api http://localhost:8001
 | `security-alerts` | 高优先级告警 | Flink Job 2 | Backend (响应引擎) |
 | `security-audit-queue` | LLM 审计队列 | Flink Job 2 | Backend (Audit-LLM) |
 | `security-audit-results` | 审计结果 | Backend | 前端 SSE / 归档 |
+
+## 安全加固
+
+针对平台自身的渗透审计结论(Redis 未授权、Flink REST 无认证、配置泄露、
+安全响应头缺失、端口过度暴露)已完成加固, 要点如下:
+
+### 端口暴露矩阵
+
+| 服务 | 端口 | 绑定 | 防护 |
+|------|------|------|------|
+| 前端 Web | 3001 | 对外 | Nginx 隐藏版本 + 完整安全响应头 |
+| Flink Dashboard 反代 | 3002 | 对外 | HTTP Basic Auth |
+| 后端 API | 8001 | 对外 | JWT + 限流 |
+| Kafka UI | 18082 | 对外 | 登录认证 (LOGIN_FORM) |
+| Kafka SASL_SSL | 9093 | 对外 | TLS + SCRAM-SHA-512 账号 (见下) |
+| Kafka 本机 | 9094 | 127.0.0.1 | 仅本机工具 |
+| PostgreSQL | 5433 | 127.0.0.1 | 密码 |
+| Redis | 6380 | 127.0.0.1 | requirepass + protected-mode |
+| Schema Registry | 8085 | 127.0.0.1 | — |
+| Flink REST | 8081 | **不映射** | 经 3002 反代访问 |
+
+### 外部日志源接入 (Kafka SASL_SSL)
+
+1. 生成证书 (首次, `.env` 中设置 `KAFKA_PUBLIC_HOST` 后再执行, SAN 会包含该地址):
+   `bash tools/gen-kafka-certs.sh`
+2. 启动 Broker 后创建日志源账号:
+   `bash tools/create-kafka-users.sh soc-log-source <强密码>`
+3. 将 `certs/kafka/ca-cert.pem` 与账号分发给日志源机器, 经 9093 推送:
+   ```bash
+   python log_simulator.py --kafka <主机IP>:9093 --mode chain \
+       --sasl-user soc-log-source --sasl-password <密码> \
+       --ca-cert certs/kafka/ca-cert.pem
+   ```
+
+### 防火墙白名单 (双保险)
+
+Kafka 9093 虽有认证, 仍建议在网络层限制来源 IP:
+
+```powershell
+# Windows: 仅允许日志源网段访问 Kafka
+netsh advfirewall firewall add rule name="Kafka-SASL-Allow" dir=in action=allow protocol=TCP localport=9093 remoteip=10.0.20.0/24
+```
+
+```bash
+# Linux (ufw)
+ufw allow from 10.0.20.0/24 to any port 9093 proto tcp
+ufw deny 9093
+```
+
+### 部署检查清单
+
+- [ ] `.env` 已设置全部 `:?` 必填项 (POSTGRES/REDIS/KAFKA_UI/JWT/ADMIN/KAFKA_PUBLIC_HOST/KAFKA_SSL_PASSWORD)
+- [ ] `bash tools/gen-htpasswd.sh <用户> <密码>` 已生成 `config/nginx/flink.htpasswd`
+- [ ] 外部验证: `redis-cli -h <主机IP> -p 6380 ping` 与 `curl http://<主机IP>:8081` 均不可达
+- [ ] `curl -sI http://localhost:3001/` 无 Nginx 版本号, 且含 X-Frame-Options / CSP 头
+- [ ] http://localhost:3002 未登录返回 401
 
 ## 项目结构
 
@@ -193,7 +276,9 @@ python log_simulator.py --mode chain --api http://localhost:8001
 │   └── scheduler.py           # 定时任务
 ├── tools/
 │   ├── syslog-adapter.py      # ★ Syslog → Kafka 适配器
-│   ├── gen-kafka-certs.sh     # Kafka TLS 证书生成
+│   ├── gen-kafka-certs.sh     # Kafka TLS 证书生成 (SAN 含 KAFKA_PUBLIC_HOST)
+│   ├── create-kafka-users.sh  # Kafka SCRAM 日志源账号创建 (SASL_SSL 接入)
+│   ├── gen-htpasswd.sh        # Flink Dashboard Basic Auth 凭证生成
 │   ├── init-kafka-topics.sh   # Topic 初始化
 │   └── register-schemas.sh    # Schema 注册
 ├── frontend/                  # React 前端 (含运营 Operations 页面)

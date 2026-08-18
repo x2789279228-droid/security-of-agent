@@ -1,0 +1,14 @@
+# ════════════════════════════════════════════
+# 开发环境覆盖 (docker-compose.yml 基础上叠加)
+#   用法: docker compose up -d --build
+#   说明: 基础 docker-compose.yml 即开发默认(源码构建 + 宿主机调试端口)。
+#         本文件仅做开发期安全兜底: 响应引擎不连真实 SSH、执行层只记录不落防火墙。
+# ════════════════════════════════════════════
+services:
+  backend:
+    environment:
+      # 开发环境: 响应引擎走 stub 传输(不连真实 SSH 主机), 执行层 dry_run(仅记录)
+      SHARED_MEMORY_RESPONSE_TRANSPORT_MODE: stub
+      SHARED_MEMORY_EXECUTION_MODE: dry_run
+      # 开发环境放行本机 CORS(前端 Vite 默认 5173)
+      SHARED_MEMORY_ALLOWED_ORIGINS: '["http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:5173", "http://127.0.0.1:5173"]'

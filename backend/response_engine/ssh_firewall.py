@@ -89,7 +89,12 @@ class SshFirewallAdapter:
             raise RuntimeError("paramiko 未安装")
         cfg = self._config
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # 优先加载 known_hosts；未知主机首次连接时记录警告而非静默接受
+        try:
+            client.load_system_host_keys()
+        except Exception:
+            pass
+        client.set_missing_host_key_policy(paramiko.WarningPolicy())
         client.connect(
             hostname=cfg["host"],
             port=cfg["port"],
@@ -209,7 +214,7 @@ class SshFirewallAdapter:
     def vulnerability_scan(self, target: str, scan_type: str = "fast") -> dict:
         """通过 SSH 在虚拟机执行 nmap 扫描"""
         try:
-            check = self._exec("nmap --version 2>/dev/null | head -1")
+            check = self._exec("nmap --version")
             if "Nmap" not in check:
                 raise RuntimeError("nmap 未安装")
         except Exception:
@@ -285,7 +290,7 @@ class SshFirewallAdapter:
     def list_rules(self) -> dict:
         """查询虚拟机 iptables 规则"""
         try:
-            out = self._exec("iptables -L INPUT -n --line-numbers 2>/dev/null")
+            out = self._exec("iptables -L INPUT -n --line-numbers")
             return {"status": "ok", "rules_output": out}
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -293,12 +298,13 @@ class SshFirewallAdapter:
     def health_check(self) -> dict:
         """健康检查"""
         try:
-            out = self._exec("uname -n; uptime")
+            hostname = self._exec("uname -n").strip()
+            uptime = self._exec("uptime").strip()
             return {
                 "status": "ok",
                 "device": "Linux-iptables-SSH",
                 "host": self._config["host"],
-                "info": out.strip(),
+                "info": f"{hostname}\n{uptime}",
                 "active_rules": len([r for r in self._active_rules.values() if r["status"] == "active"]),
                 "time": datetime.now().isoformat(),
             }
@@ -312,6 +318,24 @@ class SshFirewallAdapter:
             for rid, info in self._active_rules.items()
             if info.get("status") == "active"
         ]
+
+    # ── 异步包装器（避免阻塞事件循环） ──
+
+    async def async_connect(self) -> str:
+        import asyncio
+        return await asyncio.to_thread(self.connect)
+
+    async def async_block_ip(self, ip: str, duration: int = 3600) -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.block_ip, ip, duration)
+
+    async def async_isolate_host(self, host: str, isolation_type: str = "network") -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.isolate_host, host, isolation_type)
+
+    async def async_vulnerability_scan(self, target: str, scan_type: str = "fast") -> dict:
+        import asyncio
+        return await asyncio.to_thread(self.vulnerability_scan, target, scan_type)
 
 
 # 全局单例

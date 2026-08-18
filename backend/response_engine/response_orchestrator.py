@@ -44,6 +44,9 @@ from .response_log import response_logger
 
 logger = logging.getLogger(__name__)
 
+# 安全护栏（动作执行前多维度审查）
+from security_guard.security_guard import security_guard
+
 
 class ResponseOrchestrator:
     """响应编排器"""
@@ -51,6 +54,56 @@ class ResponseOrchestrator:
     def __init__(self):
         self._running_approvals: dict[str, asyncio.Task] = {}  # ticket_id → poll_task
         self._approval_poll_interval = 5  # 每5秒轮询一次审批状态
+
+    async def _guarded_execute(
+        self, actions: list, threat_info: dict
+    ) -> BatchActionResult:
+        """
+        安全护栏包装的执行入口
+
+        对每个动作先经过 SecurityGuard.inspect() 审查:
+          - 被拦截 → 跳过该动作，记录日志
+          - 通过 → 执行
+        执行完毕后调用 SecurityGuard.record() 更新追踪器
+        """
+        allowed_actions = []
+        for action in actions:
+            action_name = action.get("action", action.get("name", ""))
+            guard_result = security_guard.inspect(action_name, threat_info)
+
+            if not guard_result["allowed"]:
+                logger.warning(
+                    f"[SecurityGuard] 动作被拦截: {action_name} "
+                    f"原因: {guard_result['reason']}"
+                )
+                continue
+
+            if guard_result.get("requires_approval"):
+                logger.info(
+                    f"[SecurityGuard] 动作需审批: {action_name}"
+                )
+                # 仍然加入执行列表（审批逻辑由上层 orchestrator 处理）
+
+            allowed_actions.append(action)
+
+        if not allowed_actions:
+            logger.warning("[SecurityGuard] 所有动作被拦截，无动作可执行")
+            return BatchActionResult(succeeded=0, failed=0, results=[])
+
+        # 执行
+        batch_result = await response_executor.execute_actions(
+            allowed_actions, threat_info
+        )
+
+        # 记录（更新序列/频率/上下文追踪器）
+        for action in allowed_actions:
+            action_name = action.get("action", action.get("name", ""))
+            security_guard.record(action_name, threat_info, {
+                "succeeded": batch_result.succeeded,
+                "failed": batch_result.failed,
+            })
+
+        return batch_result
 
     async def on_threat_detected(
         self,
@@ -129,7 +182,7 @@ class ResponseOrchestrator:
         if action_map.needs_approval:
             if action_map.auto_execute:
                 # 先执行再审批（默认放行）
-                batch_result = await response_executor.execute_actions(
+                batch_result = await self._guarded_execute(
                     action_map.actions, threat_info
                 )
                 result["actions_executed"] = batch_result.succeeded
@@ -170,7 +223,7 @@ class ResponseOrchestrator:
 
         # 4. 自动执行
         elif action_map.auto_execute:
-            batch_result = await response_executor.execute_actions(
+            batch_result = await self._guarded_execute(
                 action_map.actions, threat_info
             )
             result["actions_executed"] = batch_result.succeeded
@@ -199,7 +252,7 @@ class ResponseOrchestrator:
 
                 if ticket.status == ApprovalStatus.APPROVED:
                     logger.info(f"Approval granted for ticket #{ticket_id[:8]}, executing actions")
-                    batch_result = await response_executor.execute_actions(
+                    batch_result = await self._guarded_execute(
                         ticket.actions, threat_info
                     )
                     ticket.result = {
@@ -269,7 +322,7 @@ class ResponseOrchestrator:
             logger.warning(f"Ticket {ticket_id} not approved (status={ticket.status.value})")
             return None
 
-        result = await response_executor.execute_actions(
+        result = await self._guarded_execute(
             ticket.actions, ticket.threat_info
         )
         ticket.result = {

@@ -9,8 +9,13 @@ Syslog 转发适配器 — UDP 514 → Kafka / SOC 平台
     python syslog-adapter.py --soc http://192.168.1.50:8001 --port 514
 
   Kafka 模式 (推荐):
-    python syslog-adapter.py --kafka 192.168.1.50:9092 --port 514
-    python syslog-adapter.py --kafka 192.168.1.50:9092 --api-key soc-syslog-2024
+    # 本机直连 (PLAINTEXT_HOST, 仅 127.0.0.1):
+    python syslog-adapter.py --kafka localhost:9094 --port 514 --api-key soc-syslog-2024
+
+    # 外部日志源 (SASL_SSL 9093, 需账号+CA证书, 见 tools/create-kafka-users.sh):
+    python syslog-adapter.py --kafka <SOC_IP>:9093 --port 514 \
+        --sasl-user soc-log-source --sasl-password <密码> \
+        --ca-cert certs/kafka/ca-cert.pem
 
 Linux 客户端配置 (rsyslog):
   echo 'auth.*,authpriv.*,kern.*,user.* @@<SOC_IP>:514' > /etc/rsyslog.d/60-forward.conf
@@ -21,6 +26,7 @@ import json
 import logging
 import re
 import socketserver
+import ssl
 import time
 import urllib.request
 import uuid
@@ -176,8 +182,11 @@ class ThreadedUDPServer(socketserver.ThreadingUDPServer):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Syslog → Kafka / SOC 平台接入适配器")
     parser.add_argument("--soc", default="http://localhost:8001", help="SOC 平台后端地址 (HTTP 模式)")
-    parser.add_argument("--kafka", default="", help="Kafka bootstrap 地址 (如 192.168.1.50:9092)")
+    parser.add_argument("--kafka", default="", help="Kafka bootstrap 地址 (本机 127.0.0.1:9094 / 外部 SASL_SSL <IP>:9093)")
     parser.add_argument("--api-key", default=DEFAULT_API_KEY, help="数据源 API Key")
+    parser.add_argument("--sasl-user", default="", help="Kafka SCRAM 账号 (外部 9093 接入必填)")
+    parser.add_argument("--sasl-password", default="", help="Kafka SCRAM 密码")
+    parser.add_argument("--ca-cert", default="", help="Kafka CA 证书路径 (certs/kafka/ca-cert.pem)")
     parser.add_argument("--port", type=int, default=514, help="UDP 监听端口")
     parser.add_argument("--host", default="0.0.0.0")
     args = parser.parse_args()
@@ -190,12 +199,26 @@ if __name__ == "__main__":
             exit(1)
         OutputConfig.MODE = "kafka"
         OutputConfig.KAFKA_BOOTSTRAP = args.kafka
-        OutputConfig.kafka_producer = SyncKafkaProducer(
-            bootstrap_servers=args.kafka,
-            acks="all",
-            retries=3,
-        )
-        log.info(f"Syslog 适配器启动 (Kafka): udp://{args.host}:{args.port} → kafka:{KAFKA_TOPIC_RAW} @ {args.kafka}")
+        producer_kwargs = {
+            "bootstrap_servers": args.kafka,
+            "acks": "all",
+            "retries": 3,
+        }
+        if args.sasl_user:
+            # 外部接入: SASL_SSL + SCRAM-SHA-512 (与 log_simulator.py 一致)
+            ctx = ssl.create_default_context(cafile=args.ca_cert or None)
+            # Broker 证书 SAN 可能不含目标地址 → 仅校验证书链, 不校验主机名
+            ctx.check_hostname = False
+            producer_kwargs.update(
+                security_protocol="SASL_SSL",
+                sasl_mechanism="SCRAM-SHA-512",
+                sasl_plain_username=args.sasl_user,
+                sasl_plain_password=args.sasl_password,
+                ssl_context=ctx,
+            )
+        OutputConfig.kafka_producer = SyncKafkaProducer(**producer_kwargs)
+        log.info(f"Syslog 适配器启动 (Kafka): udp://{args.host}:{args.port} → kafka:{KAFKA_TOPIC_RAW} @ {args.kafka}"
+                 + (" [SASL_SSL]" if args.sasl_user else ""))
     else:
         OutputConfig.MODE = "http"
         OutputConfig.SO_URL = args.soc.rstrip("/")

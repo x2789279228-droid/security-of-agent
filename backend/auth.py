@@ -40,8 +40,11 @@ async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
 ) -> UserInfo:
     if not SECRET_KEY:
-        logger.warning("JWT_SECRET not configured; auth disabled")
-        return UserInfo(username="anonymous", role="admin")
+        logger.error("JWT_SECRET not configured — rejecting all requests")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server misconfigured: JWT_SECRET not set",
+        )
     if not credentials:
         raise HTTPException(status_code=401, detail="Missing authorization header")
     try:
@@ -54,10 +57,21 @@ async def get_current_user(
 
 
 class RequireRole:
-    def __init__(self, role: str):
-        self.role = role
+    def __init__(self, *roles: str):
+        """
+        支持单一或多个角色位运算:
+          RequireRole("admin")              # 仅 admin
+          RequireRole("admin", "operator")  # admin 或 operator
+        admin 角色恒通过 (向后兼容旧调用)
+        """
+        self.roles = set(roles)
 
     async def __call__(self, user: UserInfo = Depends(get_current_user)):
-        if user.role != self.role and user.role != "admin":
-            raise HTTPException(status_code=403, detail=f"Requires role: {self.role}")
+        if user.role == "admin":
+            return user
+        if user.role not in self.roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Requires one of roles: {sorted(self.roles)}",
+            )
         return user

@@ -132,6 +132,10 @@ class AuditResult:
     kb_verification: dict = field(default_factory=dict)  # 知识库交叉验证结果
     schema_valid: bool = True             # 结构化输出验证是否通过
 
+    # 深度分析输出（前置合成模式：deep_analyze 在 synthesize 之前执行，
+    # 其结论注入到汇总 prompt 中作为额外上下文，亦独立保留供前端展示）
+    deep_analysis: str = ""
+
     def to_dict(self) -> dict:
         return {
             "threat_detected": self.threat_detected,
@@ -147,6 +151,7 @@ class AuditResult:
             "grounding_score": self.grounding_score,
             "kb_supported": self.kb_verification.get("supported", 0),
             "schema_valid": self.schema_valid,
+            "has_deep_analysis": bool(self.deep_analysis),
         }
 
 

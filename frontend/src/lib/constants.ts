@@ -16,6 +16,12 @@ export const ROUTES = {
   RESPONSE: '/response',
   RAG: '/rag',
   OPERATIONS: '/operations',
+  // NDR 扩展
+  TRAFFIC: '/traffic',
+  ENCRYPTED: '/encrypted',
+  INTEL: '/intel',
+  SANDBOX: '/sandbox',
+  EDR: '/edr',
 } as const
 
 /** Apple Intelligence 流动渐变 — 运营中心签名色 */

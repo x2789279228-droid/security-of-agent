@@ -68,8 +68,18 @@ class Executor:
         audit_chunks = chunker.chunk(events, chain_event_ids=chain_ids)
         logger.info(f"Executor: split into {len(audit_chunks)} chunks for audit")
 
-        # 5. SubAuditor 并行审核每块
-        chunk_verdicts = await self._audit_chunks_parallel(audit_chunks)
+        # 4b. 提取 RAG 知识片段，下发到 SubAuditor 用于 Layer 4 校验
+        knowledge_chunks = self._extract_knowledge_chunks(all_results)
+        if knowledge_chunks:
+            logger.info(
+                f"Executor: passing {len(knowledge_chunks)} kb chunks to SubAuditor "
+                f"for Layer-4 grounding verification"
+            )
+
+        # 5. SubAuditor 并行审核每块（携带知识库片段）
+        chunk_verdicts = await self._audit_chunks_parallel(
+            audit_chunks, knowledge_chunks=knowledge_chunks
+        )
 
         # 5b. EvidenceVerifier 知识库交叉验证（Layer 2 校验）
         kb_verification = await self._verify_claims_with_knowledge(
@@ -82,13 +92,9 @@ class Executor:
         # 6b. 收集知识库检索结果 (RAG)
         rag_context = self._extract_rag_context(all_results)
 
-        # 7. LLM 汇总所有块结论 → AuditResult
-        audit_result = await self._synthesize_from_chunks(
-            raw_event, audit_chunks, chunk_verdicts,
-            chain_info, depth, rag_context, kb_verification,
-        )
-
-        # 8. deep_analyze（深度模式额外 LLM 分析）
+        # 6c. 深度分析 — 前置合成模式：在 synthesize 之前执行，
+        # 让其结论作为额外 section 注入 synthesize prompt，深度分析回流 audit_result
+        # （旧实现把 deep_text 仅塞入 tool_results 展示用，对最终结论无影响）
         deep_text = ""
         if deep_calls:
             deep_text = await self._llm_deep_analyze(
@@ -101,12 +107,20 @@ class Executor:
                     data=deep_text, duration_ms=0,
                 ))
 
-        # 9. recheck
+        # 7. LLM 汇总所有块结论 → AuditResult（深度分析作为额外上下文注入）
+        audit_result = await self._synthesize_from_chunks(
+            raw_event, audit_chunks, chunk_verdicts,
+            chain_info, depth, rag_context, kb_verification,
+            deep_analysis=deep_text,
+        )
+        audit_result.deep_analysis = deep_text
+
+        # 8. recheck
         if recheck_calls:
             recheck = await self._llm_recheck(
                 raw_event, audit_result, chunk_verdicts
             )
-            audit_result.needs_human_review = recheck.get("needs_human", False)
+            audit_result.needs_human_review = bool(recheck.get("needs_human", False))
             for rc in recheck_calls:
                 all_results.append(ToolResult(
                     call_id=rc.call_id, task_id=rc.task_id,
@@ -180,13 +194,8 @@ class Executor:
                     eids = chain.get("event_ids", [])
                     chain_ids.update(eids)
 
-            # correlation.temporal 返回的分组
-            if r.tool == "correlation.temporal" and isinstance(r.data, list):
-                for group in r.data:
-                    for evt in group.get("events", []):
-                        eid = evt.get("id")
-                        if eid:
-                            chain_ids.add(eid)
+            # 注: correlation.temporal 仅是同 IP 时间窗分组，不应作为攻击链依据，
+            # 不再注入 chain_ids，避免污染 chunker 的 attack_chain 策略分类
 
         logger.info(
             f"Extracted {len(events)} events, {len(chain_ids)} in chains"
@@ -235,6 +244,32 @@ class Executor:
             logger.info(f"RAG context injected into synthesis: {len(chunks)} chunks")
         return context
 
+    def _extract_knowledge_chunks(self, results: list[ToolResult]) -> list[dict]:
+        """
+        从 knowledge.search 工具结果中提取原始知识库片段列表
+
+        与 _extract_rag_context 不同：本方法返回 list[dict] 原始片段
+        （含 threat_types 字段），直接供 GroundingVerifier 的 Layer 4
+        知识库一致性校验消费，不进行 prompt 上下文化包装。
+
+        必须在 SubAuditor 并行审核前调用，以便把知识库片段下发到每块审核。
+        """
+        chunks: list[dict] = []
+        for r in results:
+            if r.tool == "knowledge.search" and r.success and r.data:
+                if isinstance(r.data, list):
+                    # 过滤缺威胁类型标注的条目（无 threat_types 无法做 Layer 4 校验）
+                    for c in r.data:
+                        if not isinstance(c, dict):
+                            continue
+                        if c.get("threat_types"):
+                            chunks.append(c)
+                        else:
+                            logger.debug(
+                                f"Skipping kb chunk w/o threat_types: id={c.get('id', '?')}"
+                            )
+        return chunks
+
     async def _verify_claims_with_knowledge(
         self,
         session: AsyncSession,
@@ -244,29 +279,35 @@ class Executor:
         """
         Layer 2 校验：用 EvidenceVerifier 对威胁断言做知识库交叉验证
 
-        只验证 threat_detected=True 的块中的断言，避免不必要的 LLM 开销。
+        改进：每条断言携带自身的 threat_type / severity 上下文进行验证，
+        避免不同威胁类型混用首个 chunk 的单一上下文导致偏差。
         """
         from rag.evidence_verifier import evidence_verifier
 
-        # 收集所有威胁断言的 summary
-        claims_to_verify = []
-        threat_type = ""
-        severity = ""
+        # 收集所有威胁断言 (claim_text, threat_type, severity)
+        # 每条断言用其自身的 threat_type / severity 进行知识库比对，
+        # 避免单一 chunk 上下文污染跨类型断言的验证
+        claims_to_verify: list[dict] = []
         for v in verdicts:
-            if v.threat_detected:
-                for claim in v.threat_claims:
-                    summary_text = claim.get("summary", "")
-                    if summary_text:
-                        claims_to_verify.append(summary_text[:200])
-                if not threat_type:
-                    threat_type = v.threat_claims[0].get("type", "") if v.threat_claims else ""
-                if not severity:
-                    severity = v.severity
+            if not v.threat_detected:
+                continue
+            for claim in v.threat_claims:
+                summary_text = claim.get("summary", "")
+                if not summary_text:
+                    continue
+                claims_to_verify.append({
+                    "summary": summary_text[:200],
+                    "threat_type": claim.get("type", "") or v.severity,
+                    "severity": claim.get("severity", v.severity),
+                })
 
         if not claims_to_verify:
             return {"verified": True, "supported": 0, "unsupported": 0, "risk": 0.0}
 
-        # 限制验证数量（避免过多 LLM 调用）
+        # 限制验证数量（避免过多 LLM 调用），优先取前 5 条
+        # 按威胁严重度排序，高风险断言优先验证
+        sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        claims_to_verify.sort(key=lambda c: sev_order.get(c["severity"], 5))
         claims_to_verify = claims_to_verify[:5]
 
         # 独立 session 执行验证，避免 SQL 失败污染流水线主事务
@@ -274,24 +315,35 @@ class Executor:
 
         try:
             async with db_session() as s:
-                report = await evidence_verifier.verify_batch(
-                    s,
-                    claims=claims_to_verify,
-                    threat_type=threat_type,
-                    severity=severity,
-                )
+                # 按 threat_type 分批验证，每批用各自的 threat_type/severity 上下文
+                # 同时保留每条断言与验证结果的对应关系
+                reports = []
+                for c in claims_to_verify:
+                    batch = await evidence_verifier.verify_batch(
+                        s,
+                        claims=[c["summary"]],
+                        threat_type=c["threat_type"],
+                        severity=c["severity"],
+                    )
+                    reports.extend(batch.reports)
+
+            supported = sum(1 for r in reports if r.verdict == "supported")
+            unsupported = sum(1 for r in reports if r.verdict == "unsupported")
+            total = len(reports)
+            risk = unsupported / max(total, 1)
+
             logger.info(
-                f"Knowledge verification: {report.supported_count}/{len(claims_to_verify)} "
-                f"supported, risk={report.hallucination_risk:.2f}"
+                f"Knowledge verification: {supported}/{total} supported, "
+                f"risk={risk:.2f}"
             )
             return {
                 "verified": True,
-                "supported": report.supported_count,
-                "unsupported": report.unsupported_count,
-                "risk": report.hallucination_risk,
+                "supported": supported,
+                "unsupported": unsupported,
+                "risk": risk,
                 "details": [
                     {"claim": r.claim[:80], "verdict": r.verdict}
-                    for r in report.reports[:3]
+                    for r in reports[:3]
                 ],
             }
         except Exception as e:
@@ -299,19 +351,60 @@ class Executor:
             return {"verified": False, "supported": 0, "unsupported": 0, "risk": 0.0}
 
     async def _audit_chunks_parallel(
-        self, chunks: list[AuditChunk]
+        self,
+        chunks: list[AuditChunk],
+        knowledge_chunks: list[dict] | None = None,
     ) -> list[ChunkVerdict]:
-        """并行审核所有事件块"""
+        """并行审核所有事件块
+
+        异常 chunk 不会被中断丢弃，而是包装为保守的 ChunkVerdict，
+        标记为疑似威胁 + 100% 幻觉风险 + 强制人工复核，
+        避免单个 LLM 调用失败导致整批流水线坍缩。
+
+        Args:
+            chunks: 待审核的 AuditChunk 列表
+            knowledge_chunks: 可选的安全知识库片段，下发到每个 SubAuditor
+                              用于启用 GroundingVerifier Layer 4 知识库一致性校验
+        """
         if not chunks:
             return []
 
-        tasks = [sub_auditor.audit(chunk) for chunk in chunks]
-        verdicts = await asyncio.gather(*tasks)
+        kb = knowledge_chunks or []
+        tasks = [
+            sub_auditor.audit(chunk, knowledge_chunks=kb) for chunk in chunks
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        verdicts: list[ChunkVerdict] = []
+        for chunk, result in zip(chunks, results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    f"Chunk {chunk.chunk_id} audit failed: "
+                    f"{type(result).__name__}: {result}"
+                )
+                verdicts.append(ChunkVerdict(
+                    chunk_id=chunk.chunk_id,
+                    threat_detected=True,
+                    confidence=0.0,
+                    severity="high",
+                    summary=f"审核异常: {type(result).__name__}",
+                    alert="chunk 审核异常，需人工复核",
+                    unsubstantiated=True,
+                    hallucination_risk=1.0,
+                    all_event_ids_in_chunk=[
+                        e.get("id", e.get("event_id")) for e in chunk.events if e.get("id")
+                    ],
+                    schema_valid=False,
+                    schema_errors=[f"chunk audit raised: {type(result).__name__}"],
+                ))
+            else:
+                verdicts.append(result)
 
         threat_count = sum(1 for v in verdicts if v.threat_detected)
+        fail_count = sum(1 for v in verdicts if not v.schema_valid)
         logger.info(
-            f"SubAuditor: {len(verdicts)} chunks done, "
-            f"{threat_count} with threats"
+            f"SubAuditor: {len(verdicts)} chunks, "
+            f"{threat_count} with threats, {fail_count} failed"
         )
         return verdicts
 
@@ -323,8 +416,15 @@ class Executor:
         depth: str,
         rag_context: str = "",
         kb_verification: dict = None,
+        deep_analysis: str = "",
     ) -> AuditResult:
-        """汇总所有块级结论 → AuditResult（含交叉验证）"""
+        """汇总所有块级结论 → AuditResult（含交叉验证）
+
+        Args:
+            deep_analysis: 深度分析初步研判文本（来自 _llm_deep_analyze），
+                           作为额外 section 注入 synthesize prompt，
+                           让 LLM 在汇总阶段直接参考深度研判结论。
+        """
         if not chunks or not verdicts:
             return AuditResult(
                 threat_detected=False,
@@ -424,6 +524,17 @@ class Executor:
             for d in kb_verification.get("details", []):
                 kb_section += f"  - [{d['verdict']}] {d['claim']}\n"
 
+        # 深度分析初步研判（仅 deep 模式生成，作为 synthesize 的额外上下文）
+        # 前置合成模式：deep_analyze 在 synthesize 之前执行，
+        # 让 LLM 汇总时直接参考深度分析结论，避免深度分析沦为孤立工具结果
+        deep_section = ""
+        if deep_analysis:
+            deep_section = (
+                f"## 深度分析初步研判 (来自 deep_analyze)\n"
+                f"{deep_analysis[:1500]}\n"
+                f"注意: 该深度研判已经过跨块关联分析，请在汇总时纳入或显式反驳。\n"
+            )
+
         prompt = f"""你是安全审计结论综合专家。汇总以下所有审核块的结论，输出最终审计结论。
 
 ## 原始事件
@@ -437,6 +548,8 @@ class Executor:
 
 ## 安全知识库参考 (RAG)
 {rag_context if rag_context else '（未检索到相关知识）'}
+
+{deep_section}
 
 ## 交叉验证
 {verification_section}
@@ -507,7 +620,7 @@ class Executor:
 
             # 综合惩罚（原有 hallucination_risk 惩罚 + grounding + kb）
             combined_penalty = confidence_penalty * grounding_penalty * kb_penalty
-            adjusted_confidence = max(0.1, raw_confidence * combined_penalty)
+            adjusted_confidence = min(1.0, max(0.1, raw_confidence * combined_penalty))
 
             logger.info(
                 f"Confidence adjustment: raw={raw_confidence:.2f} "
@@ -540,7 +653,7 @@ class Executor:
                 suggested_actions=parsed.get("suggested_actions", []),
                 needs_human_review=needs_human,
             )
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             logger.warning(f"Synthesis parse failed: {e}")
             return AuditResult(
                 threat_detected=any(v.threat_detected for v in verdicts),
@@ -605,8 +718,34 @@ class Executor:
             {"role": "user", "content": prompt},
         ])
         try:
-            return json.loads(result)
-        except json.JSONDecodeError:
+            from audit_schemas import extract_json
+            parsed = extract_json(result)
+            if not parsed:
+                return {"needs_human": True, "review_notes": result[:200]}
+
+            # 强制布尔化 — LLM 可能输出 "true"(字符串) / 1(数字) / "yes" 等非 bool 值
+            # 解析失败时一律保守认为需要人工复核
+            def _as_bool(v) -> bool:
+                if isinstance(v, bool):
+                    return v
+                if isinstance(v, (int, float)):
+                    return bool(v)
+                if isinstance(v, str):
+                    return v.strip().lower() in ("true", "yes", "1", "y", "needs")
+                # 其他类型 / None — 保守设为 True
+                return True
+
+            parsed["needs_human"] = _as_bool(parsed.get("needs_human", False))
+            # is_complete 用于完整性说明，不强转；保留分析用途
+            if "is_complete" in parsed:
+                parsed["is_complete"] = _as_bool(parsed["is_complete"])
+            # missed_threats 强制列表
+            if not isinstance(parsed.get("missed_threats"), list):
+                parsed["missed_threats"] = []
+            # review_notes 强制字符串
+            parsed["review_notes"] = str(parsed.get("review_notes", ""))[:500]
+            return parsed
+        except Exception:
             return {"needs_human": True, "review_notes": result[:200]}
 
 

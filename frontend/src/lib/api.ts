@@ -6,9 +6,14 @@ function authHeaders(): Record<string, string> {
 }
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+  const { headers: initHeaders, ...restInit } = init ?? {}
   const res = await fetch(`${BASE}${url}`, {
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    ...init,
+    ...restInit,
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...(initHeaders as Record<string, string> | undefined),
+    },
   })
   if (res.status === 401) {
     localStorage.removeItem('sm_token')
@@ -16,15 +21,26 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
     window.location.href = '/login'
     throw new Error('认证已过期，请重新登录')
   }
-  if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`)
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const body = await res.json()
+      if (body.detail) detail = body.detail
+    } catch { /* 非 JSON 响应体 */ }
+    throw new Error(`API ${res.status}: ${detail}`)
+  }
+  if (res.status === 204) return undefined as T
   return res.json()
 }
 
 export const api = {
+  /** 通用 GET（路径相对于 /api） */
+  get: <T = any>(path: string) => fetchJSON<T>(path),
+
   login: (username: string, password: string) =>
     fetchJSON<{ access_token: string; token_type: string }>(
-      `/auth/login?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
-      { method: 'POST' },
+      '/auth/login',
+      { method: 'POST', body: JSON.stringify({ username, password }) },
     ),
 
   health: () => fetchJSON<{ status: string }>('/health'),
@@ -277,6 +293,24 @@ export const api = {
   agentTraceStats: () =>
     fetchJSON<any>('/agent-traces/stats'),
 
+  /** 按事件聚合 token 消耗 (运营中心成本面板) */
+  agentTracesByEvent: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString()
+    return fetchJSON<any>(`/agent-traces/by-event${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 近 N 天每日 token 用量趋势 */
+  agentTracesDaily: (days = 14) =>
+    fetchJSON<any>(`/agent-traces/daily?days=${days}`),
+
+  /** 单事件全部 LLM 调用明细 */
+  agentTracesByEventId: (eventId: number, limit = 100) =>
+    fetchJSON<any>(`/agent-traces/event/${eventId}?limit=${limit}`),
+
+  /** LLM 成本状态 (日预算/用量/超限) */
+  llmCost: () =>
+    fetchJSON<any>('/llm/cost'),
+
   /** 获取最近实时事件 */
   eventsRecent: (limit = 50) =>
     fetchJSON<any[]>(`/events/recent?limit=${limit}`),
@@ -506,4 +540,67 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ rule_content: ruleContent, event_ids: eventIds, limit }),
     }),
+
+  // ── P0.A 资产管理 ──
+
+  /** 资产列表 */
+  opsAssets: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString()
+    return fetchJSON<any>(`/assets${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 注册/更新资产 */
+  opsAssetRegister: (data: { ip?: string; hostname?: string; level: string; label?: string; business?: string; asset_type?: string }) => {
+    const qs = new URLSearchParams({
+      ip: data.ip ?? '', hostname: data.hostname ?? '',
+      level: data.level,
+      label: data.label ?? '', business: data.business ?? '',
+      asset_type: data.asset_type ?? 'host',
+    }).toString()
+    return fetchJSON<any>(`/assets?${qs}`, { method: 'POST' })
+  },
+
+  /** 下线资产 */
+  opsAssetRemove: (assetId: number) =>
+    fetchJSON<any>(`/assets/${assetId}`, { method: 'DELETE' }),
+
+  /** 资产变更历史 */
+  opsAssetHistory: (assetId: number, limit = 50) =>
+    fetchJSON<any>(`/assets/${assetId}/history?limit=${limit}`),
+
+  /** 创建资产发现任务 */
+  opsAssetDiscovery: (scope: string, scanner = 'edr') =>
+    fetchJSON<any>(`/assets/discovery?scope=${encodeURIComponent(scope)}&scanner=${scanner}`, { method: 'POST' }),
+
+  /** 资产发现任务列表 */
+  opsAssetDiscoveryTasks: (limit = 50) =>
+    fetchJSON<any>(`/assets/discovery/tasks?limit=${limit}`),
+
+  // ── P0.B 运营 KPI / SLA ──
+
+  /** KPI dashboard 全量 */
+  opsKpiDashboard: (days = 30) => fetchJSON<any>(`/ops/kpi?days=${days}`),
+
+  /** KPI 单指标时间序列 */
+  opsKpiMetric: (metric: string, period = 'daily', days = 30) =>
+    fetchJSON<any>(`/ops/kpi?metric=${metric}&period=${period}&days=${days}`),
+
+  /** 触发 KPI 快照 */
+  opsKpiSnapshot: (period = 'daily', snapshotDate = '') =>
+    fetchJSON<any>(`/ops/kpi/snapshot?period=${period}&snapshot_date=${snapshotDate}`, { method: 'POST' }),
+
+  /** SLA breach 实时率 + 最近违规 */
+  opsSla: (hours = 24) => fetchJSON<any>(`/ops/sla?hours=${hours}`),
+
+  // ── P0.H 操作审计 trail ──
+
+  /** 查询审计 trail */
+  opsAuditTrail: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString()
+    return fetchJSON<any>(`/audit-trail${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 冲刷离线审计缓冲 */
+  opsAuditTrailFlush: () =>
+    fetchJSON<any>('/audit-trail/flush', { method: 'POST' }),
 }

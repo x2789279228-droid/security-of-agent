@@ -297,3 +297,173 @@ async def get_trace_stats(caller: str = "") -> dict:
             "total_completion_tokens": 0, "avg_latency_ms": 0.0,
             "error_rate": 0.0, "error_count": 0, "by_operation": {},
         }
+
+
+# ── Token 成本聚合 (运营中心成本面板) ─────────────────────────
+
+async def get_event_token_aggregation(
+    days: int = 30,
+    min_tokens: int = 0,
+    limit: int = 50,
+    offset: int = 0,
+    event_type: str = "",
+    severity: str = "",
+) -> dict:
+    """按事件聚合 token 消耗 (llm_traces 分组 + security_events 关联)
+
+    返回分页列表 + 汇总: 每事件调用次数 / 输入输出 / 总 tokens /
+    平均延迟 / 错误数 / 事件元信息。按总 tokens 降序。
+    """
+    try:
+        from datetime import datetime, timezone, timedelta
+
+        from models import SecurityEvent
+
+        async with async_session() as session:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+            conditions = [
+                AgentTrace.event_id > 0,
+                AgentTrace.created_at >= cutoff,
+            ]
+            if event_type:
+                conditions.append(SecurityEvent.event_type == event_type)
+            if severity:
+                conditions.append(SecurityEvent.severity == severity)
+
+            sum_total = func.coalesce(func.sum(AgentTrace.total_tokens), 0)
+            sum_prompt = func.coalesce(func.sum(AgentTrace.prompt_tokens), 0)
+            sum_completion = func.coalesce(func.sum(AgentTrace.completion_tokens), 0)
+            sum_errors = func.coalesce(
+                func.sum(sa_case((AgentTrace.status == "error", 1), else_=0)), 0
+            )
+
+            # 事件总数 (分组行数)
+            grouped = (
+                select(AgentTrace.event_id)
+                .select_from(AgentTrace)
+                .join(SecurityEvent, SecurityEvent.id == AgentTrace.event_id, isouter=True)
+                .where(*conditions)
+                .group_by(AgentTrace.event_id)
+            )
+            if min_tokens > 0:
+                grouped = grouped.having(sum_total >= min_tokens)
+            total_events = (await session.execute(
+                select(func.count()).select_from(grouped.subquery())
+            )).scalar() or 0
+
+            # 全量汇总 (所有命中调用的 token 总和)
+            grand_stmt = select(
+                func.count(AgentTrace.id),
+                sum_prompt,
+                sum_completion,
+                sum_total,
+                sum_errors,
+            ).select_from(
+                AgentTrace.__table__.join(
+                    SecurityEvent.__table__,
+                    SecurityEvent.id == AgentTrace.event_id,
+                    isouter=True,
+                )
+            ).where(*conditions)
+            grand_calls, grand_prompt, grand_completion, grand_total, grand_errors = (
+                (await session.execute(grand_stmt)).one()
+            )
+
+            stmt = (
+                select(
+                    AgentTrace.event_id,
+                    func.count(AgentTrace.id).label("calls"),
+                    sum_prompt.label("prompt_tokens"),
+                    sum_completion.label("completion_tokens"),
+                    sum_total.label("total_tokens"),
+                    func.coalesce(func.avg(AgentTrace.latency_ms), 0.0).label("avg_latency_ms"),
+                    sum_errors.label("errors"),
+                    func.max(AgentTrace.created_at).label("last_used_at"),
+                    SecurityEvent.event_type,
+                    SecurityEvent.severity,
+                    SecurityEvent.src_ip,
+                    SecurityEvent.message,
+                    SecurityEvent.analyzed,
+                    SecurityEvent.created_at.label("event_created_at"),
+                )
+                .select_from(AgentTrace)
+                .join(SecurityEvent, SecurityEvent.id == AgentTrace.event_id, isouter=True)
+                .where(*conditions)
+                .group_by(AgentTrace.event_id, SecurityEvent.id)
+                .order_by(desc(sum_total))
+                .limit(max(1, min(limit, 500)))
+                .offset(max(0, offset))
+            )
+            if min_tokens > 0:
+                stmt = stmt.having(sum_total >= min_tokens)
+            rows = (await session.execute(stmt)).all()
+
+            return {
+                "events": [
+                    {
+                        "event_id": r.event_id,
+                        "calls": int(r.calls),
+                        "prompt_tokens": int(r.prompt_tokens),
+                        "completion_tokens": int(r.completion_tokens),
+                        "total_tokens": int(r.total_tokens),
+                        "avg_latency_ms": round(float(r.avg_latency_ms or 0.0), 2),
+                        "errors": int(r.errors),
+                        "last_used_at": r.last_used_at.isoformat() if r.last_used_at else "",
+                        "event_type": r.event_type or "",
+                        "severity": r.severity or "",
+                        "src_ip": r.src_ip or "",
+                        "message": (r.message or "")[:200],
+                        "analyzed": bool(r.analyzed),
+                        "event_created_at": r.event_created_at.isoformat() if r.event_created_at else "",
+                    }
+                    for r in rows
+                ],
+                "total_events": int(total_events),
+                "grand": {
+                    "calls": int(grand_calls),
+                    "prompt_tokens": int(grand_prompt),
+                    "completion_tokens": int(grand_completion),
+                    "total_tokens": int(grand_total),
+                    "errors": int(grand_errors),
+                },
+                "limit": limit,
+                "offset": offset,
+            }
+    except Exception as e:
+        logger.error(f"get_event_token_aggregation failed: {e}")
+        return {
+            "events": [], "total_events": 0, "grand": {
+                "calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "total_tokens": 0, "errors": 0,
+            }, "limit": limit, "offset": offset,
+        }
+
+
+async def get_daily_token_usage(days: int = 14) -> list[dict]:
+    """近 N 天每日 token 用量 / 调用数趋势 (缺失日期补 0)"""
+    try:
+        from datetime import datetime, timezone, timedelta
+
+        async with async_session() as session:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+            day_col = func.date(AgentTrace.created_at)
+            rows = (await session.execute(
+                select(
+                    day_col.label("day"),
+                    func.coalesce(func.sum(AgentTrace.total_tokens), 0).label("total_tokens"),
+                    func.count(AgentTrace.id).label("calls"),
+                )
+                .where(AgentTrace.created_at >= cutoff)
+                .group_by(day_col)
+                .order_by(day_col)
+            )).all()
+            by_day = {str(r.day): {"day": str(r.day), "total_tokens": int(r.total_tokens), "calls": int(r.calls)} for r in rows}
+            out = []
+            today = datetime.now(timezone.utc).date()
+            for i in range(max(1, days) - 1, -1, -1):
+                d = (today - timedelta(days=i)).isoformat()
+                out.append(by_day.get(d, {"day": d, "total_tokens": 0, "calls": 0}))
+            return out
+    except Exception as e:
+        logger.error(f"get_daily_token_usage failed: {e}")
+        return []

@@ -44,6 +44,37 @@ echo ">>> 提交 Job 2: AnomalyDetectionJob (异常检测 + CEP 攻击链)"
     && echo "✅ AnomalyDetectionJob 提交成功" \
     || echo "❌ AnomalyDetectionJob 提交失败"
 
+# ── NDR 扩展作业 (可选) ──
+# 默认不提交: 其输出 topic (ndr-flows-aggregated / ndr-tls-enriched)
+# 后端暂未消费, 仅在启用 NDR 流量采集演示时需要。
+# 启用方式: SUBMIT_NDR_JOBS=1 ./submit-jobs.sh
+if [ "${SUBMIT_NDR_JOBS:-0}" = "1" ]; then
+    echo ""
+    echo ">>> 提交 Job 3: FlowAggregationJob (网络流聚合)"
+    /opt/flink/bin/flink run \
+        -m "${JM_HOST}:${JM_PORT}" \
+        -c com.soc.job.FlowAggregationJob \
+        -p 1 \
+        "$JAR_PATH" \
+        && echo "✅ FlowAggregationJob 提交成功" \
+        || echo "❌ FlowAggregationJob 提交失败"
+
+    sleep 3
+
+    echo ""
+    echo ">>> 提交 Job 4: TlsFingerprintJob (TLS 指纹识别)"
+    /opt/flink/bin/flink run \
+        -m "${JM_HOST}:${JM_PORT}" \
+        -c com.soc.job.TlsFingerprintJob \
+        -p 1 \
+        "$JAR_PATH" \
+        && echo "✅ TlsFingerprintJob 提交成功" \
+        || echo "❌ TlsFingerprintJob 提交失败"
+else
+    echo ""
+    echo "(跳过 NDR 作业: FlowAggregationJob / TlsFingerprintJob, SUBMIT_NDR_JOBS=1 可启用)"
+fi
+
 echo ""
 echo "=== 作业提交完成 ==="
 echo "Flink Dashboard: http://${JM_HOST}:${JM_PORT}"

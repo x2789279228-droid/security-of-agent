@@ -1,0 +1,160 @@
+"""Kafka 消息总线与 CEP 攻击链管理路由"""
+import logging
+
+from fastapi import APIRouter, Query
+
+from config import settings
+from kafka_consumer import kafka_consumer_manager
+from kafka_producer import kafka_producer
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api", tags=["kafka"])
+
+# ── CEP 模式管理（热更新 + 灰度）──
+
+# 默认 CEP 模式（内存缓存，通过 Kafka Broadcast 同步到 Flink）
+_CEP_PATTERNS_CACHE: dict[str, dict] = {
+    "port_scan_to_c2": {
+        "patternId": "port_scan_to_c2", "name": "端口扫描→暴力破解→C2",
+        "steps": ["PORT_SCAN", "BRUTE_FORCE", "C2_BEACON"],
+        "withinMinutes": 30, "enabled": True, "shadowMode": False, "version": 1,
+    },
+    "lateral_movement": {
+        "patternId": "lateral_movement", "name": "可疑登录→文件访问→横向移动",
+        "steps": ["SUSPICIOUS_LOGIN", "FILE_ACCESS", "LATERAL_MOVE"],
+        "withinMinutes": 60, "enabled": True, "shadowMode": False, "version": 1,
+    },
+    "data_exfil": {
+        "patternId": "data_exfil", "name": "文件访问→数据外泄",
+        "steps": ["FILE_ACCESS", "DATA_EXFIL"],
+        "withinMinutes": 15, "enabled": True, "shadowMode": False, "version": 1,
+    },
+}
+
+
+async def _broadcast_pattern(pattern: dict):
+    """将模式配置发布到 Kafka Broadcast topic"""
+    if kafka_producer.is_active:
+        try:
+            await kafka_producer._producer.send(
+                settings.kafka_topic_cep_patterns,
+                key=pattern["patternId"],
+                value=pattern,
+            )
+            logger.info(f"[CEP] Broadcast pattern: {pattern['patternId']} v{pattern['version']}")
+        except Exception as e:
+            logger.warning(f"[CEP] Broadcast failed: {e}")
+
+
+@router.get("/kafka/status")
+async def kafka_status():
+    """Kafka 消息总线状态"""
+    return {
+        "enabled": settings.kafka_enabled,
+        "bootstrap": settings.kafka_bootstrap,
+        "topics": {
+            "raw": settings.kafka_topic_raw,
+            "validated": settings.kafka_topic_validated,
+            "rejected": settings.kafka_topic_rejected,
+            "enriched": settings.kafka_topic_enriched,
+            "alerts": settings.kafka_topic_alerts,
+            "audit_queue": settings.kafka_topic_audit_queue,
+            "audit_results": settings.kafka_topic_audit_results,
+        },
+        "consumer_stats": kafka_consumer_manager.stats(),
+        "producer_active": kafka_producer.is_active,
+    }
+
+
+@router.get("/kafka/rejections")
+async def kafka_rejections():
+    """Kafka 拒绝原因统计（数据质量可观测）"""
+    return kafka_consumer_manager.rejection_stats()
+
+
+@router.get("/cep/partial-matches")
+async def cep_partial_matches():
+    """CEP 攻击链部分匹配状态（实时可视化）"""
+    return {"matches": kafka_consumer_manager.cep_partial_matches()}
+
+
+@router.get("/cep/patterns")
+async def cep_patterns_list():
+    """列出所有 CEP 攻击链模式"""
+    return {"patterns": list(_CEP_PATTERNS_CACHE.values())}
+
+
+@router.post("/cep/patterns/{pattern_id}/toggle")
+async def cep_pattern_toggle(pattern_id: str):
+    """启用/禁用 CEP 模式（通过 Kafka Broadcast 热更新到 Flink）"""
+    if pattern_id not in _CEP_PATTERNS_CACHE:
+        return {"success": False, "error": f"模式 {pattern_id} 不存在"}
+    p = _CEP_PATTERNS_CACHE[pattern_id]
+    p["enabled"] = not p["enabled"]
+    p["version"] += 1
+    await _broadcast_pattern(p)
+    return {"success": True, "pattern": p}
+
+
+@router.post("/cep/patterns/{pattern_id}/shadow")
+async def cep_pattern_shadow(pattern_id: str):
+    """切换灰度模式（shadow mode: 仅记录不告警）"""
+    if pattern_id not in _CEP_PATTERNS_CACHE:
+        return {"success": False, "error": f"模式 {pattern_id} 不存在"}
+    p = _CEP_PATTERNS_CACHE[pattern_id]
+    p["shadowMode"] = not p["shadowMode"]
+    p["version"] += 1
+    await _broadcast_pattern(p)
+    return {"success": True, "pattern": p}
+
+
+@router.post("/cep/replay")
+async def cep_replay(limit: int = 200, src_ip: str = ""):
+    """CEP 回放验证：用历史事件回测攻击链模式命中率"""
+    from models import async_session as db_session, SecurityEvent
+    from sqlalchemy import select, desc
+
+    patterns = {k: v["steps"] for k, v in _CEP_PATTERNS_CACHE.items() if v["enabled"]}
+
+    async with db_session() as session:
+        stmt = select(SecurityEvent).order_by(desc(SecurityEvent.created_at)).limit(limit)
+        if src_ip:
+            stmt = stmt.where(SecurityEvent.src_ip == src_ip)
+        result = await session.execute(stmt)
+        events = result.scalars().all()
+
+    # 按 src_ip 分组，时间正序回放
+    from collections import defaultdict
+    by_ip: dict[str, list] = defaultdict(list)
+    for evt in reversed(events):
+        by_ip[evt.src_ip or "unknown"].append(evt)
+
+    hits = []
+    for ip, ip_events in by_ip.items():
+        for pname, steps in patterns.items():
+            matched = []
+            step_idx = 0
+            for evt in ip_events:
+                if step_idx < len(steps) and evt.event_type == steps[step_idx]:
+                    matched.append({"event_id": evt.id, "event_type": evt.event_type,
+                                    "step": steps[step_idx], "at": str(evt.created_at)})
+                    step_idx += 1
+                    if step_idx >= len(steps):
+                        hits.append({"pattern": pname, "src_ip": ip,
+                                     "events": matched, "status": "completed"})
+                        step_idx = 0
+                        matched = []
+            if matched:
+                hits.append({"pattern": pname, "src_ip": ip,
+                             "events": matched, "status": "partial",
+                             "progress": f"{len(matched)}/{len(steps)}"})
+
+    return {
+        "total_events": len(events),
+        "total_ips": len(by_ip),
+        "patterns_tested": list(patterns.keys()),
+        "hits": hits,
+        "hit_count": sum(1 for h in hits if h["status"] == "completed"),
+        "partial_count": sum(1 for h in hits if h["status"] == "partial"),
+    }

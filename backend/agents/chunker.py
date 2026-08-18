@@ -99,7 +99,7 @@ class Chunker:
         # 2. 按 IP 分组
         ip_groups: dict[str, list[dict]] = defaultdict(list)
         for evt in remaining:
-            ip = evt.get("src_ip", evt.get("src_ip", "unknown"))
+            ip = evt.get("src_ip", "unknown")
             ip_groups[ip].append(evt)
 
         # 3. 每个 IP 的事件再分块
@@ -218,7 +218,7 @@ class Chunker:
         levels = ["critical", "high", "medium", "low", "info"]
         min_idx = min((levels.index(s) for s in sevs if s in levels), default=4)
         max_idx = max((levels.index(s) for s in sevs if s in levels), default=4)
-        return f"{levels[max_idx]}~{levels[min_idx]}"
+        return f"{levels[min_idx]}~{levels[max_idx]}"
 
     def _estimate_tokens(self, events: list[dict]) -> int:
         text = json.dumps(events, ensure_ascii=False)

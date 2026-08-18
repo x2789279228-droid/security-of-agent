@@ -1,0 +1,46 @@
+# ════════════════════════════════════════════
+# 生产环境覆盖 (docker-compose.yml 基础上叠加)
+#   用法(先拉取预构建镜像, 再启动):
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#   必填: IMAGE_TAG 必须指定已发布到 GHCR 的具体标签(如 main / sha-xxxxxx / 1.2.3)
+#     IMAGE_TAG=1.2.3 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#   说明: 生产不构建源码、不暴露宿主机调试端口, 全部服务使用预构建镜像。
+# ════════════════════════════════════════════
+services:
+  # ── 自建应用服务: 强制使用 GHCR 预构建镜像 ──
+  flink-jobmanager:
+    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
+
+  flink-taskmanager:
+    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
+
+  backend:
+    image: ghcr.io/x2789279228-droid/soc-backend:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
+    ports:
+      - "8001:8000"
+
+  frontend:
+    image: ghcr.io/x2789279228-droid/soc-frontend:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
+    ports:
+      - "3001:80"
+      - "3002:8080"
+
+  # ── 基础设施: 生产关闭宿主机调试端口, 仅保留对外必需端口 ──
+  postgres:
+    ports: []
+
+  redis:
+    ports: []
+
+  kafka:
+    ports:
+      # 生产仅保留外部日志源接入的 SASL_SSL 9093; 关闭本机调试 9094
+      - "9093:9093"
+
+  schema-registry:
+    ports: []
+
+  kafka-ui:
+    ports:
+      - "18082:8080"

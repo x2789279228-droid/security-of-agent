@@ -1,0 +1,131 @@
+# ════════════════════════════════════════════
+# CI — 合并门禁 (PR + push main)
+# 每次提交自动执行: 后端 pytest(带覆盖率) / 前端 lint+build / Flink 编译 / Docker 构建校验
+# 验收标准(路线图阶段4): 失败的 PR 在 5 分钟内被自动拦截
+# ════════════════════════════════════════════
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 后端: pytest + 覆盖率门禁 ──
+  backend-test:
+    name: Backend pytest (coverage)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest-cov
+
+      - name: Run tests with coverage
+        # 覆盖率门禁: 当前基线 21% → 设 20% 防回归; 目标提升至 60% (路线图阶段4)
+        run: pytest -q --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=20
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+
+  # ── 前端: lint + 类型检查 + 生产构建 ──
+  frontend-check:
+    name: Frontend lint + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  # ── Flink: Maven 编译打包 (构建耗时, 用 actions/cache 加速) ──
+  flink-build:
+    name: Flink Maven build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flink-jobs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+
+      - name: Build jar
+        run: mvn -B -ntp package
+
+      - name: Upload jar
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flink-jar
+          path: flink-jobs/target/*.jar
+
+  # ── Docker: 校验 3 个 Dockerfile 可构建 (PR 只构建不推送, 共享 GHA 缓存) ──
+  docker-build:
+    name: Docker build (backend/frontend/flink)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          tags: ghcr.io/${{ github.repository_owner }}/soc-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: ghcr.io/${{ github.repository_owner }}/soc-frontend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build flink image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./flink-jobs
+          push: false
+          tags: ghcr.io/${{ github.repository_owner }}/soc-flink:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

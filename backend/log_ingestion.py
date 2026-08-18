@@ -641,6 +641,10 @@ class LogIngestor:
                         exc_info=True,
                     )
                     await self._mark_analyzed(event_id, error=str(e))
+                finally:
+                    # 防止 trace context 泄漏: 同任务内后续辅助 LLM 调用
+                    # (watchdog/post_mortem/rerank 等) 不会继承本事件的 event_id
+                    clear_trace_context()
 
     async def _run_batch_analysis(self, session_id: str):
         """批量分析未处理的安全事件（使用 Audit-LLM 流水线）"""

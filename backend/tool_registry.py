@@ -8,6 +8,11 @@
   - 每个工具是一个异步函数，接收 **kwargs
   - 工具注册时附带元信息（参数描述、返回类型、预估耗时）
   - Executor 根据工具信息做并行调度决策
+
+初始化策略:
+  - D2 改造：模块加载时仍自动调 init_tool_registry() 保持向后兼容
+  - 加 _initialized 守门防止重复注册与日志噪音
+  - 显式 init_tool_registry() 调用幂等（多次调用只首次注册）
 """
 import logging
 import time
@@ -29,17 +34,19 @@ logger = logging.getLogger(__name__)
 class ToolRegistry:
     """
     工具注册表
-    
+
     用法:
         registry = ToolRegistry()
-        result = await registry.execute("event_store.query", 
-                                         session=session, 
-                                         session_id="xxx", 
+        result = await registry.execute("event_store.query",
+                                         session=session,
+                                         session_id="xxx",
                                          src_ip="10.0.0.5")
     """
 
     def __init__(self):
         self._tools: dict[str, dict] = {}
+        # D2: 守门标志 — init_tool_registry() 只首次生效，幂等
+        self._initialized = False
 
     def register(
         self,
@@ -133,7 +140,7 @@ async def _event_store_query(
                 "id": e.id, "event_type": e.event_type,
                 "severity": e.severity, "src_ip": e.src_ip or "",
                 "dst_ip": e.dst_ip or "", "message": (e.message or "")[:200],
-                "anomaly_score": (e.raw_data or {}).get("_anomaly", {}).get("score", 0),
+                "anomaly_score": (e.raw_data or {}).get("_anomaly_score", 0.0),
                 "created_at": e.created_at.isoformat() if e.created_at else "",
             }
             for e in events
@@ -351,7 +358,19 @@ async def _sliding_window_evicted(session_id: str = "", limit: int = 50, **kwarg
 # ── 注册所有工具 ──
 
 def init_tool_registry():
-    """初始化并注册所有可用工具"""
+    """初始化并注册所有可用工具
+
+    D2 改造：加 _initialized 守门，使该函数幂等
+    - 多次调用只首次注册，避免日志噪音和重复覆盖
+    - reload 时仍可强制触发：手动重置 tool_registry._initialized = False 后再调
+    """
+    if tool_registry._initialized:
+        logger.debug(
+            f"Tool registry already initialized "
+            f"({len(tool_registry._tools)} tools) — skipping re-registration"
+        )
+        return
+
     tool_registry.register(
         "event_store.query", _event_store_query,
         description="查询完整原始事件（支持按IP/类型/严重度/时间窗口筛选）",
@@ -403,7 +422,10 @@ def init_tool_registry():
         category="data", estimated_ms=10,
     )
     logger.info(f"Tool registry initialized with {len(tool_registry._tools)} tools")
+    tool_registry._initialized = True
 
 
-# 模块加载时自动初始化
+# 模块加载时自动初始化（保持向后兼容）。
+# 应用启动入口（app.py）若已 import 本模块则自动完成注册；
+# 若运行时新工具需要 reload，可手动 tool_registry._initialized = False 后再调 init。
 init_tool_registry()
