@@ -32,6 +32,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from sqlalchemy import select, desc, and_, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import SecurityEvent
@@ -104,12 +105,28 @@ class EventStore:
         存储一条安全事件到全量存储
 
         自动写 PostgreSQL（热存储），异步归档到文件（温存储）。
+
+        幂等性 (event_id 唯一约束兜底):
+          上游 eventId 已存在 → 跳过插入并返回已存在记录，
+          跨运行时重放/Exactly-Once 下同一条事件只落库一次。
+          (替代原 kafka_consumer 的 Redis 24h 去重)
         """
         # 写入 PostgreSQL（通过 SecurityEvent 模型）
         event_type = event_data.get("event", event_data.get("type", "UNKNOWN"))
         severity = event_data.get("severity", "info")
+        event_id = event_data.get("eventId", "") or None
+
+        # 幂等检查: eventId 已落库 → 直接返回已存在记录 (不重复插入)
+        if event_id:
+            existing = await self.get_by_upstream_id(session, event_id)
+            if existing is not None:
+                logger.info(
+                    f"[Idempotent] eventId={event_id} 已存在 (#{existing.id}), 跳过重复入库"
+                )
+                return existing
 
         evt = SecurityEvent(
+            event_id=event_id,
             session_id=session_id,
             event_type=event_type,
             severity=severity,
@@ -128,7 +145,19 @@ class EventStore:
             analyzed=False,
         )
         session.add(evt)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # 并发/重放下唯一索引冲突 → 回滚并返回已存在记录
+            await session.rollback()
+            logger.warning(
+                f"[Idempotent] eventId={event_id} 唯一约束冲突, 返回已存在记录"
+            )
+            if event_id:
+                existing = await self.get_by_upstream_id(session, event_id)
+                if existing is not None:
+                    return existing
+            raise
         await session.refresh(evt)
 
         stored = StoredEvent(
@@ -153,6 +182,32 @@ class EventStore:
                     f"correlation={correlation_id or 'none'}")
 
         return stored
+
+    async def get_by_upstream_id(
+        self,
+        session: AsyncSession,
+        event_id: str,
+    ) -> Optional[StoredEvent]:
+        """按上游 eventId 查询已落库事件 (幂等检查)"""
+        stmt = select(SecurityEvent).where(SecurityEvent.event_id == event_id)
+        result = await session.execute(stmt)
+        evt = result.scalars().first()
+        if not evt:
+            return None
+        raw = evt.raw_data or {}
+        return StoredEvent(
+            id=evt.id,
+            session_id=evt.session_id,
+            event_type=evt.event_type,
+            severity=evt.severity,
+            src_ip=evt.src_ip or "",
+            dst_ip=evt.dst_ip or "",
+            message=evt.message or "",
+            raw_data=raw,
+            anomaly_score=evt.anomaly_score or 0.0,
+            correlation_id=raw.get("_correlation_id", ""),
+            created_at=evt.created_at.isoformat() if evt.created_at else "",
+        )
 
     async def query(
         self,

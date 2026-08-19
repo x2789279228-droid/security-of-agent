@@ -123,7 +123,7 @@ services:
       kafka:
         condition: service_healthy
 
-  # ── Flink 流处理引擎 ──
+  # ── Flink 流处理引擎 (生产级: RocksDB + 持久化 checkpoint + Exactly-Once) ──
   flink-jobmanager:
     image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:-dev}
     build:
@@ -135,8 +135,34 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
-        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        # ── 状态后端: RocksDB (生产级, 支持大状态 + 增量 checkpoint) ──
+        state.backend.type: rocksdb
+        state.checkpoint-storage: filesystem
+        state.checkpoints.dir: file:///var/flink-state/checkpoints
+        state.savepoints.dir: file:///var/flink-state/savepoints
+        state.backend.incremental: true
+        # ── Checkpoint: Exactly-Once (与 KafkaSink 事务配合, 重启/重放不重不漏) ──
+        execution.checkpointing.mode: EXACTLY_ONCE
+        execution.checkpointing.interval: 60s
+        execution.checkpointing.min-pause: 30s
+        execution.checkpointing.timeout: 10min
+        execution.checkpointing.max-concurrent-checkpoints: 1
+        # ── 容错: 失败自动重启 (fixed-delay 3 次, 间隔 10s) ──
+        restart-strategy.type: fixed-delay
+        restart-strategy.fixed-delay.delay: 10s
+        restart-strategy.fixed-delay.attempts: 3
+        # ── 并行度: 由配置文件统一驱动 (不再在代码硬编码, 按 topic 分区弹性扩容) ──
+        parallelism.default: 3
+        # ── 指标: Prometheus Reporter (容器端口 9250) ──
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9250
       KAFKA_BOOTSTRAP: kafka:9092
+    ports:
+      # 生产不映射; 仅开发时可通过 frontend:3002 认证反代访问
+      - "127.0.0.1:9250:9250"
+    volumes:
+      # 持久化状态卷: checkpoint/savepoint 跨容器重建保留 (生产关键)
+      - flink_state:/var/flink-state
     # REST/Dashboard 不映射宿主: 外部经 frontend:3002 (Basic Auth) 访问,
     # 作业提交用 `docker compose exec flink-jobmanager /opt/flink/submit-jobs.sh`
     depends_on:
@@ -155,7 +181,19 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 4
+        # ── 与 JobManager 对齐的状态/checkpoint 配置 ──
+        state.backend.type: rocksdb
+        state.checkpoint-storage: filesystem
+        state.checkpoints.dir: file:///var/flink-state/checkpoints
+        state.backend.incremental: true
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9250
       KAFKA_BOOTSTRAP: kafka:9092
+    ports:
+      - "127.0.0.1:9251:9250"
+    volumes:
+      # 与 JobManager 共享持久化状态卷 (checkpoint 可见性)
+      - flink_state:/var/flink-state
     depends_on:
       - flink-jobmanager
 
@@ -199,6 +237,8 @@ services:
       # Kafka 消息总线
       SHARED_MEMORY_KAFKA_ENABLED: ${SHARED_MEMORY_KAFKA_ENABLED:-true}
       SHARED_MEMORY_KAFKA_BOOTSTRAP: kafka:9092
+      # Confluent Schema Registry (Flink↔Python 跨运行时 Schema 契约)
+      SHARED_MEMORY_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       # 敏感字段加密（Fernet key, 生成: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"）
       SHARED_MEMORY_FIELD_ENCRYPTION_KEY: ${SHARED_MEMORY_FIELD_ENCRYPTION_KEY:-}
     volumes:
@@ -303,6 +343,7 @@ services:
 volumes:
   pgdata:
   kafka_data:
+  flink_state:
   suricata_logs:
   suricata_rules:
   cape_data:

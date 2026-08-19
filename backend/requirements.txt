@@ -12,6 +12,8 @@ httpx>=0.28,<1
 numpy>=2.0,<3
 sse-starlette>=2.2,<3
 aiokafka>=0.12,<1
+jsonschema>=4.23,<5         # Flink↔Python 跨运行时 Schema 校验
+prometheus-fastapi-instrumentator>=6.0,<7  # /metrics 指标出口
 paramiko>=3.4,<4
 cryptography>=42.0,<44
 # ── NDR 扩展依赖 ──

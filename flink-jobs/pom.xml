@@ -49,6 +49,15 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- flink-connector-base: KafkaSink 的 DeliveryGuarantee 枚举所在包
+             (provided 依赖不传递, 需显式声明; 运行时由 Flink 发行版 lib 提供) -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-base</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
         <!-- Flink CEP 复杂事件处理 - 攻击链检测 (运行时由 Flink 集群提供) -->
         <dependency>
             <groupId>org.apache.flink</groupId>

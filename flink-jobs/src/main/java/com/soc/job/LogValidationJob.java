@@ -3,12 +3,14 @@ package com.soc.job;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.soc.model.SecurityEvent;
 import com.soc.util.KafkaConfig;
+import com.soc.util.TraceIdHeaderProvider;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -101,8 +103,8 @@ public class LogValidationJob {
 
     public static void main(String[] args) throws Exception {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.setParallelism(1);
-        env.enableCheckpointing(60000);
+        // 并行度/checkpoint 由 flink-conf.yaml 统一配置 (生产级: parallelism.default /
+        // execution.checkpointing.*), 不在代码硬编码, 便于按分区弹性扩容
 
         // ==================== 1. Kafka Source ====================
         KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
@@ -147,10 +149,15 @@ public class LogValidationJob {
         // ==================== 5. Kafka Sink - 已验证事件 ====================
         KafkaSink<String> validatedSink = KafkaSink.<String>builder()
                 .setBootstrapServers(KafkaConfig.KAFKA_BOOTSTRAP)
+                // 值=JSON + trace_id header (全链路追踪, TraceIdHeaderProvider)
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(KafkaConfig.TOPIC_VALIDATED_LOGS)
                         .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SimpleStringSchema())
+                        .setHeaderProvider(new TraceIdHeaderProvider())
                         .build())
+                // Exactly-Once: 依赖 checkpoint, 保证重启/重放不重不漏
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("soc-logval")
                 .build();
 
         scoredStream
@@ -165,7 +172,10 @@ public class LogValidationJob {
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(KafkaConfig.TOPIC_REJECTED_LOGS)
                         .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SimpleStringSchema())
+                        .setHeaderProvider(new TraceIdHeaderProvider())
                         .build())
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("soc-logval-rej")
                 .build();
 
         allRejectedStream

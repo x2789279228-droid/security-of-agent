@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SecurityEvent",
+  "description": "安全事件 Schema (JSON 表达) — 与 flink-jobs/schemas/security-event.avsc 保持契约一致。Flink 侧由 LogValidationJob 校验; 本文件用于后端 Kafka 消费侧双向校验, 消除跨运行时字段漂移。",
+  "type": "object",
+  "properties": {
+    "eventId": { "type": "string", "description": "事件唯一标识 (UUID)" },
+    "sourceId": { "type": "string", "description": "日志来源标识" },
+    "apiKey": { "type": "string", "description": "数据源认证密钥" },
+    "eventType": { "type": "string", "description": "事件类型枚举" },
+    "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+    "srcIp": { "type": ["string", "null"] },
+    "dstIp": { "type": ["string", "null"] },
+    "protocol": { "type": ["string", "null"] },
+    "message": { "type": "string", "description": "事件描述 (最长 500 字符)" },
+    "confidence": { "type": "number", "description": "置信度 [0, 100]" },
+    "timestamp": { "type": "integer", "description": "事件时间戳 (epoch millis, 2020~2030)" },
+    "traceId": { "type": ["string", "null"] },
+    "anomalyScore": { "type": "number", "description": "Flink 异常评分 (富化后附加)" },
+    "anomalyReasons": { "type": ["array", "null"] },
+    "rawData": { "type": ["object", "null"], "description": "原始日志字段 (透传, 含 Flink _anomalyScore)" }
+  },
+  "required": ["eventId", "eventType", "severity", "message", "timestamp"],
+  "additionalProperties": true
+}

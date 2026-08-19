@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.soc.model.AlertEvent;
 import com.soc.model.SecurityEvent;
 import com.soc.util.KafkaConfig;
+import com.soc.util.TraceIdHeaderProvider;
 import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
@@ -18,6 +19,7 @@ import org.apache.flink.cep.PatternStream;
 import org.apache.flink.cep.pattern.Pattern;
 import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -86,10 +88,7 @@ public class AnomalyDetectionJob {
     public static void main(String[] args) throws Exception {
         // 创建 Flink 执行环境
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        // 演示环境：单并行度
-        env.setParallelism(1);
-        // 启用 Checkpoint（每 60 秒）
-        env.enableCheckpointing(60000);
+        // 并行度/checkpoint 由 flink-conf.yaml 统一配置 (生产级), 不在代码硬编码
 
         // ==================== 1. 构建 Kafka Source ====================
         KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
@@ -150,10 +149,14 @@ public class AnomalyDetectionJob {
         // Sink: security-events-enriched（所有富化事件）
         KafkaSink<String> enrichedSink = KafkaSink.<String>builder()
                 .setBootstrapServers(KafkaConfig.KAFKA_BOOTSTRAP)
+                // 值=JSON + trace_id header (全链路追踪, TraceIdHeaderProvider)
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(KafkaConfig.TOPIC_ENRICHED_EVENTS)
                         .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SimpleStringSchema())
+                        .setHeaderProvider(new TraceIdHeaderProvider())
                         .build())
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("soc-ano-enr")
                 .build();
 
         enrichedStream
@@ -166,7 +169,10 @@ public class AnomalyDetectionJob {
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(KafkaConfig.TOPIC_ALERTS)
                         .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SimpleStringSchema())
+                        .setHeaderProvider(new TraceIdHeaderProvider())
                         .build())
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("soc-ano-ale")
                 .build();
 
         // 合并异常评分告警和 CEP 攻击链告警
@@ -181,7 +187,10 @@ public class AnomalyDetectionJob {
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(KafkaConfig.TOPIC_AUDIT_QUEUE)
                         .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SimpleStringSchema())
+                        .setHeaderProvider(new TraceIdHeaderProvider())
                         .build())
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("soc-ano-aud")
                 .build();
 
         auditStream
@@ -194,7 +203,10 @@ public class AnomalyDetectionJob {
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(KafkaConfig.TOPIC_CEP_PARTIAL)
                         .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SimpleStringSchema())
+                        .setHeaderProvider(new TraceIdHeaderProvider())
                         .build())
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("soc-ano-par")
                 .build();
 
         partialMatches

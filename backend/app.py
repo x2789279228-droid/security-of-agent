@@ -221,9 +221,12 @@ async def lifespan(app: FastAPI):
 
     # Kafka 消息总线（可选）
     if settings.kafka_enabled:
+        # 注册 Flink↔Python 跨运行时 Schema 契约 (best-effort, 失败不影响消费)
+        from schema_registry import schema_registry
+        await schema_registry.register_all()
         await kafka_producer.start()
         await kafka_consumer_manager.start()
-        logger.info("Kafka 模式已启用: 数据通过 Kafka + Flink 流水线处理")
+        logger.info("Kafka 模式已启用: 数据通过 Kafka + Flink 流水线处理 (Python 为薄消费者)")
     else:
         logger.info("HTTP 直连模式: 设置 SHARED_MEMORY_KAFKA_ENABLED=true 启用 Kafka")
 
@@ -327,3 +330,13 @@ app.include_router(edr_intel_router)
 app.include_router(ops_router)
 
 logger.info(f"Mounted 13 routers — {len(app.routes)} routes total")
+
+# ── Prometheus 指标出口 (Python 侧; 与 Flink 9250 对齐, 统一可观测) ──
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    Instrumentator().instrument(app).expose(
+        app, endpoint="/metrics", include_in_schema=False
+    )
+    logger.info("Prometheus /metrics enabled")
+except ImportError:
+    logger.warning("prometheus-fastapi-instrumentator not installed — /metrics disabled")

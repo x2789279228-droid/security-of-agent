@@ -19,6 +19,10 @@ services:
     image: ghcr.io/x2789279228-droid/soc-backend:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
     ports:
       - "8001:8000"
+    environment:
+      # 生产强制 Kafka 模式 (Flink 唯一流处理事实源):
+      # 关闭 HTTP 直连双路径, 避免 Python 侧重复校验/去重/异常评分
+      SHARED_MEMORY_KAFKA_ENABLED: "true"
 
   frontend:
     image: ghcr.io/x2789279228-droid/soc-frontend:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}

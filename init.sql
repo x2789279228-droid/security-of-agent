@@ -510,3 +510,8 @@ CREATE INDEX IF NOT EXISTS idx_kpi_key ON kpi_snapshots(metric_key);
 INSERT INTO memories (agent_id, content, metadata) VALUES
 ('shared', '系统初始化：共享记忆服务层已就绪。', '{"type": "system", "init": true}')
 ON CONFLICT DO NOTHING;
+
+-- P: idempotency - unique event_id from upstream (Flink UUID)
+-- Replaces the old Redis 24h dedup: exactly-once replay lands once.
+ALTER TABLE security_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(64);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_security_events_event_id ON security_events(event_id);

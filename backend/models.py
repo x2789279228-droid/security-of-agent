@@ -50,6 +50,9 @@ class SecurityEvent(Base):
     __tablename__ = "security_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # 上游唯一事件 ID (Flink/UUID) — 唯一索引实现幂等, 替换原 Redis 24h 去重
+    # (跨运行时重放/Exactly-Once 兜底: 同一 eventId 只落库一次)
+    event_id = Column(String(64), nullable=True, unique=True, index=True)
     session_id = Column(String(100), nullable=False, index=True)
     event_type = Column(String(50), nullable=False)
     severity = Column(String(20), nullable=False, index=True)
@@ -743,6 +746,9 @@ async def _migrate_existing_tables(conn):
         "ALTER TABLE security_events ADD COLUMN IF NOT EXISTS anomaly_score REAL DEFAULT 0.0",
         "ALTER TABLE security_events ADD COLUMN IF NOT EXISTS status VARCHAR(30) DEFAULT 'new'",
         "ALTER TABLE security_events ADD COLUMN IF NOT EXISTS case_id INTEGER",
+        "ALTER TABLE security_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(64)",
+        # 幂等兜底: 同一 eventId 只落库一次 (替换 Redis 24h 去重)
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_security_events_event_id ON security_events(event_id)",
     ]
     for s in stmts:
         try:

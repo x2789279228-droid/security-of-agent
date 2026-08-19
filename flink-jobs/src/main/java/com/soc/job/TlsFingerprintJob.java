@@ -1,12 +1,14 @@
 package com.soc.job;
 
 import com.soc.util.KafkaConfig;
+import com.soc.util.TraceIdHeaderProvider;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.connector.base.DeliveryGuarantee;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -52,7 +54,7 @@ public class TlsFingerprintJob {
 
     public static void main(String[] args) throws Exception {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.enableCheckpointing(60000);
+        // checkpoint 由 flink-conf.yaml 统一配置 (生产级)
 
         String bootstrap = KafkaConfig.getBootstrapServers();
 
@@ -98,8 +100,11 @@ public class TlsFingerprintJob {
                         KafkaRecordSerializationSchema.builder()
                                 .setTopic("ndr-tls-enriched")
                                 .setValueSerializationSchema(new SimpleStringSchema())
+                                .setHeaderProvider(new TraceIdHeaderProvider())
                                 .build()
                 )
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("soc-tls")
                 .build();
 
         enriched.sinkTo(enrichedSink);

@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AlertEvent",
+  "description": "安全告警 Schema (JSON 表达) — 与 flink-jobs/schemas/alert-event.avsc 保持契约一致。用于后端 security-alerts topic 消费侧校验。",
+  "type": "object",
+  "properties": {
+    "alertId": { "type": "string", "description": "告警唯一标识" },
+    "eventType": { "type": "string" },
+    "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+    "srcIp": { "type": ["string", "null"] },
+    "dstIp": { "type": ["string", "null"] },
+    "message": { "type": "string" },
+    "anomalyScore": { "type": "number", "description": "异常评分 [0, 1]" },
+    "alertType": { "type": "string", "enum": ["ANOMALY", "ATTACK_CHAIN", "THRESHOLD"] },
+    "reasons": { "type": "array", "items": { "type": "string" } },
+    "evidenceEventIds": { "type": ["array", "null"] },
+    "evidenceChain": { "type": ["array", "null"] },
+    "timeSpanMs": { "type": "integer" },
+    "timestamp": { "type": "integer", "description": "告警时间戳 (epoch millis)" },
+    "traceId": { "type": ["string", "null"] }
+  },
+  "required": ["alertId", "eventType", "severity", "message", "anomalyScore", "alertType", "timestamp"],
+  "additionalProperties": true
+}

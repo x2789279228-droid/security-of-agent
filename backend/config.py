@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     kafka_topic_cep_patterns: str = "security-cep-patterns"
     kafka_consumer_group: str = "soc-backend"
     kafka_enabled: bool = False              # True=Kafka 模式, False=兼容旧 HTTP 直连模式
+    # Confluent Schema Registry (跨运行时 Schema 契约, 见 schema_registry.py)
+    schema_registry_url: str = "http://schema-registry:8081"
+    # Flink JobManager REST (管道状态聚合, 见 routers/kafka.py)
+    flink_jobmanager_url: str = "http://flink-jobmanager:8081"
 
     # 数据源认证
     source_api_keys: str = '{"soc-syslog-2024":"syslog-adapter","soc-api-2024":"api-client","soc-simulator-2024":"log-simulator"}'

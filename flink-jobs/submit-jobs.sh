@@ -6,6 +6,12 @@
 JM_HOST="${1:-localhost}"
 JM_PORT=8081
 JAR_PATH="/opt/flink/lib/flink-jobs-1.0.0.jar"
+# 并行度: 默认取 flink-conf.yaml 的 parallelism.default (生产级配置),
+# 可用 FLINK_PARALLELISM 覆盖; 不再硬编码 -p 1
+PARALLELISM_ARGS=()
+if [ -n "${FLINK_PARALLELISM:-}" ]; then
+  PARALLELISM_ARGS=(-p "${FLINK_PARALLELISM}")
+fi
 
 echo "=== SOC 安全审计 Flink 作业提交 ==="
 echo "JobManager: http://${JM_HOST}:${JM_PORT}"
@@ -26,7 +32,7 @@ echo ">>> 提交 Job 1: LogValidationJob (日志验证与分级)"
 /opt/flink/bin/flink run \
     -m "${JM_HOST}:${JM_PORT}" \
     -c com.soc.job.LogValidationJob \
-    -p 1 \
+    "${PARALLELISM_ARGS[@]}" \
     "$JAR_PATH" \
     && echo "✅ LogValidationJob 提交成功" \
     || echo "❌ LogValidationJob 提交失败"
@@ -39,7 +45,7 @@ echo ">>> 提交 Job 2: AnomalyDetectionJob (异常检测 + CEP 攻击链)"
 /opt/flink/bin/flink run \
     -m "${JM_HOST}:${JM_PORT}" \
     -c com.soc.job.AnomalyDetectionJob \
-    -p 1 \
+    "${PARALLELISM_ARGS[@]}" \
     "$JAR_PATH" \
     && echo "✅ AnomalyDetectionJob 提交成功" \
     || echo "❌ AnomalyDetectionJob 提交失败"
@@ -54,7 +60,7 @@ if [ "${SUBMIT_NDR_JOBS:-0}" = "1" ]; then
     /opt/flink/bin/flink run \
         -m "${JM_HOST}:${JM_PORT}" \
         -c com.soc.job.FlowAggregationJob \
-        -p 1 \
+        "${PARALLELISM_ARGS[@]}" \
         "$JAR_PATH" \
         && echo "✅ FlowAggregationJob 提交成功" \
         || echo "❌ FlowAggregationJob 提交失败"
@@ -66,7 +72,7 @@ if [ "${SUBMIT_NDR_JOBS:-0}" = "1" ]; then
     /opt/flink/bin/flink run \
         -m "${JM_HOST}:${JM_PORT}" \
         -c com.soc.job.TlsFingerprintJob \
-        -p 1 \
+        "${PARALLELISM_ARGS[@]}" \
         "$JAR_PATH" \
         && echo "✅ TlsFingerprintJob 提交成功" \
         || echo "❌ TlsFingerprintJob 提交失败"

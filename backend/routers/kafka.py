@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query
 from config import settings
 from kafka_consumer import kafka_consumer_manager
 from kafka_producer import kafka_producer
+from schema_registry import schema_registry
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +48,42 @@ async def _broadcast_pattern(pattern: dict):
             logger.warning(f"[CEP] Broadcast failed: {e}")
 
 
+async def _flink_overview() -> dict:
+    """聚合 Flink JobManager 状态 (REST API) — 单一管道状态视图"""
+    import httpx
+
+    base = settings.flink_jobmanager_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            overview = (await client.get(f"{base}/overview")).json()
+            jobs = (await client.get(f"{base}/jobs/overview")).json().get("jobs", [])
+            return {
+                "reachable": True,
+                "taskmanagers": overview.get("taskmanagers", 0),
+                "slots_total": overview.get("slots-total", 0),
+                "slots_available": overview.get("slots-available", 0),
+                "running_jobs": overview.get("jobs-running", 0),
+                "finished_jobs": overview.get("jobs-finished", 0),
+                "jobs": [
+                    {
+                        "id": j.get("jid"),
+                        "name": j.get("name"),
+                        "state": j.get("state"),
+                        "start_ts": j.get("start-time"),
+                        "end_ts": j.get("end-time"),
+                        "duration_ms": j.get("duration"),
+                    }
+                    for j in jobs
+                ],
+            }
+    except Exception as e:
+        logger.warning(f"[Flink] JobManager 不可达: {e}")
+        return {"reachable": False, "error": str(e)}
+
+
 @router.get("/kafka/status")
 async def kafka_status():
-    """Kafka 消息总线状态"""
+    """Kafka 消息总线 + Flink 管道聚合状态 (单一状态视图)"""
     return {
         "enabled": settings.kafka_enabled,
         "bootstrap": settings.kafka_bootstrap,
@@ -64,6 +98,26 @@ async def kafka_status():
         },
         "consumer_stats": kafka_consumer_manager.stats(),
         "producer_active": kafka_producer.is_active,
+        "flink": await _flink_overview(),
+        "schema_registry": {
+            "configured": bool(schema_registry._registry_base),
+            "schemas": list(schema_registry._schemas.keys()),
+        },
+    }
+
+
+@router.get("/pipeline/status")
+async def pipeline_status():
+    """全管道拓扑状态 — 一次调用看穿 Flink→Kafka→Python 每一环"""
+    return {
+        "source": {"kafka_enabled": settings.kafka_enabled},
+        "flink": await _flink_overview(),
+        "kafka_consumers": kafka_consumer_manager.stats(),
+        "kafka_rejections": kafka_consumer_manager.rejection_stats(),
+        "schema_registry": {
+            "configured": bool(schema_registry._registry_base),
+            "schemas": list(schema_registry._schemas.keys()),
+        },
     }
 
 

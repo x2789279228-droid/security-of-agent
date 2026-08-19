@@ -13,11 +13,16 @@ Kafka 消费者 — 从 Flink 处理后的 topic 消费事件
 
 可靠性保障:
   ① 手动 Offset 提交 — 处理成功后才 commit，崩溃重启不丢消息
-  ② Redis 幂等去重 — 基于 eventId 的 24h 去重窗口，重放不重复处理
+  ② 最终幂等 — PG security_events.event_id 唯一索引兜底 (event_store.store 已实现,
+     替换原 Redis 24h 去重; 跨重放同一条事件只落库一次)
   ③ 死信队列 (DLQ) — 连续失败的消息发送到 security-logs-dlq
   ④ 背压控制 — max_poll_records + 审计信号量，防止下游过载
   ⑤ 消费 Lag 监控 — 实时计算各分区 lag，暴露到 /api/kafka/status
   ⑥ trace_id 传播 — 从 Kafka headers 提取 trace_id，贯穿全链路
+
+架构定位 (Flink 唯一流处理事实源):
+  本模块是"薄消费者" — 只做 传输/存储/LLM审计/响应编排,
+  不再重复实现校验/去重/异常评分 (这些由 Flink 作业负责)。
 """
 import asyncio
 import json
@@ -27,6 +32,7 @@ from typing import Optional
 
 from config import settings
 from field_cipher import field_cipher
+from schema_registry import schema_registry
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +45,6 @@ except ImportError:
 
 # ── 常量 ──
 DLQ_TOPIC = "security-logs-dlq"
-DEDUP_PREFIX = "soc:kafka:dedup:"
-DEDUP_TTL = 86400          # 去重窗口 24 小时
 MAX_RETRY = 3              # 单条消息最大重试次数
 AUDIT_SEMAPHORE_LIMIT = 5  # Audit-LLM 并发上限（背压）
 MAX_POLL_RECORDS = 50      # 每次 poll 最大消息数
@@ -55,7 +59,7 @@ class KafkaConsumerManager:
 
     可靠性特性:
     - 手动 offset 提交（处理成功后 commit）
-    - Redis 幂等去重（eventId 24h 窗口）
+    - 最终幂等（PG event_id 唯一索引, 替代 Redis 去重）
     - 死信队列（连续失败 → security-logs-dlq）
     - 背压控制（max_poll_records + 审计信号量）
     - 消费 lag 实时监控
@@ -64,7 +68,6 @@ class KafkaConsumerManager:
     def __init__(self):
         self._tasks: list[asyncio.Task] = []
         self._running = False
-        self._redis = None
         self._dlq_producer = None
         self._audit_semaphore = asyncio.Semaphore(AUDIT_SEMAPHORE_LIMIT)
         self._rejection_log: list[dict] = []  # 最近 200 条拒绝记录
@@ -76,7 +79,7 @@ class KafkaConsumerManager:
             "alerts_consumed": 0,
             "rejected_consumed": 0,
             "errors": 0,
-            "dedup_skipped": 0,
+            "idempotent_skipped": 0,
             "dlq_sent": 0,
             "last_message_at": 0,
             "lag": {},
@@ -88,8 +91,6 @@ class KafkaConsumerManager:
             logger.info("Kafka consumer: disabled (kafka_enabled=False or aiokafka missing)")
             return
 
-        # 初始化 Redis（幂等去重）
-        await self._init_redis()
         # 初始化 DLQ 生产者
         await self._init_dlq_producer()
 
@@ -123,20 +124,6 @@ class KafkaConsumerManager:
 
     # ── 初始化 ──
 
-    async def _init_redis(self):
-        """初始化 Redis 连接（用于幂等去重）"""
-        try:
-            import redis.asyncio as aioredis
-            # from_url 是同步工厂函数, 返回 Redis 客户端 (不可 await)
-            self._redis = aioredis.from_url(
-                settings.redis_url, decode_responses=True
-            )
-            await self._redis.ping()
-            logger.info("[Kafka] Redis connected for dedup")
-        except Exception as e:
-            logger.warning(f"[Kafka] Redis unavailable, dedup disabled: {e}")
-            self._redis = None
-
     async def _init_dlq_producer(self):
         """初始化 DLQ 生产者"""
         try:
@@ -152,25 +139,6 @@ class KafkaConsumerManager:
         except Exception as e:
             logger.warning(f"[Kafka] DLQ producer failed to start: {e}")
             self._dlq_producer = None
-
-    # ── 幂等去重 ──
-
-    async def _is_duplicate(self, event_id: str, topic: str = "") -> bool:
-        """检查消息是否已处理过（Redis SET NX）
-
-        去重键必须包含 topic: Flink 会把同一 eventId 同时发往 enriched 与
-        audit-queue 两个 topic (合法扇出), 若跨 topic 共享去重键, 后到的
-        一路会被误判为重复而跳过, 导致存储或审计链路静默丢失。
-        """
-        if not self._redis or not event_id:
-            return False
-        key = f"{DEDUP_PREFIX}{topic}:{event_id}" if topic else f"{DEDUP_PREFIX}{event_id}"
-        try:
-            added = await self._redis.set(key, "1", nx=True, ex=DEDUP_TTL)
-            return not added  # set 返回 None 表示 key 已存在 → 重复
-        except Exception as e:
-            logger.warning(f"[Kafka] Dedup check error: {e}")
-            return False
 
     # ── 死信队列 ──
 
@@ -269,7 +237,7 @@ class KafkaConsumerManager:
         stat_key: str,
     ):
         """
-        通用消费循环 — 手动提交 + 幂等去重 + DLQ + 背压
+        通用消费循环 — 手动提交 + PG 幂等 + DLQ + 背压
 
         Args:
             topic: 消费的 topic 名称
@@ -288,25 +256,34 @@ class KafkaConsumerManager:
         )
         try:
             await consumer.start()
-            logger.info(f"Consuming {topic} (manual-commit, dedup=on, DLQ={DLQ_TOPIC})...")
+            logger.info(f"Consuming {topic} (manual-commit, PG-idempotent, DLQ={DLQ_TOPIC})...")
             async for msg in consumer:
                 if not self._running:
                     break
                 event = msg.value
-                trace_id = self._extract_trace_id(msg)
-                event_id = event.get("eventId", "")
+                # trace_id: 优先 Kafka header (Flink TraceIdHeaderProvider 写入),
+                # 回退到 payload 内 traceId 字段 (兼容旧链路/其它生产者)
+                trace_id = self._extract_trace_id(msg) or event.get("traceId", "")
 
                 # ⓪ 解密敏感字段
                 event = field_cipher.decrypt_message(event)
 
-                # ① 幂等去重（键含 topic, 见 _is_duplicate 说明）
-                if await self._is_duplicate(event_id, topic):
-                    self._stats["dedup_skipped"] += 1
-                    # 仍然提交 offset（跳过已处理的消息）
+                # ① 幂等: 由 event_store.store 的 PG event_id 唯一索引兜底
+                #    (同一条事件重放/双路径扇出只落库一次, 此处不再做 Redis 去重)
+
+                # ② 跨运行时 Schema 校验 (Flink↔Python 契约, 不合规 → DLQ 可见)
+                schema_errors = schema_registry.validate(topic, event)
+                if schema_errors:
+                    # Schema 违规是确定性问题, 不重试 → 直接 DLQ + 提交 offset
+                    await self._send_to_dlq(
+                        topic, event,
+                        f"Schema 校验失败: {'; '.join(schema_errors[:5])}",
+                        MAX_RETRY,
+                    )
                     await consumer.commit()
                     continue
 
-                # ② 注入 trace_id 到事件
+                # ③ 注入 trace_id 到事件
                 if trace_id:
                     event["_trace_id"] = trace_id
 
@@ -429,6 +406,7 @@ class KafkaConsumerManager:
         anomaly_reasons = event.get("_anomalyReasons", raw.get("_anomalyReasons", []))
 
         log_data = {
+            "eventId": event.get("eventId", ""),
             "event": event.get("eventType", event.get("event", "UNKNOWN")),
             "severity": event.get("severity", "info"),
             "src_ip": event.get("srcIp", event.get("src_ip", "")),
@@ -489,6 +467,7 @@ class KafkaConsumerManager:
         anomaly_reasons = event.get("_anomalyReasons", raw.get("_anomalyReasons", []))
 
         log_data = {
+            "eventId": event.get("eventId", ""),
             "event": event.get("eventType", event.get("event", "UNKNOWN")),
             "severity": event.get("severity", "info"),
             "src_ip": event.get("srcIp", event.get("src_ip", "")),
