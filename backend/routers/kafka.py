@@ -106,9 +106,32 @@ async def kafka_status():
     }
 
 
+async def _trace_backend_health() -> dict:
+    """trace 后端健康: otel-collector + Grafana Tempo 可达性"""
+    import httpx
+
+    result = {"tempo": {"reachable": False}, "otel_collector": {"reachable": False}}
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.get("http://tempo:3200/ready")
+            result["tempo"] = {"reachable": True, "status_code": r.status_code}
+    except Exception as e:
+        result["tempo"]["error"] = str(e)
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            # OTLP HTTP 接收端探测 (401/400 均说明服务可达)
+            r = await client.post(
+                "http://otel-collector:4318/v1/traces", json={"resourceSpans": []}
+            )
+            result["otel_collector"] = {"reachable": True, "status_code": r.status_code}
+    except Exception as e:
+        result["otel_collector"]["error"] = str(e)
+    return result
+
+
 @router.get("/pipeline/status")
 async def pipeline_status():
-    """全管道拓扑状态 — 一次调用看穿 Flink→Kafka→Python 每一环"""
+    """全管道拓扑状态 — 一次调用看穿 Flink→Kafka→Python→Trace 每一环"""
     return {
         "source": {"kafka_enabled": settings.kafka_enabled},
         "flink": await _flink_overview(),
@@ -118,6 +141,7 @@ async def pipeline_status():
             "configured": bool(schema_registry._registry_base),
             "schemas": list(schema_registry._schemas.keys()),
         },
+        "tracing": await _trace_backend_health(),
     }
 
 

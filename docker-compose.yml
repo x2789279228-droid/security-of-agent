@@ -54,6 +54,13 @@ services:
       KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_jaas.conf
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # 单 broker 事务: 内部主题 __transaction_state 需 RF=1 (默认 3 无法在单 broker 建主题,
+      # 导致 Flink KafkaSink EXACTLY_ONCE 的 InitProducerId 超时失败)
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Flink KafkaSink EXACTLY_ONCE 默认 transaction.timeout.ms=1h,
+      # 需放行 broker 侧上限 (默认 15min, 否则 InitProducerId 报超时过大)
+      KAFKA_TRANSACTION_MAX_TIMEOUT_MS: 3600000
       # ── 数据保留策略（全局默认 7 天 + 1GB 上限） ──
       KAFKA_LOG_RETENTION_HOURS: 168
       KAFKA_LOG_RETENTION_BYTES: 1073741824
@@ -156,7 +163,12 @@ services:
         # ── 指标: Prometheus Reporter (容器端口 9250) ──
         metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
         metrics.reporter.prom.port: 9250
+        # 注: Flink 1.19 的 OTel 系统 trace reporter (checkpoint/init spans) 需额外
+        # 插件 jar (flink-metrics-otel 仅存在 2.x), Docker 镜像未内置 → 每事件 span
+        # 由作业内 TraceUtil (OTel SDK) 导出, 见 flink-jobs/src/.../TraceUtil.java
       KAFKA_BOOTSTRAP: kafka:9092
+      # 每事件 OTel span 导出端点 (TraceUtil 读取)
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     ports:
       # 生产不映射; 仅开发时可通过 frontend:3002 认证反代访问
       - "127.0.0.1:9250:9250"
@@ -180,7 +192,7 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 4
+        taskmanager.numberOfTaskSlots: 6
         # ── 与 JobManager 对齐的状态/checkpoint 配置 ──
         state.backend.type: rocksdb
         state.checkpoint-storage: filesystem
@@ -189,6 +201,7 @@ services:
         metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
         metrics.reporter.prom.port: 9250
       KAFKA_BOOTSTRAP: kafka:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     ports:
       - "127.0.0.1:9251:9250"
     volumes:
@@ -239,6 +252,10 @@ services:
       SHARED_MEMORY_KAFKA_BOOTSTRAP: kafka:9092
       # Confluent Schema Registry (Flink↔Python 跨运行时 Schema 契约)
       SHARED_MEMORY_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # OpenTelemetry (标准 trace → otel-collector → Tempo)
+      SHARED_MEMORY_OTEL_ENABLED: "true"
+      SHARED_MEMORY_OTEL_ENDPOINT: http://otel-collector:4317
+      SHARED_MEMORY_ENV_NAME: ${SHARED_MEMORY_ENV_NAME:-dev}
       # 敏感字段加密（Fernet key, 生成: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"）
       SHARED_MEMORY_FIELD_ENCRYPTION_KEY: ${SHARED_MEMORY_FIELD_ENCRYPTION_KEY:-}
     volumes:
@@ -271,6 +288,73 @@ services:
     depends_on:
       - backend
       - flink-jobmanager
+
+  # ════════════════════════════════════════════
+  # 可观测性 (标准 OpenTelemetry + Grafana Tempo/Prometheus)
+  # ════════════════════════════════════════════
+
+  # ── OpenTelemetry Collector (OTLP 接收 → 尾部采样 → Tempo) ──
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.159.0
+    container_name: soc-otel-collector
+    restart: always
+    command: ["--config=/etc/otel/otel-collector.yaml"]
+    volumes:
+      - ./config/otel/otel-collector.yaml:/etc/otel/otel-collector.yaml:ro
+    # 仅容器内网 (4317 gRPC / 4318 HTTP), 不映射宿主
+    depends_on:
+      - tempo
+
+  # ── Grafana Tempo (trace 存储与查询) ──
+  tempo:
+    image: grafana/tempo:2.10.8
+    container_name: soc-tempo
+    restart: always
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./config/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+
+  # ── Prometheus (Flink 9250/9251 + Python /metrics, 支持 exemplar) ──
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    container_name: soc-prometheus
+    restart: always
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"   # 仅本机调试
+    depends_on:
+      - flink-jobmanager
+      - flink-taskmanager
+      - backend
+
+  # ── Grafana (Tempo + Prometheus 统一看板; 经 frontend:3002/grafana/ 反代) ──
+  grafana:
+    image: grafana/grafana:12.3.8
+    container_name: soc-grafana
+    restart: always
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:3002/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_BASIC_ENABLED: "true"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"   # 仅本机调试
+    depends_on:
+      - tempo
+      - prometheus
 
   # ════════════════════════════════════════════
   # NDR 扩展服务 (可选, 按需启用)
@@ -348,3 +432,6 @@ volumes:
   suricata_rules:
   cape_data:
   misp_db_data:
+  tempo_data:
+  prometheus_data:
+  grafana_data:

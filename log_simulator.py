@@ -20,8 +20,10 @@
 """
 import argparse
 import asyncio
+import hashlib
 import json
 import random
+import re
 import ssl
 import time
 import uuid
@@ -37,6 +39,25 @@ except ImportError:
 
 KAFKA_TOPIC_RAW = "security-logs-raw"
 DEFAULT_API_KEY = "soc-simulator-2024"
+
+
+def _trace_id_hex(event_id: str) -> str:
+    """eventId (UUID) → 32 hex W3C trace-id (去横线)"""
+    cleaned = event_id.replace("-", "").lower()
+    return cleaned if re.match(r"^[0-9a-f]{32}$", cleaned) else hashlib.md5(event_id.encode()).hexdigest()
+
+
+def _make_traceparent(event_id: str) -> str:
+    """由 eventId 派生标准 W3C traceparent (根 span, sampled)"""
+    return f"00-{_trace_id_hex(event_id)}-{uuid.uuid4().hex[:16]}-01"
+
+
+def _trace_headers(event_id: str) -> list:
+    """Kafka headers: 标准 traceparent + 兼容旧 trace_id"""
+    return [
+        ("traceparent", _make_traceparent(event_id).encode("utf-8")),
+        ("trace_id", event_id.encode("utf-8")),
+    ]
 
 # ── SASL_SSL 可选参数 (main() 中按 CLI 入参填充, 供 create_kafka_producer 读取) ──
 SASL_OPTS = {
@@ -208,7 +229,7 @@ async def run_continuous_kafka(bootstrap: str, api_key: str, interval: float,
         while count == 0 or sent < count:
             evt = generate_continuous()
             msg = to_kafka_message(evt, api_key, source_id)
-            trace_headers = [("trace_id", msg["eventId"].encode("utf-8"))]
+            trace_headers = _trace_headers(msg["eventId"])
             await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg, headers=trace_headers)
             sent += 1
             is_attack = evt["severity"] in ("high", "critical")
@@ -235,7 +256,7 @@ async def run_burst_kafka(bootstrap: str, api_key: str, count: int, source_id: s
         for i in range(count):
             evt = generate_continuous(attack_ratio=0.3)
             msg = to_kafka_message(evt, api_key, source_id)
-            trace_headers = [("trace_id", msg["eventId"].encode("utf-8"))]
+            trace_headers = _trace_headers(msg["eventId"])
             await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg, headers=trace_headers)
         await producer.flush()
     finally:
@@ -260,7 +281,7 @@ async def run_chain_kafka(bootstrap: str, api_key: str, source_id: str):
 
             evt = make_event(step)
             msg = to_kafka_message(evt, api_key, source_id)
-            trace_headers = [("trace_id", msg["eventId"].encode("utf-8"))]
+            trace_headers = _trace_headers(msg["eventId"])
             await producer.send(KAFKA_TOPIC_RAW, key=msg["srcIp"], value=msg, headers=trace_headers)
             print(
                 f"  🔴 [{i+1}/{len(ATTACK_CHAIN)}] {evt['event']:24s} "

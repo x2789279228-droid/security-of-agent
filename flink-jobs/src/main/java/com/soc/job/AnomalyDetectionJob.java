@@ -5,6 +5,7 @@ import com.soc.model.AlertEvent;
 import com.soc.model.SecurityEvent;
 import com.soc.util.KafkaConfig;
 import com.soc.util.TraceIdHeaderProvider;
+import com.soc.util.TraceUtil;
 import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
@@ -431,7 +432,46 @@ public class AnomalyDetectionJob {
                     chainName, firstEvent.getSrcIp(),
                     evidenceEventIds.size(), alert.getTimeSpanMs());
 
-            return getMapper().writeValueAsString(alert);
+            // 攻击链告警: 每命中一条 → 标准 span (high importance, collector 100% 保留)
+            String parentTp = "";
+            if (firstEvent.getRawData() != null && firstEvent.getRawData().get("_traceparent") != null) {
+                parentTp = String.valueOf(firstEvent.getRawData().get("_traceparent"));
+            }
+            if (parentTp.isEmpty()) {
+                parentTp = TraceUtil.makeRootTraceparent(
+                        firstEvent.getTraceId() != null ? firstEvent.getTraceId() : "");
+            }
+            java.util.Map<String, String> cepAttrs = new HashMap<>();
+            cepAttrs.put("soc.event_id", String.valueOf(firstEvent.getEventId()));
+            cepAttrs.put("soc.event_type", chainName);
+            cepAttrs.put("soc.src_ip", String.valueOf(firstEvent.getSrcIp()));
+            cepAttrs.put("soc.severity", "critical");
+            cepAttrs.put("soc.job", "AnomalyDetection");
+            cepAttrs.put("soc.stage", "cep");
+            cepAttrs.put("soc.importance", "high");
+            io.opentelemetry.api.trace.Span cepSpan = TraceUtil.startSpan(
+                    "soc.cep.attack_chain", parentTp, cepAttrs);
+            try {
+                cepSpan.setAttribute("soc.evidence_count", evidenceEventIds.size());
+                cepSpan.setAttribute("soc.chain", chainName);
+            } finally {
+                cepSpan.end();
+            }
+
+            // 把 traceparent (含 cep span-id) 写进告警 JSON, 供 TraceIdHeaderProvider 下发
+            String alertJson = getMapper().writeValueAsString(alert);
+            String traceparent = TraceUtil.traceparentOf(cepSpan);
+            if (!traceparent.isEmpty()) {
+                try {
+                    com.fasterxml.jackson.databind.node.ObjectNode node =
+                            (com.fasterxml.jackson.databind.node.ObjectNode) getMapper().readTree(alertJson);
+                    node.put("traceparent", traceparent);
+                    alertJson = getMapper().writeValueAsString(node);
+                } catch (Exception ignored) {
+                    // 附头失败不影响告警主流程
+                }
+            }
+            return alertJson;
         }
     }
 
@@ -549,6 +589,24 @@ public class AnomalyDetectionJob {
                                    KeyedProcessFunction<String, SecurityEvent, String>.Context ctx,
                                    Collector<String> out) throws Exception {
 
+            // 每事件标准 span (OTel → Tempo); 父级 = 上游 _traceparent (LogValidation span) 或 traceId 派生
+            String parentTp = "";
+            Map<String, Object> rawIn = event.getRawData();
+            if (rawIn != null && rawIn.get("_traceparent") != null) {
+                parentTp = String.valueOf(rawIn.get("_traceparent"));
+            }
+            if (parentTp.isEmpty()) {
+                parentTp = TraceUtil.makeRootTraceparent(event.getTraceId() != null ? event.getTraceId() : "");
+            }
+            java.util.Map<String, String> attrs = new HashMap<>();
+            attrs.put("soc.event_id", String.valueOf(event.getEventId()));
+            attrs.put("soc.event_type", String.valueOf(event.getEventType()));
+            attrs.put("soc.src_ip", String.valueOf(event.getSrcIp()));
+            attrs.put("soc.severity", String.valueOf(event.getSeverity()));
+            attrs.put("soc.job", "AnomalyDetection");
+            attrs.put("soc.stage", "score");
+            io.opentelemetry.api.trace.Span traceSpan = TraceUtil.startSpan("soc.anomaly.score", parentTp, attrs);
+            try {
             totalEvents.inc();
 
             // ========== 迟到数据检测 ==========
@@ -646,6 +704,8 @@ public class AnomalyDetectionJob {
             rawData.put("_coldStart", inColdStart);
             rawData.put("_eventCount", currentCount);
             rawData.put("_windowCount", windowCount);
+            // 附上本 span 的 traceparent 供下游 (Python) 继承, 形成完整 trace 树
+            rawData.put("_traceparent", TraceUtil.traceparentOf(traceSpan));
             event.setRawData(rawData);
 
             String enrichedJson = getMapper().writeValueAsString(event);
@@ -676,6 +736,14 @@ public class AnomalyDetectionJob {
             }
 
             out.collect(enrichedJson);
+            } catch (Exception e) {
+                traceSpan.recordException(e);
+                traceSpan.setStatus(io.opentelemetry.api.trace.StatusCode.ERROR,
+                        String.valueOf(e.getMessage()));
+                throw e;
+            } finally {
+                traceSpan.end();
+            }
         }
 
         /** Welford 在线算法更新基线 */

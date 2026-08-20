@@ -32,6 +32,7 @@ from typing import Optional
 
 from config import settings
 from field_cipher import field_cipher
+from metrics import inc_kafka_consumed
 from schema_registry import schema_registry
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,7 @@ class KafkaConsumerManager:
         self._rejection_log: list[dict] = []  # 最近 200 条拒绝记录
         self._rejection_by_type: dict[str, int] = {}  # 按类型聚合
         self._cep_partial: list[dict] = []  # 最近 100 条 CEP 部分匹配
+        self._otel_tracer = self._make_tracer()
         self._stats = {
             "enriched_consumed": 0,
             "audit_consumed": 0,
@@ -84,6 +86,19 @@ class KafkaConsumerManager:
             "last_message_at": 0,
             "lag": {},
         }
+
+    def _make_tracer(self):
+        """返回 OTel tracer; OTel 不可用时返回空 tracer (start_as_current_span 空转)"""
+        try:
+            from opentelemetry import trace as otel_trace
+            return otel_trace.get_tracer("soc-backend-kafka", "2.0.0")
+        except ImportError:
+            class _NullTracer:
+                @staticmethod
+                def start_as_current_span(name, context=None, attributes=None):
+                    from contextlib import nullcontext
+                    return nullcontext()
+            return _NullTracer()
 
     async def start(self):
         """启动所有消费者"""
@@ -132,7 +147,6 @@ class KafkaConsumerManager:
                 value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8") if k else None,
                 acks="all",
-                retries=3,
             )
             await self._dlq_producer.start()
             logger.info(f"[Kafka] DLQ producer started → {DLQ_TOPIC}")
@@ -169,16 +183,22 @@ class KafkaConsumerManager:
         except Exception as e:
             logger.error(f"[Kafka-DLQ] Failed to send to DLQ: {e}")
 
-    # ── trace_id 提取 ──
+    # ── trace 头提取 ──
 
     @staticmethod
-    def _extract_trace_id(msg) -> str:
-        """从 Kafka message headers 提取 trace_id"""
+    def _extract_trace_carrier(msg) -> dict:
+        """从 Kafka message headers 提取 W3C traceparent / 旧 trace_id"""
+        carrier: dict = {}
         if msg.headers:
             for key, value in msg.headers:
-                if key == "trace_id" and value:
-                    return value.decode("utf-8") if isinstance(value, bytes) else str(value)
-        return ""
+                if not value:
+                    continue
+                v = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                if key == "traceparent" and not carrier.get("traceparent"):
+                    carrier["traceparent"] = v
+                elif key == "trace_id" and not carrier.get("trace_id"):
+                    carrier["trace_id"] = v
+        return carrier
 
     # ── 消费 Lag 监控 ──
 
@@ -261,57 +281,41 @@ class KafkaConsumerManager:
                 if not self._running:
                     break
                 event = msg.value
-                # trace_id: 优先 Kafka header (Flink TraceIdHeaderProvider 写入),
-                # 回退到 payload 内 traceId 字段 (兼容旧链路/其它生产者)
-                trace_id = self._extract_trace_id(msg) or event.get("traceId", "")
+                # trace: 优先 W3C traceparent header (Flink TraceIdHeaderProvider 写入),
+                # 回退 payload._traceparent / trace_id header / payload traceId (兼容旧链路)
+                carrier = self._extract_trace_carrier(msg)
+                if not carrier.get("traceparent"):
+                    payload_tp = event.get("_traceparent", "")
+                    if not payload_tp:
+                        rawd = event.get("rawData")
+                        payload_tp = rawd.get("_traceparent", "") if isinstance(rawd, dict) else ""
+                    if payload_tp:
+                        carrier["traceparent"] = payload_tp
+                trace_id = carrier.get("trace_id", "") or event.get("traceId", "")
 
-                # ⓪ 解密敏感字段
-                event = field_cipher.decrypt_message(event)
-
-                # ① 幂等: 由 event_store.store 的 PG event_id 唯一索引兜底
-                #    (同一条事件重放/双路径扇出只落库一次, 此处不再做 Redis 去重)
-
-                # ② 跨运行时 Schema 校验 (Flink↔Python 契约, 不合规 → DLQ 可见)
-                schema_errors = schema_registry.validate(topic, event)
-                if schema_errors:
-                    # Schema 违规是确定性问题, 不重试 → 直接 DLQ + 提交 offset
-                    await self._send_to_dlq(
-                        topic, event,
-                        f"Schema 校验失败: {'; '.join(schema_errors[:5])}",
-                        MAX_RETRY,
-                    )
+                # OTel 根 span: 每条消息一个 trace (父 = 入站 traceparent)
+                from otel_setup import extract_context
+                ctx = extract_context(carrier) if carrier else None
+                importance = "high" if topic in (
+                    settings.kafka_topic_alerts, settings.kafka_topic_audit_queue
+                ) else "normal"
+                root = self._otel_tracer.start_as_current_span(
+                    f"kafka.consume.{group_suffix}",
+                    context=ctx,
+                    attributes={
+                        "messaging.system": "kafka",
+                        "messaging.destination.name": topic,
+                        "messaging.kafka.consumer.group": f"{settings.kafka_consumer_group}-{group_suffix}",
+                        "soc.importance": importance,
+                        "soc.event_id": event.get("eventId", ""),
+                    },
+                )
+                try:
+                    with root:
+                        await self._process_message(msg, event, topic, trace_id, handler, stat_key)
+                finally:
+                    # 手动提交 offset（无论成功/失败都提交，避免无限重试阻塞）
                     await consumer.commit()
-                    continue
-
-                # ③ 注入 trace_id 到事件
-                if trace_id:
-                    event["_trace_id"] = trace_id
-
-                # ③ 处理（带重试）
-                success = False
-                last_error = ""
-                for attempt in range(1, MAX_RETRY + 1):
-                    try:
-                        await handler(event, trace_id)
-                        success = True
-                        self._stats[stat_key] += 1
-                        self._stats["last_message_at"] = time.time()
-                        break
-                    except Exception as e:
-                        last_error = str(e)
-                        self._stats["errors"] += 1
-                        logger.error(
-                            f"[Kafka] {topic} handler error (attempt {attempt}/{MAX_RETRY}): {e}"
-                        )
-                        if attempt < MAX_RETRY:
-                            await asyncio.sleep(0.5 * attempt)
-
-                # ④ 失败 → DLQ
-                if not success:
-                    await self._send_to_dlq(topic, event, last_error, MAX_RETRY)
-
-                # ⑤ 手动提交 offset（无论成功/失败都提交，避免无限重试阻塞）
-                await consumer.commit()
 
         except asyncio.CancelledError:
             pass
@@ -319,6 +323,66 @@ class KafkaConsumerManager:
             logger.error(f"{topic} consumer crashed: {e}")
         finally:
             await consumer.stop()
+
+    async def _process_message(self, msg, event, topic, trace_id, handler, stat_key):
+        """单条消息处理 (解密 → Schema 校验 → 重试 handler → DLQ), 位于 OTel 根 span 内"""
+        # ⓪ 解密敏感字段
+        event = field_cipher.decrypt_message(event)
+
+        # ① 幂等: 由 event_store.store 的 PG event_id 唯一索引兜底
+        #    (同一条事件重放/双路径扇出只落库一次, 此处不再做 Redis 去重)
+
+        # ② 跨运行时 Schema 校验 (Flink↔Python 契约, 不合规 → DLQ 可见)
+        schema_errors = schema_registry.validate(topic, event)
+        if schema_errors:
+            # Schema 违规是确定性问题, 不重试 → 直接 DLQ + 提交 offset
+            await self._send_to_dlq(
+                topic, event,
+                f"Schema 校验失败: {'; '.join(schema_errors[:5])}",
+                MAX_RETRY,
+            )
+            self._mark_root_error(f"schema:{schema_errors[0][:200]}")
+            return
+
+        # ③ 注入 trace_id 到事件
+        if trace_id:
+            event["_trace_id"] = trace_id
+
+        # ③ 处理（带重试）
+        success = False
+        last_error = ""
+        for attempt in range(1, MAX_RETRY + 1):
+            try:
+                await handler(event, trace_id)
+                success = True
+                self._stats[stat_key] += 1
+                self._stats["last_message_at"] = time.time()
+                inc_kafka_consumed(topic)
+                break
+            except Exception as e:
+                last_error = str(e)
+                self._stats["errors"] += 1
+                logger.error(
+                    f"[Kafka] {topic} handler error (attempt {attempt}/{MAX_RETRY}): {e}"
+                )
+                if attempt < MAX_RETRY:
+                    await asyncio.sleep(0.5 * attempt)
+
+        # ④ 失败 → DLQ
+        if not success:
+            await self._send_to_dlq(topic, event, last_error, MAX_RETRY)
+            self._mark_root_error(last_error[:500])
+
+    def _mark_root_error(self, message: str):
+        """把当前 OTel 根 span 标记为错误 (供 Tempo 排查)"""
+        try:
+            from opentelemetry import trace as otel_trace
+            span = otel_trace.get_current_span()
+            if span and span.is_recording():
+                span.record_exception(Exception(message))
+                span.set_status(otel_trace.Status(otel_trace.StatusCode.ERROR, message))
+        except Exception:
+            pass
 
     # ── 各 topic 消费入口 ──
 

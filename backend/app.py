@@ -331,12 +331,18 @@ app.include_router(ops_router)
 
 logger.info(f"Mounted 13 routers — {len(app.routes)} routes total")
 
-# ── Prometheus 指标出口 (Python 侧; 与 Flink 9250 对齐, 统一可观测) ──
+# ── OpenTelemetry 标准 trace (→ otel-collector → Tempo) ──
 try:
-    from prometheus_fastapi_instrumentator import Instrumentator
-    Instrumentator().instrument(app).expose(
-        app, endpoint="/metrics", include_in_schema=False
-    )
-    logger.info("Prometheus /metrics enabled")
-except ImportError:
-    logger.warning("prometheus-fastapi-instrumentator not installed — /metrics disabled")
+    from otel_setup import setup_otel
+    setup_otel(app=app)
+except Exception as e:
+    logger.warning(f"OTel setup failed: {e}")
+
+# ── Prometheus 指标出口 (Python 侧; 与 Flink 9250 对齐, 统一可观测) ──
+# 注: 用轻量 metrics.py (兼容 FastAPI 0.14x _IncludedRouter), 替代
+# prometheus-fastapi-instrumentator (其内省 route.path 与新版 FastAPI 不兼容 → 全请求 500)
+from metrics import metrics_endpoint, MetricsMiddleware
+
+app.add_middleware(MetricsMiddleware)
+app.add_api_route("/metrics", metrics_endpoint, include_in_schema=False, methods=["GET"])
+logger.info("Prometheus /metrics enabled (metrics.py)")

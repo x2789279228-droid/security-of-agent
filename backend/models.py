@@ -173,6 +173,8 @@ class PipelineSpan(Base):
     span_id = Column(String(20), default="", index=True)
     event_id = Column(Integer, default=0, index=True)
     session_id = Column(String(100), default="", index=True)
+    # W3C trace-id (32 hex) — 关联标准 OTel/Tempo trace 树
+    trace_id = Column(String(32), default="", index=True)
     stage = Column(String(30), default="", index=True)       # ingest | decomposer | executor | ...
     status = Column(String(20), default="running", index=True)  # running | success | error | timeout
     start_time = Column(Float, default=0.0)
@@ -749,6 +751,8 @@ async def _migrate_existing_tables(conn):
         "ALTER TABLE security_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(64)",
         # 幂等兜底: 同一 eventId 只落库一次 (替换 Redis 24h 去重)
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_security_events_event_id ON security_events(event_id)",
+        # 可观测: pipeline_spans 增加 trace_id 列 (关联 OTel/Tempo)
+        "ALTER TABLE pipeline_spans ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32) DEFAULT ''",
     ]
     for s in stmts:
         try:

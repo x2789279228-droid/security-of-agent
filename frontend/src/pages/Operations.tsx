@@ -12,8 +12,9 @@ import { AssetsTab } from '../components/operations/AssetsTab'
 import { KpiTab } from '../components/operations/KpiTab'
 import { AuditTrailTab } from '../components/operations/AuditTrailTab'
 import { CostTab } from '../components/operations/CostTab'
+import { TraceTab } from '../components/operations/TraceTab'
 
-type Tab = 'overview' | 'cases' | 'orders' | 'postmortems' | 'feedback' | 'rules' | 'assets' | 'kpi' | 'audit-trail' | 'cost'
+type Tab = 'overview' | 'cases' | 'orders' | 'postmortems' | 'feedback' | 'rules' | 'assets' | 'kpi' | 'audit-trail' | 'cost' | 'traces'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'overview', label: '概览' },
@@ -26,6 +27,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'kpi', label: 'KPI' },
   { id: 'cost', label: 'Token 成本' },
   { id: 'audit-trail', label: '审计 trail' },
+  { id: 'traces', label: '链路追踪' },
 ]
 
 export default function Operations() {
@@ -89,6 +91,7 @@ export default function Operations() {
             {activeTab === 'kpi' && <KpiTab />}
             {activeTab === 'cost' && <CostTab />}
             {activeTab === 'audit-trail' && <AuditTrailTab />}
+            {activeTab === 'traces' && <TraceTab />}
           </motion.div>
         </AnimatePresence>
       </div>

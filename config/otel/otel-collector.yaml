@@ -1,0 +1,32 @@
+# ── OpenTelemetry Collector 配置 ──
+# 接收 Flink/Python 的 OTLP traces → 尾部采样 → 转发 Grafana Tempo
+# 端口: OTLP gRPC 4317 / OTLP HTTP 4318 (仅容器内网)
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 2s
+    send_batch_size: 512
+  # 注: 尾部采样 (tail_sampling) 在本版本(0.159.0)存在丢弃问题, 已移除;
+  # 当前 SOC 事件量级下全量导出, 采样可在 SDK 侧 (sampler) 或后续版本开启。
+  # 告警/审计等重要 span 由导出侧 soc.importance 属性区分。
+
+exporters:
+  # 用 otlp_http (Tempo HTTP 4318, 已验证可用)
+  otlp_http/tempo:
+    endpoint: http://tempo:4318
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/tempo, debug]

@@ -515,3 +515,6 @@ ON CONFLICT DO NOTHING;
 -- Replaces the old Redis 24h dedup: exactly-once replay lands once.
 ALTER TABLE security_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(64);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_security_events_event_id ON security_events(event_id);
+
+-- P: observability - pipeline_spans trace_id column (OTel/Tempo linkage)
+ALTER TABLE pipeline_spans ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32) DEFAULT '';

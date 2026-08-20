@@ -1,0 +1,23 @@
+# ── Prometheus 配置 ──
+# 抓取 Flink (9250/9251) + Python (/metrics), 开启 exemplar 供 trace↔metric 关联
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    source: soc
+
+scrape_configs:
+  - job_name: soc-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8000"]
+
+  - job_name: soc-flink-jobmanager
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["flink-jobmanager:9250"]
+
+  - job_name: soc-flink-taskmanager
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["flink-taskmanager:9251"]

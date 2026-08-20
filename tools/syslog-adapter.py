@@ -22,6 +22,7 @@ Linux 客户端配置 (rsyslog):
   systemctl restart rsyslog
 """
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -103,8 +104,16 @@ class OutputConfig:
     kafka_producer = None    # SyncKafkaProducer 实例
 
 
+def _make_traceparent(event_id: str) -> str:
+    """由 eventId 派生标准 W3C traceparent (根 span, sampled)"""
+    cleaned = event_id.replace("-", "").lower()
+    if not re.match(r"^[0-9a-f]{32}$", cleaned):
+        cleaned = hashlib.md5(event_id.encode("utf-8")).hexdigest()
+    return f"00-{cleaned}-{uuid.uuid4().hex[:16]}-01"
+
+
 def send_to_kafka(event: dict, hostname: str):
-    """将事件发送到 Kafka（带数据源认证信息）"""
+    """将事件发送到 Kafka（带数据源认证信息 + W3C traceparent）"""
     msg = {
         "eventId": str(uuid.uuid4()),
         "sourceId": f"syslog-{hostname}",
@@ -120,17 +129,23 @@ def send_to_kafka(event: dict, hostname: str):
         "rawData": event,
     }
     try:
+        headers = [
+            ("traceparent", _make_traceparent(msg["eventId"]).encode("utf-8")),
+            ("trace_id", msg["eventId"].encode("utf-8")),
+        ]
         OutputConfig.kafka_producer.send(
             KAFKA_TOPIC_RAW,
             key=msg["srcIp"].encode("utf-8") if msg["srcIp"] else None,
             value=json.dumps(msg, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
         )
     except Exception as e:
         log.warning(f"Kafka 发送失败: {e}")
 
 
 def send_to_http(event: dict, hostname: str):
-    """将事件 POST 到 SOC 平台（旧版 HTTP 直连）"""
+    """将事件 POST 到 SOC 平台（旧版 HTTP 直连, 带 W3C traceparent）"""
+    event_id = str(uuid.uuid4())
     body = json.dumps({
         "message": event,
         "session_id": "linux-" + hostname,
@@ -138,7 +153,13 @@ def send_to_http(event: dict, hostname: str):
     try:
         req = urllib.request.Request(
             f"{OutputConfig.SO_URL}/api/logs/ingest",
-            data=body, headers={"Content-Type": "application/json"}, method="POST",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "traceparent": _make_traceparent(event_id),
+                "trace_id": event_id,
+            },
+            method="POST",
         )
         urllib.request.urlopen(req, timeout=10).read()
     except Exception as e:

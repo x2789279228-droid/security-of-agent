@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.soc.model.SecurityEvent;
 import com.soc.util.KafkaConfig;
 import com.soc.util.TraceIdHeaderProvider;
+import com.soc.util.TraceUtil;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.state.ValueState;
@@ -331,6 +332,19 @@ public class LogValidationJob {
                                    KeyedProcessFunction<String, SecurityEvent, SecurityEvent>.Context ctx,
                                    Collector<SecurityEvent> out) {
 
+            // 每事件标准 span (OTel → Tempo); 父级 = 由 traceId 派生的上游 traceparent
+            java.util.Map<String, String> attrs = new java.util.HashMap<>();
+            attrs.put("soc.event_id", String.valueOf(event.getEventId()));
+            attrs.put("soc.event_type", String.valueOf(event.getEventType()));
+            attrs.put("soc.src_ip", String.valueOf(event.getSrcIp()));
+            attrs.put("soc.severity", String.valueOf(event.getSeverity()));
+            attrs.put("soc.job", "LogValidation");
+            attrs.put("soc.stage", "validate");
+            io.opentelemetry.api.trace.Span traceSpan = TraceUtil.startSpan(
+                    "soc.logval.validate",
+                    TraceUtil.makeRootTraceparent(event.getTraceId() != null ? event.getTraceId() : ""),
+                    attrs);
+            try {
             totalCounter.inc();
 
             // ========== 第一步：Schema 校验（增强）==========
@@ -370,7 +384,22 @@ public class LogValidationJob {
 
             // ========== 验证通过 ==========
             validCounter.inc();
+            // 附上本 span 的 traceparent 供下游 (AnomalyDetection/Python) 继承
+            Map<String, Object> raw = event.getRawData();
+            if (raw == null) {
+                raw = new HashMap<>();
+                event.setRawData(raw);
+            }
+            raw.put("_traceparent", TraceUtil.traceparentOf(traceSpan));
             out.collect(event);
+            } catch (Exception e) {
+                traceSpan.recordException(e);
+                traceSpan.setStatus(io.opentelemetry.api.trace.StatusCode.ERROR,
+                        String.valueOf(e.getMessage()));
+                throw e instanceof RuntimeException ? (RuntimeException) e : new RuntimeException(e);
+            } finally {
+                traceSpan.end();
+            }
         }
 
         /**

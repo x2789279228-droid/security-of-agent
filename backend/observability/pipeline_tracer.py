@@ -1,26 +1,18 @@
 """
-流水线 Span 追踪 (Pipeline Tracer)
+流水线 Span 追踪 (Pipeline Tracer) — OpenTelemetry 标准化
 
-为 Audit-LLM 全链路提供轻量级阶段追踪。
-每个阶段产生一条 Span，记录开始/结束时间、状态、错误信息。
+为 Audit-LLM 全链路提供阶段追踪。每个阶段产生一条 Span。
+当 OTel 可用且启用时, span 与标准 OTel/Tempo 体系互通 (W3C 上下文父子关系,
+trace_id 关联), 否则回退为纯内存/落库实现 (API 完全兼容)。
 
 存储:
+  - OTel: 导出到 otel-collector → Tempo (标准体系)
   - 内存环形缓冲（最近 500 条）— 快速查询
-  - 异步落库 pipeline_spans 表 — 持久化历史
+  - 异步落库 pipeline_spans 表 — 持久化历史 (含 trace_id 列)
 
-埋点方式:
-  # 上下文管理器（推荐）
+埋点方式 (API 不变):
   with pipeline_tracer.span("decomposer", event_id=123):
       result = await decomposer.decompose(...)
-
-  # 装饰器
-  @pipeline_tracer.traced("executor")
-  async def execute(...): ...
-
-  # 手动
-  sp = pipeline_tracer.start_span("reviewer", event_id=123)
-  ...
-  pipeline_tracer.end_span(sp, error="timeout")
 """
 import asyncio
 import logging
@@ -31,6 +23,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +48,13 @@ STATUS_SUCCESS = "success"
 STATUS_ERROR = "error"
 STATUS_TIMEOUT = "timeout"
 
+# ── OpenTelemetry 可选集成 ──
+try:
+    from opentelemetry import trace as otel_trace
+    HAS_OTEL = True
+except ImportError:
+    HAS_OTEL = False
+
 
 @dataclass
 class Span:
@@ -69,6 +70,8 @@ class Span:
     error: str = ""
     metadata: dict = field(default_factory=dict)
     created_at: str = ""
+    trace_id: str = ""           # W3C trace-id (32 hex), 关联标准 trace 树
+    _otel_span: object = None    # 内部: OTel span 句柄 (非 dataclass 字段输出)
 
     def __post_init__(self):
         if not self.created_at:
@@ -91,6 +94,7 @@ class Span:
             "error": self.error,
             "metadata": self.metadata,
             "created_at": self.created_at,
+            "trace_id": self.trace_id,
         }
 
 
@@ -109,6 +113,9 @@ class PipelineTracer:
 
     # ── Span 生命周期 ──
 
+    def _otel_enabled(self) -> bool:
+        return HAS_OTEL and settings.otel_enabled
+
     def start_span(
         self,
         stage: str,
@@ -116,7 +123,26 @@ class PipelineTracer:
         session_id: str = "",
         metadata: Optional[dict] = None,
     ) -> Span:
-        """开始一条 Span"""
+        """开始一条 Span (OTel 可用时同步创建标准 span, 继承当前上下文父级)"""
+        otel_span = None
+        trace_id = ""
+        if self._otel_enabled():
+            try:
+                tracer = otel_trace.get_tracer("soc-backend", "2.0.0")
+                otel_span = tracer.start_span(
+                    f"pipeline.{stage}",
+                    attributes={
+                        "soc.stage": stage,
+                        "soc.event_id": event_id,
+                        "soc.session_id": session_id or "",
+                    },
+                )
+                sc = otel_span.get_span_context()
+                if sc and sc.is_valid:
+                    trace_id = format(sc.trace_id, "032x")
+            except Exception as e:
+                logger.debug(f"OTel start_span failed: {e}")
+                otel_span = None
         span = Span(
             span_id=uuid.uuid4().hex[:12],
             event_id=event_id,
@@ -125,20 +151,22 @@ class PipelineTracer:
             status=STATUS_RUNNING,
             start_time=time.time(),
             metadata=metadata or {},
+            trace_id=trace_id,
+            _otel_span=otel_span,
         )
         self._active[span.span_id] = span
-        logger.debug(f"[Span] START {stage} event=#{event_id} span={span.span_id}")
+        logger.debug(f"[Span] START {stage} event=#{event_id} span={span.span_id} trace={trace_id[:8] or '-'}")
         return span
 
     def end_span(self, span: Span, error: str = "", metadata: Optional[dict] = None):
-        """结束一条 Span"""
+        """结束一条 Span (同步结束 OTel span)"""
         span.end_time = time.time()
         span.latency_ms = (span.end_time - span.start_time) * 1000
         span.status = STATUS_ERROR if error else STATUS_SUCCESS
         span.error = error[:500] if error else ""
         if metadata:
             span.metadata.update(metadata)
-
+        self._finalize_otel(span, error)
         self._active.pop(span.span_id, None)
         self._buffer.append(span)
 
@@ -155,17 +183,36 @@ class PipelineTracer:
             self._persist_span(span)
 
     def mark_timeout(self, span: Span):
-        """标记 Span 超时"""
+        """标记 Span 超时 (同步结束 OTel span)"""
         span.end_time = time.time()
         span.latency_ms = (span.end_time - span.start_time) * 1000
         span.status = STATUS_TIMEOUT
         span.error = f"Stage timed out after {span.latency_ms:.0f}ms"
+        self._finalize_otel(span, span.error)
         self._active.pop(span.span_id, None)
         self._buffer.append(span)
         logger.warning(
             f"[Span] TIMEOUT {span.stage} event=#{span.event_id} "
             f"latency={span.latency_ms:.0f}ms"
         )
+
+    def _finalize_otel(self, span: Span, error: str = ""):
+        """结束 OTel span 并写状态/属性"""
+        if not span._otel_span:
+            return
+        try:
+            if error:
+                span._otel_span.set_status(otel_trace.Status(otel_trace.StatusCode.ERROR, error[:500]))
+                span._otel_span.record_exception(Exception(error[:500]) if error else None)
+            else:
+                span._otel_span.set_status(otel_trace.Status(otel_trace.StatusCode.OK))
+            if span.metadata:
+                for k, v in span.metadata.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        span._otel_span.set_attribute(f"soc.{k}", v)
+            span._otel_span.end()
+        except Exception as e:
+            logger.debug(f"OTel end_span failed: {e}")
 
     @contextmanager
     def span(
@@ -175,10 +222,14 @@ class PipelineTracer:
         session_id: str = "",
         metadata: Optional[dict] = None,
     ):
-        """上下文管理器 — 自动 start/end span"""
+        """上下文管理器 — 自动 start/end span (OTel 时使 span 成为当前, 子调用挂其下)"""
         sp = self.start_span(stage, event_id, session_id, metadata)
         try:
-            yield sp
+            if sp._otel_span is not None:
+                with otel_trace.use_span(sp._otel_span, end_on_exit=False):
+                    yield sp
+            else:
+                yield sp
             self.end_span(sp)
         except asyncio.TimeoutError:
             self.mark_timeout(sp)
@@ -306,6 +357,7 @@ class PipelineTracer:
                             end_time=span.end_time,
                             latency_ms=span.latency_ms,
                             error=span.error,
+                            trace_id=span.trace_id,
                             metadata_=span.metadata,
                         ))
                         await session.commit()

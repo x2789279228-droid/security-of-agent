@@ -107,6 +107,55 @@ docker compose restart backend
 curl -s localhost:8001/api/pipeline/status
 ```
 
+## 可观测性 (标准 OpenTelemetry + Grafana Tempo/Prometheus)
+
+```
+[日志源] ──traceparent(Kafka/HTTP header)──▶
+   [Flink 1.19·Java] 每事件 span (作业内 OTel SDK → OTLP)
+              │ 写 traceparent header + payload._traceparent
+              ▼
+   [Python·FastAPI] HTTP span(自定义ASGI中间件) + kafka.consume 根span + pipeline span
+              │ OTLP gRPC 4317
+              ▼
+      [otel-collector] ─OTLP HTTP─▶ [Grafana Tempo] ─▶ [Grafana]
+                                    (Tempo + Prometheus 数据源)
+                                            ▲
+                                   [Prometheus] (Flink 9250/9251 + Python /metrics)
+```
+
+**架构要点**:
+
+- **W3C traceparent** 全链路贯通: 日志源 → Flink (`TraceIdHeaderProvider` 写 header,
+  `TraceUtil` 每事件 span 并把 `_traceparent` 附回 payload) → Python
+  (consumer 解析 header/payload 建根 span) → PG 存储/LLM 审计。
+- **Flink 每事件 span**: `soc.logval.validate` → `soc.anomaly.score` → Python
+  `kafka.consume.*` 形成同一 trace 树 (父子正确)。OTLP 端点
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (默认 otel-collector:4317)。
+- **Python OTel**: SDK 初始化于 `otel_setup.py`, HTTP 用自定义 ASGI 中间件
+  (响应头回传 `traceparent`); `pipeline_tracer` 保持原 API, 内部挂 OTel span 并记录 trace_id。
+- **采样**: 当前全量导出 (SOC 事件量级适中); 采样可在 SDK sampler 或 collector 后续版本开启。
+- **关联**: Prometheus 数据源配置了 `exemplarTraceIdDestinations` (trace_id), 指标可跳 Tempo。
+
+**访问入口**:
+
+| 入口 | 地址 | 说明 |
+|------|------|------|
+| Grafana | `http://<host>:3002/grafana/` | Basic Auth (同 Flink htpasswd); Tempo+Prometheus 数据源已预配 |
+| 后端 trace API | `GET /api/observability/traces` + `/{trace_id}` | 需 admin; 聚合 Tempo span 树 + pipeline_spans |
+| 前端 | 运营中心 → 链路追踪 Tab | 瀑布时间线 + Grafana 深链 |
+| Flink 指标 | `:9250/:9251/metrics` | Prometheus 抓取 |
+| Python 指标 | `GET /metrics` | Prometheus 抓取 |
+
+**已知操作要点** (从端到端验证沉淀):
+
+- Kafka 单 broker 需 `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1` 和
+  `KAFKA_TRANSACTION_MAX_TIMEOUT_MS=3600000` (Flink EXACTLY_ONCE sink 的
+  transaction.timeout.ms 默认 1h), 否则 InitProducerId 失败。
+- Flink TaskManager slots 需 ≥ 作业并行度之和 (2 作业 × 3 并行 → 6 slots),
+  否则槽位饥饿导致恰好一次 sink 超时。
+- `flink_state` 卷所有权须为 flink 用户 (uid 9999), 否则 checkpoint 目录创建失败:
+  `docker run --rm -v shared-memory-platform_flink_state:/var/flink-state alpine chown -R 9999:9999 /var/flink-state`
+
 ## CI/CD 流水线
 
 | 工作流 | 触发 | 作用 |

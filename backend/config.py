@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # Flink JobManager REST (管道状态聚合, 见 routers/kafka.py)
     flink_jobmanager_url: str = "http://flink-jobmanager:8081"
 
+    # ── OpenTelemetry (标准 trace 体系 → otel-collector → Tempo) ──
+    otel_enabled: bool = True
+    otel_endpoint: str = "http://otel-collector:4317"
+    env_name: str = "dev"
+
     # 数据源认证
     source_api_keys: str = '{"soc-syslog-2024":"syslog-adapter","soc-api-2024":"api-client","soc-simulator-2024":"log-simulator"}'
 

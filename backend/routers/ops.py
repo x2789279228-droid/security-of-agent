@@ -130,6 +130,163 @@ async def observability_spans(
     )
 
 
+@router.get("/observability/traces")
+async def observability_trace_list(
+    limit: int = Query(20, ge=1, le=100),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """列出最近 W3C trace_id — 优先来自 Grafana Tempo (标准 trace 事实源)"""
+    import httpx
+    from datetime import datetime, timezone, timedelta
+
+    traces: list[dict] = []
+    try:
+        now = datetime.now(timezone.utc)
+        end = int(now.timestamp())
+        start = int((now - timedelta(hours=24)).timestamp())
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(
+                "http://tempo:3200/api/search",
+                params={"start": start, "end": end, "limit": limit},
+            )
+            if r.status_code == 200:
+                for t in r.json().get("traces", []):
+                    traces.append({
+                        "trace_id": t.get("traceID", ""),
+                        "last_seen": t.get("startTimeUnixNano", 0),
+                        "root_service": t.get("rootServiceName", ""),
+                        "root_span": t.get("rootSpanName", ""),
+                        "duration_ms": t.get("durationMs", 0),
+                    })
+    except Exception as e:
+        logger.warning(f"[Traces] Tempo 查询失败: {e}")
+
+    # 补充 pipeline_spans 中的 trace (LLM 审计链路)
+    if len(traces) < limit:
+        from models import PipelineSpan, async_session as db_session
+        async with db_session() as session:
+            stmt = (
+                select(PipelineSpan.trace_id, func.max(PipelineSpan.created_at).label("last_seen"))
+                .where(PipelineSpan.trace_id != "")
+                .group_by(PipelineSpan.trace_id)
+                .order_by(desc("last_seen"))
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).all()
+            known = {t["trace_id"] for t in traces}
+            for r in rows:
+                if r.trace_id not in known:
+                    traces.append({
+                        "trace_id": r.trace_id,
+                        "last_seen": r.last_seen.isoformat() if r.last_seen else "",
+                        "root_service": "soc-backend",
+                        "root_span": "pipeline",
+                        "duration_ms": 0,
+                    })
+            traces = traces[:limit]
+
+    return {"traces": traces}
+
+
+@router.get("/observability/traces/{trace_id}")
+async def observability_trace_detail(
+    trace_id: str,
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """按 W3C trace_id 拉全链路: Tempo 完整 span 树 + pipeline_spans + 关联事件"""
+    import httpx
+    from observability.pipeline_tracer import pipeline_tracer
+
+    # 1) 标准事实源: Tempo 完整 span 树 (Flink + Python)
+    tempo_spans: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(f"http://tempo:3200/api/traces/{trace_id}")
+            if r.status_code == 200:
+                for b in r.json().get("batches", []):
+                    svc = "?"
+                    for a in b["resource"]["attributes"]:
+                        if a["key"] == "service.name":
+                            svc = a["value"].get("stringValue", "?")
+                    for ss in b.get("scopeSpans", []):
+                        for sp in ss.get("spans", []):
+                            dur_ms = (int(sp.get("endTimeUnixNano", 0)) - int(sp.get("startTimeUnixNano", 0))) / 1e6
+                            attrs = {
+                                a["key"]: a["value"].get("stringValue", "")
+                                for a in sp.get("attributes", [])
+                            }
+                            tempo_spans.append({
+                                "service": svc,
+                                "name": sp.get("name", ""),
+                                "span_id": sp.get("spanId", "")[:12],
+                                "parent_span_id": sp.get("parentSpanId", ""),
+                                "start_time": int(sp.get("startTimeUnixNano", 0)) / 1e9,
+                                "latency_ms": round(dur_ms, 1),
+                                "status": attrs.get("soc.stage", "unknown"),
+                                "stage": attrs.get("soc.stage", ""),
+                                "event_type": attrs.get("soc.event_type", ""),
+                                "src_ip": attrs.get("soc.src_ip", ""),
+                                "importance": attrs.get("soc.importance", ""),
+                            })
+    except Exception as e:
+        logger.warning(f"[Traces] Tempo 详情查询失败: {e}")
+
+    # 2) pipeline_spans (LLM 审计链路)
+    from models import PipelineSpan, SecurityEvent, async_session as db_session
+    async with db_session() as session:
+        stmt = (
+            select(PipelineSpan)
+            .where(PipelineSpan.trace_id == trace_id)
+            .order_by(PipelineSpan.start_time)
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        pipe_spans = [
+            {
+                "service": "soc-backend",
+                "name": f"pipeline.{r.stage}",
+                "span_id": r.span_id,
+                "parent_span_id": "",
+                "start_time": r.start_time,
+                "latency_ms": round(r.latency_ms, 1),
+                "status": r.status,
+                "stage": r.stage,
+                "event_id": r.event_id,
+                "session_id": r.session_id,
+                "error": r.error,
+            }
+            for r in rows
+        ]
+        # 关联事件 (raw_data 内含 _trace_id) — 用 raw SQL 规避 JSON 类型差异
+        from sqlalchemy import text as sa_text
+        ev_stmt = sa_text(
+            "SELECT id, event_type, severity, src_ip, anomaly_score, created_at "
+            "FROM security_events WHERE raw_data->>'_trace_id' = :tid "
+            "ORDER BY created_at DESC LIMIT 5"
+        ).bindparams(tid=trace_id)
+        ev_rows = (await session.execute(ev_stmt)).mappings().all()
+        events = [
+            {
+                "id": e["id"], "event_type": e["event_type"], "severity": e["severity"],
+                "src_ip": e["src_ip"], "anomaly_score": e["anomaly_score"],
+                "created_at": str(e["created_at"]) if e["created_at"] else "",
+            }
+            for e in ev_rows
+        ]
+
+    spans = tempo_spans + pipe_spans
+    spans.sort(key=lambda s: s.get("start_time", 0))
+    return {
+        "trace_id": trace_id,
+        "span_count": len(spans),
+        "spans": spans,
+        "events": events,
+        # Grafana Tempo 深链 (在 Tempo 搜索框输入 trace_id 可查看完整瀑布)
+        "grafana_url": "http://localhost:3002/grafana/explore?schemaVersion=1&panes=%7B%22a%22%3A%7B%22datasource%22%3A%7B%22type%22%3A%22tempo%22%2C%22uid%22%3A%22tempo%22%7D%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22queryType%22%3A%22traceql%22%2C%22query%22%3A%22%7B%7D%22%7D%5D%7D%7D",
+        "trace_id_note": "在 Grafana Tempo 的 Search→Trace ID 输入框粘贴本 trace_id 可看完整瀑布图",
+    }
+
+
+
 @router.get("/observability/diagnostics")
 async def observability_diagnostics(
     limit: int = Query(20, ge=1, le=100),

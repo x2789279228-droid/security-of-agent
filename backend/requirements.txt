@@ -13,7 +13,12 @@ numpy>=2.0,<3
 sse-starlette>=2.2,<3
 aiokafka>=0.12,<1
 jsonschema>=4.23,<5         # Flink↔Python 跨运行时 Schema 校验
-prometheus-fastapi-instrumentator>=6.0,<7  # /metrics 指标出口
+prometheus-client>=0.21,<1  # /metrics 指标出口 (轻量, 兼容 FastAPI 0.14x)
+# OpenTelemetry 标准 trace (→ otel-collector → Grafana Tempo)
+opentelemetry-api>=1.27,<2
+opentelemetry-sdk>=1.27,<2
+opentelemetry-exporter-otlp>=1.27,<2
+opentelemetry-instrumentation-httpx>=0.48b0,<1
 paramiko>=3.4,<4
 cryptography>=42.0,<44
 # ── NDR 扩展依赖 ──
