@@ -69,7 +69,7 @@ async def agent_traces_by_event(
         event_type=event_type, severity=severity,
     )
     data["budget"] = cost_tracker.stats()
-    data["estimated_cost_jpy"] = round(cost_tracker.estimate_cost_jpy(
+    data["estimated_cost_yuan"] = round(cost_tracker.estimate_cost_yuan(
         data["grand"]["prompt_tokens"], data["grand"]["completion_tokens"]
     ), 4)
     return data
@@ -80,13 +80,15 @@ async def agent_traces_daily(
     days: int = Query(14, ge=1, le=365, description="趋势窗口(天)"),
     user: UserInfo = Depends(RequireRole("admin")),
 ):
-    """近 N 天每日 token 用量趋势"""
-    from eval_repository import get_daily_token_usage
+    """近 N 天每日 token 用量趋势 + 按调用来源模块分账"""
+    from eval_repository import get_daily_token_usage, get_cost_by_caller
     from summary_compression import cost_tracker
 
     points = await get_daily_token_usage(days=days)
+    by_caller = await get_cost_by_caller(days=days)
     return {
         "points": points,
+        "by_caller": by_caller,
         "budget": cost_tracker.stats(),
     }
 
@@ -423,6 +425,67 @@ async def ops_sla(
     }
 
 
+@router.get("/ops/competition-metrics")
+async def competition_metrics(
+    days: int = Query(30, le=365),
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(get_current_user),
+):
+    """竞赛量化指标仪表板 — MTTD/MTTR/准确率/自动化率/误报率"""
+    from datetime import datetime, timezone, timedelta
+    from ops_metrics.kpi_calculator import kpi_calculator
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+
+    metrics = {
+        "mttd_hours": await kpi_calculator.compute_mttd(session, start=start, end=end),
+        "mttr_hours": await kpi_calculator.compute_mttr(session, start=start, end=end),
+        "automation_rate": await kpi_calculator.compute_automation_rate(session, start=start, end=end),
+        "grounding_pass_rate": await kpi_calculator.compute_grounding_pass_rate(session, start=start, end=end),
+        "fp_rate": await kpi_calculator.compute_fp_rate(session, start=start, end=end),
+        "case_count": await kpi_calculator.compute_case_count(session, start=start, end=end),
+        "sla_breach_rate": await kpi_calculator.compute_sla_breach_rate(session, start=start, end=end),
+    }
+
+    # 安全事件统计
+    from sqlalchemy import func as sqlfunc
+    total_events = (await session.execute(
+        sqlfunc.count(SecurityEvent.id)
+    )).scalar() or 0
+    analyzed_events = (await session.execute(
+        sqlfunc.count(SecurityEvent.id).where(SecurityEvent.analyzed == True)
+    )).scalar() or 0
+
+    return {
+        "period_days": days,
+        "metrics": metrics,
+        "events": {
+            "total": total_events,
+            "analyzed": analyzed_events,
+            "analysis_rate": round(analyzed_events / total_events, 4) if total_events > 0 else 0,
+        },
+        "capability_tiers": {
+            "L1_基础感知": {
+                "sigma_rules": 11,
+                "cep_patterns": 3,
+                "anomaly_dimensions": 3,
+            },
+            "L2_智能研判": {
+                "audit_pipeline_layers": 4,
+                "grounding_verifier_layers": 7,
+                "cad_supervision": True,
+            },
+            "L3_自主处置": {
+                "response_policies": 8,
+                "action_types": 5,
+                "safe_executor_layers": 6,
+                "mcp_guard_layers": 4,
+            },
+        },
+    }
+
+
 # ── 事件运营闭环端点 ──
 
 # 案例管理
@@ -668,6 +731,17 @@ async def sandbox_test_rule(body: dict, user: UserInfo = Depends(RequireRole("ad
 async def sigma_rule_toggle(rule_id: str, user: UserInfo = Depends(RequireRole("admin"))):
     """启用/停用 Sigma 规则"""
     from sigma_detector import sigma_detector
+    if hasattr(sigma_detector, "reload"):
+        from sigma_engine import store
+        cur = store.get_rule(rule_id)
+        if not cur:
+            return {"success": False, "error": f"规则 {rule_id} 不存在"}
+        enable = not bool(cur.get("x-soc-enabled", True))
+        res = store.toggle(rule_id, enable)
+        if res["success"]:
+            sigma_detector.reload()
+            return {"success": True, "rule_id": rule_id, "enabled": enable}
+        return res
     for r in sigma_detector.rules:
         if r.rule_id == rule_id:
             r.enabled = not r.enabled
@@ -678,6 +752,17 @@ async def sigma_rule_toggle(rule_id: str, user: UserInfo = Depends(RequireRole("
 async def sigma_rule_shadow(rule_id: str, user: UserInfo = Depends(RequireRole("admin"))):
     """切换 Sigma 规则灰度模式（shadow: 仅记录不触发响应）"""
     from sigma_detector import sigma_detector
+    if hasattr(sigma_detector, "reload"):
+        from sigma_engine import store
+        cur = store.get_rule(rule_id)
+        if not cur:
+            return {"success": False, "error": f"规则 {rule_id} 不存在"}
+        on = not bool(cur.get("x-soc-shadow", False))
+        res = store.shadow(rule_id, on)
+        if res["success"]:
+            sigma_detector.reload()
+            return {"success": True, "rule_id": rule_id, "shadow_mode": on}
+        return res
     for r in sigma_detector.rules:
         if r.rule_id == rule_id:
             r.shadow_mode = not r.shadow_mode

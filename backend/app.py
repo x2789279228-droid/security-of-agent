@@ -259,15 +259,68 @@ async def lifespan(app: FastAPI):
 # 应用实例 + 中间件
 # ════════════════════════════════════════════
 
-app = FastAPI(title="共享记忆服务层", version="2.0.0", lifespan=lifespan)
+import os
+_is_prod = os.environ.get("SHARED_MEMORY_ENV_NAME", settings.env_name) == "prod"
+
+app = FastAPI(
+    title="共享记忆服务层",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url=None if _is_prod else "/docs",
+    redoc_url=None if _is_prod else "/redoc",
+    openapi_url=None if _is_prod else "/openapi.json",
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=json.loads(settings.allowed_origins),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
+
+# ── 全局认证中间件 ──
+# 所有 /api/* 端点默认需要 JWT 认证 (Bearer header 或 ?token= query param)
+# 白名单路径无需认证
+
+_PUBLIC_PATHS = frozenset({
+    "/api/auth/login",
+    "/api/health",
+    "/docs", "/redoc", "/openapi.json",
+    "/metrics",
+})
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path not in _PUBLIC_PATHS:
+        # 支持 Authorization header 和 query param (SSE EventSource 不支持自定义 header)
+        token = None
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        elif "token" in request.query_params:
+            token = request.query_params["token"]
+
+        if not token:
+            return JSONResponse(status_code=401, content={"detail": "Missing authorization"})
+
+        try:
+            import jwt as _jwt
+            payload = _jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+            request.state.user = payload
+        except _jwt.ExpiredSignatureError:
+            return JSONResponse(status_code=401, content={"detail": "Token expired"})
+        except _jwt.InvalidTokenError:
+            return JSONResponse(status_code=401, content={"detail": "Invalid token"})
+
+    response = await call_next(request)
+    # 移除 Server 版本头 (starlette MutableHeaders 无 dict.pop, 用 del + 存在性检查)
+    if "server" in response.headers:
+        del response.headers["server"]
+    return response
+
 
 # ── 速率限制中间件 ──
 
@@ -314,6 +367,7 @@ from routers.phishing import router as phishing_router
 from routers.ndr import router as ndr_router
 from routers.edr_intel import router as edr_intel_router
 from routers.ops import router as ops_router
+from routers.capabilities import router as capabilities_router
 
 app.include_router(auth_router)
 app.include_router(sources_router)
@@ -326,6 +380,7 @@ app.include_router(response_router)
 app.include_router(rag_router)
 app.include_router(phishing_router)
 app.include_router(ndr_router)
+app.include_router(capabilities_router)
 app.include_router(edr_intel_router)
 app.include_router(ops_router)
 

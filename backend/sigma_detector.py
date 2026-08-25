@@ -529,5 +529,31 @@ class SigmaDetector:
         }
 
 
-# 全局单例
-sigma_detector = SigmaDetector()
+# 全局单例（按配置选择引擎）
+#   pySigma 档: 真 Sigma 引擎, 从 backend/sigma_engine/rules/*.yml 加载规则(pySigma + SQLite backend)
+#   legacy 档:  原纯 dict 匹配(内置规则), 作为降级兜底
+sigma_detector_legacy = SigmaDetector()   # 保留 legacy 实例供降级/切片测试
+
+
+def _build_default_detector():
+    try:
+        from config import settings
+        mode = (getattr(settings, "sigma_engine", "pySigma") or "pySigma").lower()
+    except Exception:
+        mode = "pySigma"
+    if mode != "pysigma":
+        logger.info(f"[Sigma] engine=legacy (cfg={mode})")
+        return sigma_detector_legacy
+    try:
+        from sigma_engine import build_pysigma_detector
+        det = build_pysigma_detector(enforce=True)
+        if getattr(det, "_compiled", None):
+            logger.info(f"[Sigma] engine=pySigma ({len(det._compiled)} rules from YAML)")
+            return det
+        logger.warning("[Sigma] pySigma enabled but no rules compiled; fallback legacy")
+    except Exception as e:
+        logger.warning(f"[Sigma] pySigma unavailable, fallback legacy: {e}")
+    return sigma_detector_legacy
+
+
+sigma_detector = _build_default_detector()

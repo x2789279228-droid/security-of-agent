@@ -32,6 +32,72 @@ KAFKA_CONSUMED = Counter(
     ["topic"],
 )
 
+# ── B 类高级能力指标 (NDR/EDR/威胁情报/0day/反钓鱼) ──
+NDR_FLOWS = Counter("soc_ndr_flows_total", "NDR 网络流计数", ["protocol"])
+TLS_SESSIONS = Counter("soc_tls_sessions_total", "TLS 会话计数")
+CAPTURE_PACKETS = Counter("soc_capture_packets_total", "NDR 抓包计数")
+EDR_EVENTS = Counter("soc_edr_events_total", "EDR 事件计数(按源)", ["source"])
+INTEL_IOC = Counter("soc_intel_ioc_total", "威胁情报 IOC 拉取计数(按源)", ["source"])
+IOC_MATCHES = Counter("soc_ioc_matches_total", "IOC 匹配命中计数")
+SANDBOX_SUBMISSIONS = Counter("soc_sandbox_submissions_total", "沙箱提交计数(按类型)", ["kind"])
+PHISHING_DETECTIONS = Counter("soc_phishing_detections_total", "反钓鱼检测计数(按类别)", ["category"])
+
+
+def inc_ndr_flow(protocol: str = "tcp") -> None:
+    try:
+        NDR_FLOWS.labels(protocol=protocol or "tcp").inc()
+    except Exception:
+        pass
+
+
+def inc_tls_session() -> None:
+    try:
+        TLS_SESSIONS.inc()
+    except Exception:
+        pass
+
+
+def inc_capture_packet() -> None:
+    try:
+        CAPTURE_PACKETS.inc()
+    except Exception:
+        pass
+
+
+def inc_edr_event(source: str = "sysmon") -> None:
+    try:
+        EDR_EVENTS.labels(source=source or "sysmon").inc()
+    except Exception:
+        pass
+
+
+def inc_intel_ioc(source: str = "misp") -> None:
+    try:
+        INTEL_IOC.labels(source=source or "misp").inc()
+    except Exception:
+        pass
+
+
+def inc_ioc_match() -> None:
+    try:
+        IOC_MATCHES.inc()
+    except Exception:
+        pass
+
+
+def inc_sandbox_submission(kind: str = "file") -> None:
+    try:
+        SANDBOX_SUBMISSIONS.labels(kind=kind or "file").inc()
+    except Exception:
+        pass
+
+
+def inc_phishing_detection(category: str = "email") -> None:
+    try:
+        PHISHING_DETECTIONS.labels(category=category or "email").inc()
+    except Exception:
+        pass
+
 # 供 kafka_consumer 注入消费统计
 def inc_kafka_consumed(topic: str) -> None:
     try:

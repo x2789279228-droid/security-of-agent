@@ -9,12 +9,14 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model: str = ""
+    # Audit 路径默认关掉 thinking/reasoning（网关不认则自动剥离重试）
+    llm_reasoning_effort: str = "none"
 
     # Embedding
     embedding_api_key: str = ""
     embedding_base_url: str = ""
     embedding_model: str = ""
-    embedding_dim: int = 1024
+    embedding_dim: int = 768
 
     # Service
     storage_backend: str = "redis"           # "redis" | "deque"
@@ -22,6 +24,14 @@ class Settings(BaseSettings):
     sliding_window_minutes: int = 15         # 时间窗口（分钟）
     embedding_cache_ttl: int = 3600
     vector_search_threshold: float = 0.75
+
+    # Qdrant 向量数据库 (RAG 知识库检索; 空则禁用 Qdrant, 回退 pgvector)
+    qdrant_url: str = ""                     # 例: http://qdrant:6333
+    qdrant_collection: str = "soc_knowledge_chunks"
+    qdrant_memories_collection: str = "agent_memories"   # agent 记忆向量 collection
+    qdrant_vector_size: int = 0              # 0 则取 embedding_dim
+    qdrant_enabled: bool = True              # True=优先用 Qdrant 检索, 不可用时回退 pgvector
+    qdrant_timeout: float = 5.0
 
     # Log Ingestion
     log_batch_size: int = 20                 # 累积多少条触发自动分析
@@ -53,6 +63,7 @@ class Settings(BaseSettings):
     kafka_topic_audit_results: str = "security-audit-results"
     kafka_topic_cep_partial: str = "security-cep-partial"
     kafka_topic_cep_patterns: str = "security-cep-patterns"
+    kafka_topic_sigma_hit: str = "security-sigma-hit"   # pySigma 聚合候选 → Flink 阈值窗口
     kafka_consumer_group: str = "soc-backend"
     kafka_enabled: bool = False              # True=Kafka 模式, False=兼容旧 HTTP 直连模式
     # Confluent Schema Registry (跨运行时 Schema 契约, 见 schema_registry.py)
@@ -64,6 +75,15 @@ class Settings(BaseSettings):
     otel_enabled: bool = True
     otel_endpoint: str = "http://otel-collector:4317"
     env_name: str = "dev"
+
+    # ── Temporal (4 层 Agent 编排: 可靠性/长任务/可视化) ──
+    temporal_enabled: bool = False        # True=用 Temporal 编排, False=回退 async 兜底
+    temporal_host: str = "temporal:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "audit-pipeline"
+
+    # Sigma 检测引擎: pySigma=真 Sigma(pySigma+SQLite backend 读 rules/*.yml), legacy=原纯 dict 匹配
+    sigma_engine: str = "pySigma"
 
     # 数据源认证
     source_api_keys: str = '{"soc-syslog-2024":"syslog-adapter","soc-api-2024":"api-client","soc-simulator-2024":"log-simulator"}'

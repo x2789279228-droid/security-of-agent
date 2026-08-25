@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["rag"])
 
+try:
+    from mcp_guard.approval_queue import ApprovalQueue
+    _kb_approval_queue = ApprovalQueue()
+except Exception:
+    _kb_approval_queue = None
+
 
 # ── RAG 知识库端点 ──
 
@@ -107,35 +113,23 @@ class RAGAddDocumentRequest(BaseModel):
     severity: str = "medium"
     tags: list[str] = []
 
-@router.post("/rag/documents")
-async def rag_add_document(
-    req: RAGAddDocumentRequest,
-    session: AsyncSession = Depends(get_session),
-    user: UserInfo = Depends(RequireRole("operator")),
-):
-    """添加知识文档（自动分块+向量化）"""
+
+async def _materialize_doc_chunks(session, doc: dict) -> int:
     from models import KnowledgeChunk
 
-    title = req.title
-    content = req.content
-    source = req.source
-    threat_types = req.threat_types
-    severity = req.severity
-    tags = req.tags
-
-    # 添加文档
-    doc = await kb_manager.add_document(
-        session, title, content, source, threat_types, severity, tags,
-    )
+    title = doc["title"]
+    content = doc.get("content") or ""
+    source = doc.get("source") or "internal"
+    threat_types = doc.get("threat_types") or []
+    severity = doc.get("severity") or "medium"
+    tags = doc.get("tags") or []
     doc_id = doc["id"]
 
-    # 分块
     chunks = security_chunker.chunk_document(
         doc_id, title, content, source, threat_types, severity, tags,
     )
-
-    # 计算向量并写入
     total_chunks = 0
+    qdrant_batch = []
     for chunk_data in chunks:
         vec = await embedder.embed(chunk_data["content"][:1000])
         chunk = KnowledgeChunk(
@@ -152,13 +146,105 @@ async def rag_add_document(
         )
         session.add(chunk)
         total_chunks += 1
-
+        qdrant_batch.append({
+            "chunk_id": chunk_data["chunk_id"],
+            "doc_id": chunk_data["doc_id"],
+            "vector": vec,
+        })
     await session.commit()
+    try:
+        from qdrant_store import qdrant_store
+        for item in qdrant_batch:
+            await qdrant_store.upsert_chunk(
+                chunk_id=item["chunk_id"],
+                doc_id=item["doc_id"],
+                vector=[float(x) for x in item["vector"]],
+                payload={
+                    "content": content[:1500],
+                    "title": title,
+                    "threat_types": list(threat_types or []),
+                    "severity": severity,
+                    "source": source,
+                    "tags": list(tags or []),
+                },
+            )
+    except Exception as qe:
+        logger.warning(f"[Qdrant] add_document 双写失败(降级 pgvector): {qe}")
+    return total_chunks
 
+
+@router.post("/rag/documents")
+async def rag_add_document(
+    req: RAGAddDocumentRequest,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("operator")),
+):
+    """添加知识文档。internal 须第二人审批后才向量化；签名导入源可直接入库。"""
+    # HTTP 入口一律当 internal：签名源只允许导入器/seeder 直写 kb_manager
+    source = "internal"
+    if req.source and req.source != "internal":
+        logger.warning(f"RAG API source {req.source} forced to internal by {user.username}")
+
+    doc = await kb_manager.add_document(
+        session, req.title, req.content, source, req.threat_types, req.severity, req.tags,
+        submitted_by=user.username,
+    )
+    doc_id = doc["id"]
+
+    if doc.get("approval_status") == "pending":
+        ticket = None
+        try:
+            if _kb_approval_queue is not None:
+                ticket = _kb_approval_queue.create_ticket(
+                    tool_name="rag.add_document",
+                    arguments={"doc_id": doc_id, "title": req.title},
+                    user_role=user.role,
+                    reason="internal KB 投毒门：待第二人审批",
+                    decision_reason="source=internal pending",
+                )
+        except Exception as e:
+            logger.warning(f"KB approval ticket failed: {e}")
+        return {
+            "doc_id": doc_id,
+            "title": req.title,
+            "chunks_created": 0,
+            "approval_status": "pending",
+            "ticket_id": (ticket or {}).get("ticket_id"),
+        }
+
+    total_chunks = await _materialize_doc_chunks(session, doc)
     return {
         "doc_id": doc_id,
-        "title": title,
+        "title": req.title,
         "chunks_created": total_chunks,
+        "approval_status": doc.get("approval_status"),
+    }
+
+
+@router.post("/rag/documents/{doc_id}/approve")
+async def rag_approve_document(
+    doc_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """第二人审批内部知识文档，通过后才分块向量化。"""
+    result = await kb_manager.approve_document(session, doc_id, approved_by=user.username)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error") or "审批失败")
+    doc = result["doc"]
+    # get_document 截断 content 到 500，审批后物化需完整正文
+    full = await kb_manager.get_document(session, doc_id)
+    from models import KnowledgeDoc
+    raw = await session.get(KnowledgeDoc, doc_id)
+    payload = dict(full or doc)
+    if raw is not None:
+        payload["content"] = raw.content
+    total_chunks = await _materialize_doc_chunks(session, payload)
+    return {
+        "doc_id": doc_id,
+        "approval_status": "approved",
+        "chunks_created": total_chunks,
+        "approved_by": user.username,
     }
 
 class RAGVerifyRequest(BaseModel):

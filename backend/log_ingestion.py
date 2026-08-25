@@ -32,7 +32,7 @@ from observability.pipeline_tracer import pipeline_tracer
 logger = logging.getLogger(__name__)
 
 # Prompt 版本追踪（修改 prompt 时递增）
-AUDIT_PROMPT_VERSION = "v2.1.0"
+AUDIT_PROMPT_VERSION = "v2.2.0"
 
 
 class LogIngestor:
@@ -41,68 +41,15 @@ class LogIngestor:
         self._analysis_lock = asyncio.Lock()
         self._review_semaphore = asyncio.Semaphore(5)
 
-    def _merge_rounds(self, all_rounds: list[dict]) -> dict:
+    def _merge_rounds(self, all_rounds: list[dict], log_data: dict = None) -> dict:
         """
-        合并多轮审核结果
+        合并多轮审核结果（PR1 / P0-4）
 
-        策略:
-        - 任意一轮发现威胁 → 最终为有威胁
-        - 置信度取加权平均（轮次越靠后权重越低: 0.6, 0.3, 0.1）
-        - severity 取最高严重度
-        - 所有遗漏合并去重
+        禁止 OR 合并。confirmed 必须绑定非 LLM 信号。
         """
-        if not all_rounds:
-            return {"threat_detected": False, "confidence": 0.0, "needs_human": False}
-
-        # 任意一轮发现威胁
-        threat_detected = any(
-            r["audit"].get("threat_detected", False) for r in all_rounds
-        )
-
-        # 加权置信度（轮次权重递减）
-        weights = [0.6, 0.3, 0.1]
-        total_weight = 0.0
-        weighted_conf = 0.0
-        for i, r in enumerate(all_rounds):
-            w = weights[i] if i < len(weights) else 0.05
-            weighted_conf += r["audit"].get("confidence", 0) * w
-            total_weight += w
-        confidence = weighted_conf / total_weight if total_weight > 0 else 0.0
-
-        # 最高严重度
-        severity_order = ["critical", "high", "medium", "low", "info"]
-        max_sev_idx = 4
-        for r in all_rounds:
-            sev = r["audit"].get("severity", "info")
-            if sev in severity_order:
-                idx = severity_order.index(sev)
-                if idx < max_sev_idx:
-                    max_sev_idx = idx
-        severity = severity_order[max_sev_idx]
-
-        # 需要人工介入（任意一轮要求）
-        needs_human = any(
-            r["audit"].get("needs_human_review", False) for r in all_rounds
-        )
-
-        # 合并所有遗漏（去重）
-        seen_descriptions = set()
-        all_missed = []
-        for r in all_rounds:
-            for mt in r.get("missed_threats", []):
-                desc = mt.get("description", "")
-                if desc and desc not in seen_descriptions:
-                    seen_descriptions.add(desc)
-                    all_missed.append(mt)
-
-        return {
-            "threat_detected": threat_detected,
-            "confidence": round(min(confidence, 1.0), 4),
-            "severity": severity,
-            "needs_human": needs_human,
-            "total_rounds": len(all_rounds),
-            "all_missed_count": len(all_missed),
-        }
+        from veto_gates import merge_audit_rounds, extract_non_llm_signals
+        signals = extract_non_llm_signals(log_data or {})
+        return merge_audit_rounds(all_rounds, signals)
 
     def _normalize_fields(self, log_data: dict) -> dict:
         """归一化字段名：兼容 camelCase、snake_case、中文名"""
@@ -115,6 +62,10 @@ class LogIngestor:
             "message": ["message", "msg", "告警内容", "description", "描述"],
             "confidence": ["confidence", "置信度", "可信度"],
             "protocol": ["protocol", "协议"],
+            # HTTP 方法/状态: 供 SigmaHQ SQLi/XSS/SSTI 等 web 规则(selection: cs-method='GET', filter: sc-status)命中。
+            "method": ["method", "http_method", "csMethod", "requestMethod", "methodType", "httpMethod"],
+            "status": ["status", "status_code", "httpStatus", "http_response_status", "sc-status", "httpCode"],
+            "url": ["url", "http_url", "requestUrl", "request_uri", "cs-uri-query", "uri"],
         }
         normalized = dict(log_data)
         for target, candidates in field_map.items():
@@ -128,6 +79,23 @@ class LogIngestor:
                         val = val[0] if val else ""
                     if val is not None and val != "":
                         normalized[target] = val
+                        break
+        # rawData 兜底: web 日志的 HTTP 元数据常透传在 rawData 子对象中, 从其中提取 method/status/url。
+        raw = log_data.get("rawData") or log_data.get("raw_data") or {}
+        if isinstance(raw, dict) and raw:
+            for target, keys in (("method", ["method", "requestMethod", "httpMethod"]),
+                                 ("status", ["status", "statusCode", "httpStatus"]),
+                                 ("url", ["url", "requestUrl", "request_uri", "path"])):
+                if target in normalized and normalized.get(target):
+                    continue
+                for k in keys:
+                    v = raw.get(k)
+                    if v is None or v == "":
+                        continue
+                    if isinstance(v, list):
+                        v = v[0] if v else ""
+                    if v is not None and v != "":
+                        normalized[target] = v
                         break
         return normalized
 
@@ -285,10 +253,30 @@ class LogIngestor:
         max_rounds: int = 3,
     ):
         """
-        Audit-LLM 迭代审核流水线（多次审核，补充遗漏）
-        整体超时 900 秒（深度审核单轮约 3-7 分钟，3 轮补审需足够预算），
-        超时后标记为已分析并记录错误。
+        Audit-LLM 迭代审核流水线（多次审核，补充遗漏）。
+
+        编排: 优先走 Temporal Workflow(AuditPipelineWorkflow) 获得可靠性/长任务/可视化;
+        不可用/失败时降级回本进程 async 兜底(带 900s 整体超时)。
         """
+        # ── Temporal 优先: 启动 4 层 Agent 编排 Workflow ──
+        if getattr(anomaly_report, "anomaly_score", 0) is not None:
+            try:
+                from temporal.client import start_audit_workflow
+                started = await start_audit_workflow(
+                    session_id=session_id,
+                    event_id=event_id,
+                    log_data=log_data,
+                    anomaly_score=(getattr(anomaly_report, "anomaly_score", 0.0) or 0.0),
+                    anomaly_reasons=getattr(anomaly_report, "reasons", []) or [],
+                    max_rounds=max_rounds,
+                )
+                if started:
+                    logger.info(f"[Audit-LLM] routed event #{event_id} to Temporal workflow")
+                    return
+            except Exception as e:
+                logger.warning(f"[Audit-LLM] Temporal route failed, fallback async: {e}")
+
+        # ── 降级兜底: 原 async 编排(整体 900s 超时) ──
         try:
             await asyncio.wait_for(
                 self._audit_pipeline_inner(
@@ -381,8 +369,8 @@ class LogIngestor:
           Round 2-N: 补审模式，只查 Reviewer 发现的遗漏
           当 no missed threats 或达 max_rounds 时终止
 
-        合并策略:
-          - 任意一轮发现威胁 → 最终结论为有威胁
+        合并策略 (PR1):
+          - 禁止 OR 合并；confirmed 必须绑定非 LLM 信号
           - 置信度取加权平均（轮次越大权重越低）
           - 所有轮的 evidence_trail 合并
         """
@@ -479,7 +467,8 @@ class LogIngestor:
                             ],
                         }
                         all_rounds.append(round_data)
-                        missed_threats = verdict.missed_threats
+                        from veto_gates import filter_missed_threats
+                        missed_threats = filter_missed_threats(verdict.missed_threats)
                         final_verdict = verdict
                         final_audit = audit_result
 
@@ -496,7 +485,29 @@ class LogIngestor:
                             break
 
                     # ── 合并所有轮次结果 ──
-                    merged = self._merge_rounds(all_rounds)
+                    merged = self._merge_rounds(all_rounds, log_data)
+
+                    from faithfulness_gate import apply_faithfulness_gate, contexts_from_audit
+                    answer_text = ""
+                    if final_audit is not None:
+                        answer_text = getattr(final_audit, "summary", "") or ""
+                    if final_verdict is not None:
+                        answer_text = answer_text or getattr(final_verdict, "final_summary", "") or ""
+                    evidence_for_gate = []
+                    for rd in all_rounds:
+                        for claim in (rd.get("audit") or {}).get("evidence") or []:
+                            if isinstance(claim, dict) and "threat_claims" in claim:
+                                evidence_for_gate.extend(claim.get("threat_claims") or [])
+                    merged = apply_faithfulness_gate(
+                        merged,
+                        answer=answer_text,
+                        contexts=contexts_from_audit(log_data, evidence_for_gate),
+                        query=str(log_data.get("message") or ""),
+                        abstain=bool(
+                            getattr(final_verdict, "abstain", False)
+                            or merged.get("verdict") == "insufficient_evidence"
+                        ),
+                    )
 
                     # ── 写入 DB ──
                     db_evt = await session.get(SecurityEvent, event_id)
@@ -533,9 +544,14 @@ class LogIngestor:
                                         "threat_detected": r["audit"].get("threat_detected"),
                                         "confidence": r["audit"].get("confidence"),
                                         "missed_count": len(r["missed_threats"]),
+                                        "hop_trace": r["audit"].get("hop_trace") or [],
                                     }
                                     for r in all_rounds
                                 ],
+                                "hop_trace": (
+                                    (final_audit.to_dict().get("hop_trace") if final_audit else None)
+                                    or []
+                                ),
                                 "final_verdict": final_verdict.to_dict() if final_verdict else {},
                                 "evidence_trail": all_evidence,
                                 "hallucination": {
@@ -550,6 +566,8 @@ class LogIngestor:
                                 },
                                 "pipeline_duration_s": round(time.time() - t_start, 2),
                                 "completed_at": datetime.now(timezone.utc).isoformat(),
+                                "faithfulness": merged.get("faithfulness") or {},
+                                "response_blocked": bool(merged.get("response_blocked")),
                             },
                         }
                         await session.commit()
@@ -574,7 +592,12 @@ class LogIngestor:
                     })
 
                     # ── 触发响应引擎（独立 session，避免与流水线 session 并发）──
-                    if merged.get("threat_detected") and merged.get("confidence", 0) >= 0.4:
+                    if (
+                        merged.get("verdict") == "confirmed"
+                        and merged.get("threat_detected")
+                        and merged.get("confidence", 0) >= 0.4
+                        and not merged.get("response_blocked")
+                    ):
                         try:
                             from response_engine import get_orchestrator
                             _resp_orch = get_orchestrator()
