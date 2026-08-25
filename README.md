@@ -1,8 +1,10 @@
 # 共享记忆安全审计 Agent 平台
 
-全自动安全审计 Agent 平台，基于 **Kafka + Flink** 流处理架构，集成数据源认证、实时异常检测、攻击链 CEP、LLM 智能审计与自动响应执行。
+> 🚀 **第一次接触本项目？** 请先看 [`docs/study-guide/知识手册.md`](docs/study-guide/知识手册.md)（18 章连贯学习手册，71 KB）；速通者看 [`docs/study-guide/速查.md`](docs/study-guide/速查.md)；喜欢 PDF 排版看 [`docs/study-guide/总览-PDF风.md`](docs/study-guide/总览-PDF风.md)。
 
-## 架构 (Kafka + Flink)
+全自动安全审计 Agent 平台，基于 **Kafka + Flink 1.19.3 + Java 11** 流处理架构，集成数据源认证、实时异常检测、攻击链 CEP、LLM 智能审计与自动响应执行。
+
+## 架构 (Kafka + Flink 1.19.3)
 
 ```
 日志源 (syslog/API/模拟器)
@@ -76,7 +78,7 @@ alerts        audit-queue        events-enriched
 ## 技术栈
 
 - **消息总线**: Apache Kafka 3.7 (KRaft 模式)
-- **流处理**: Apache Flink 1.18 (Java, CEP + DataStream API)
+- **流处理**: Apache Flink **1.19.3** (Java 11, CEP + DataStream API，Kafka Connector 3.2.0-1.19)
 - **后端**: FastAPI + SQLAlchemy + pgvector + Redis + aiokafka
 - **安全工具**: paramiko SSH + iptables + nmap (真实防火墙操作)
 - **工具调用控制**: MCP Guard 4 层检查 + SecurityGuard 安全守卫
@@ -238,7 +240,7 @@ ufw deny 9093
 
 ```
 ├── flink-jobs/                    # ★ Flink 流处理作业 (Java)
-│   ├── pom.xml                    # Maven 项目 (Flink 1.18 + CEP + Kafka)
+│   ├── pom.xml                    # Maven 项目 (Flink 1.19.3 + Java 11 + CEP + Kafka Connector 3.2.0-1.19)
 │   ├── Dockerfile                 # 多阶段构建: Maven → Flink 运行时
 │   ├── submit-jobs.sh             # 作业提交脚本
 │   └── src/main/java/com/soc/

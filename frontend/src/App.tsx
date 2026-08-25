@@ -19,6 +19,7 @@ const Encrypted = lazy(() => import('./pages/Encrypted'))
 const Intel = lazy(() => import('./pages/Intel'))
 const Sandbox = lazy(() => import('./pages/Sandbox'))
 const EDR = lazy(() => import('./pages/EDR'))
+const CapabilitiesDashboard = lazy(() => import('./pages/CapabilitiesDashboard'))
 
 function PageLoader() {
   return (
@@ -55,6 +56,7 @@ export default function App() {
           <Route path={ROUTES.INTEL} element={<Suspense fallback={<PageLoader />}><Intel /></Suspense>} />
           <Route path={ROUTES.SANDBOX} element={<Suspense fallback={<PageLoader />}><Sandbox /></Suspense>} />
           <Route path={ROUTES.EDR} element={<Suspense fallback={<PageLoader />}><EDR /></Suspense>} />
+          <Route path={ROUTES.CAPABILITIES} element={<Suspense fallback={<PageLoader />}><CapabilitiesDashboard /></Suspense>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

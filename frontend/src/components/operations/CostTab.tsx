@@ -38,7 +38,16 @@ interface EventCost {
   event_created_at: string
 }
 
-interface DailyPoint { day: string; total_tokens: number; calls: number }
+interface DailyPoint { day: string; total_tokens: number; prompt_tokens?: number; completion_tokens?: number; calls: number }
+
+interface ModelBreakdown {
+  caller: string
+  calls: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  cost_yuan: number
+}
 
 interface TraceRow {
   id: number
@@ -128,6 +137,7 @@ export function CostTab() {
   const [grand, setGrand] = useState<{ calls: number; prompt_tokens: number; completion_tokens: number; total_tokens: number; errors: number } | null>(null)
   const [budget, setBudget] = useState<BudgetInfo | null>(null)
   const [daily, setDaily] = useState<DailyPoint[]>([])
+  const [byCallers, setByCallers] = useState<ModelBreakdown[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -159,6 +169,7 @@ export function CostTab() {
       setGrand(d.grand ?? null)
       setBudget(d.budget ?? null)
       setDaily(trend.points ?? [])
+      setByCallers(trend.by_caller ?? [])
     } catch (e: any) {
       setError(e.message)
     } finally {
@@ -324,6 +335,51 @@ export function CostTab() {
           <span className="text-[9px] text-ink-faint font-sans">{daily[0]?.day ?? ''}</span>
           <span className="text-[9px] text-ink-faint font-sans">{daily[daily.length - 1]?.day ?? ''}</span>
         </div>
+      </div>
+
+      {/* 按模块(调用方)分账 */}
+      <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-[13px] font-semibold text-ink">按模块分账（近 {days} 天）</h3>
+          <span className="text-[10px] text-ink-faint font-sans">
+            调用来源(caller) · 占比按总 tokens
+          </span>
+        </div>
+        {byCallers.length === 0 ? (
+          <EmptyState icon="🧩" title="暂无分账数据" hint="产生 LLM 调用后会按调用来源统计各模块消耗" />
+        ) : (
+          <div className="space-y-2.5">
+            {byCallers.map((c) => {
+              const pct = grand?.total_tokens && grand.total_tokens > 0
+                ? ((c.total_tokens / grand.total_tokens) * 100)
+                : 0
+              return (
+                <div key={c.caller} className="flex items-center gap-3">
+                  <span className="w-36 shrink-0 text-xs font-medium text-ink truncate text-left">
+                    {CALLER_LABELS[c.caller] || c.caller}
+                  </span>
+                  <div className="flex-1 h-6 bg-black/[0.04] rounded overflow-hidden relative">
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${Math.max(2, Math.min(100, pct))}%` }}
+                      transition={spring.ui}
+                      className="h-full"
+                      style={{ background: 'linear-gradient(90deg, #BF5AF2, #0A84FF)' }}
+                    />
+                  </div>
+                  <span className="w-14 shrink-0 text-right text-xs tabular-nums text-ink-faint">{pct.toFixed(1)}%</span>
+                  <span className="w-16 shrink-0 text-right text-xs tabular-nums text-ink font-semibold">{fmtTokens(c.total_tokens)}</span>
+                  <span className="w-24 shrink-0 text-right text-xs tabular-nums text-ink-soft">
+                    {c.calls} 次
+                  </span>
+                  <span className="w-20 shrink-0 text-right text-xs tabular-nums text-[#BF5AF2] font-medium">
+                    {priceIn > 0 || priceOut > 0 ? `¥${c.cost_yuan.toFixed(2)}` : '—'}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {/* 按事件消耗表 */}

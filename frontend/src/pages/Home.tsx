@@ -42,6 +42,46 @@ const capabilities = [
   },
 ]
 
+/** 分层递进能力模型 — 对标赛题"分层递进"要求 */
+const capabilityTiers = [
+  {
+    tier: 'L1',
+    name: '基础感知层',
+    color: '#0A84FF',
+    subtitle: '规则驱动 · 实时检测',
+    features: [
+      { name: 'Sigma 规则引擎', desc: '11 条规则覆盖 8 类攻击，<1ms 延迟' },
+      { name: 'Flink CEP 攻击链', desc: '3 种模式实时检测 (端口扫描→C2 / 横向移动 / 数据外泄)' },
+      { name: '多维异常评分', desc: '频率 + 严重度 + 时段三维评分，智能分级路由' },
+      { name: '数据源认证', desc: 'API Key 白名单 + SCRAM-SHA-512 + TLS 加密' },
+    ],
+  },
+  {
+    tier: 'L2',
+    name: '智能研判层',
+    color: '#5E5CE6',
+    subtitle: 'LLM 驱动 · 深度分析',
+    features: [
+      { name: 'Audit-LLM 四层流水线', desc: 'Decomposer→ToolBuilder→Executor→Reviewer 交叉验证' },
+      { name: 'RAG 知识增强', desc: 'MITRE ATT&CK + CAPEC 向量检索 + LLM 重排' },
+      { name: 'Grounding 7 层验证', desc: '字段溯源 + 实体一致性 + 知识库交叉 + 证据新鲜度' },
+      { name: 'CAD 独立监督', desc: '穿透验证 + 上下文审计 + 熔断器保护' },
+    ],
+  },
+  {
+    tier: 'L3',
+    name: '自主处置层',
+    color: '#BF5AF2',
+    subtitle: '零干预 · 闭环自治',
+    features: [
+      { name: '自动响应执行', desc: 'SSH + iptables 真实防火墙操作，8 策略 5 动作' },
+      { name: '6 层安全执行器', desc: '命令白名单→参数校验→资产保护→幂等→模式→权限' },
+      { name: 'TTL 自动解封', desc: '临时封禁到期自动回滚，无需人工干预' },
+      { name: '反馈闭环优化', desc: '处置结果回灌检测引擎，误报抑制、漏报补偿' },
+    ],
+  },
+]
+
 const pipeline = [
   { step: '01', name: '接入', desc: '日志实时采集' },
   { step: '02', name: '审计', desc: 'Audit-LLM 分析' },
@@ -175,6 +215,78 @@ export default function Home() {
 
         {/* ══════════ 钓鱼检测 ══════════ */}
         <PhishingDetect />
+
+        {/* ══════════ 分层递进能力模型 ══════════ */}
+        <section className="py-24 bg-card mt-16">
+          <motion.div {...reveal} className="max-w-[1100px] mx-auto px-6">
+            <p className="text-sm font-semibold text-accent tracking-wide mb-3 text-center">能力架构</p>
+            <h2 className="text-4xl font-semibold tracking-tight text-ink mb-4 text-center">
+              分层递进，从感知到自治。
+            </h2>
+            <p className="text-lg text-ink-soft mb-14 text-center max-w-2xl mx-auto">
+              三层能力逐级递进：L1 规则检测 → L2 智能研判 → L3 自主处置，实现零人工干预的安全运营闭环。
+            </p>
+
+            <div className="grid md:grid-cols-3 gap-6">
+              {capabilityTiers.map((tier, ti) => (
+                <motion.div
+                  key={tier.tier}
+                  initial={{ opacity: 0, y: 30 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.6, delay: ti * 0.12 }}
+                  className="relative bg-surface rounded-[20px] p-8 border border-line"
+                >
+                  {/* 层级标识 */}
+                  <div className="flex items-center gap-3 mb-6">
+                    <div
+                      className="w-12 h-12 rounded-xl flex items-center justify-center text-white text-lg font-bold"
+                      style={{ backgroundColor: tier.color }}
+                    >
+                      {tier.tier}
+                    </div>
+                    <div>
+                      <p className="text-lg font-semibold text-ink">{tier.name}</p>
+                      <p className="text-xs text-ink-soft">{tier.subtitle}</p>
+                    </div>
+                  </div>
+
+                  {/* 特性列表 */}
+                  <div className="space-y-4">
+                    {tier.features.map((f) => (
+                      <div key={f.name} className="flex items-start gap-3">
+                        <div
+                          className="w-1.5 h-1.5 rounded-full mt-2 shrink-0"
+                          style={{ backgroundColor: tier.color }}
+                        />
+                        <div>
+                          <p className="text-sm font-medium text-ink">{f.name}</p>
+                          <p className="text-xs text-ink-soft leading-relaxed">{f.desc}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* 递进箭头 (非最后一层) */}
+                  {ti < capabilityTiers.length - 1 && (
+                    <div className="hidden md:flex absolute -right-3 top-1/2 -translate-y-1/2 z-10">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                        <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-ink-faint" />
+                      </svg>
+                    </div>
+                  )}
+                </motion.div>
+              ))}
+            </div>
+
+            {/* 底部说明 */}
+            <div className="mt-10 text-center">
+              <p className="text-sm text-ink-soft">
+                对标《人工智能安全治理框架》2.0 — 技术防护 · 价值对齐 · 协同治理 · 人类控制
+              </p>
+            </div>
+          </motion.div>
+        </section>
 
         {/* ══════════ 流水线 ══════════ */}
         <section className="py-24 text-center bg-card mt-16">

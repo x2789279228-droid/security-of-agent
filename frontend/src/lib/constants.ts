@@ -22,6 +22,8 @@ export const ROUTES = {
   INTEL: '/intel',
   SANDBOX: '/sandbox',
   EDR: '/edr',
+  // B 类能力总览
+  CAPABILITIES: '/capabilities',
 } as const
 
 /** Apple Intelligence 流动渐变 — 运营中心签名色 */

@@ -1,5 +1,5 @@
 # ── OpenTelemetry Collector 配置 ──
-# 接收 Flink/Python 的 OTLP traces → 尾部采样 → 转发 Grafana Tempo
+# 接收 Flink/Python 的 OTLP traces → 批量 → 双写导出 Grafana Tempo + Jaeger
 # 端口: OTLP gRPC 4317 / OTLP HTTP 4318 (仅容器内网)
 receivers:
   otlp:
@@ -21,6 +21,9 @@ exporters:
   # 用 otlp_http (Tempo HTTP 4318, 已验证可用)
   otlp_http/tempo:
     endpoint: http://tempo:4318
+  # Jaeger v1 all-in-one 的 OTLP HTTP 接收端 (4318)
+  otlp_http/jaeger:
+    endpoint: http://jaeger:4318
   debug:
     verbosity: basic
 
@@ -29,4 +32,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp_http/tempo, debug]
+      exporters: [otlp_http/tempo, otlp_http/jaeger, debug]
