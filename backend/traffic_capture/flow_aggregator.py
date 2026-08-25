@@ -220,6 +220,11 @@ class FlowAggregator:
                     last_seen=now,
                 )
                 self._active[key] = flow
+                try:
+                    from metrics import inc_ndr_flow
+                    inc_ndr_flow(pkt.protocol)
+                except Exception:
+                    pass
 
             # 更新统计（以 src→dst 方向为 out）
             flow.bytes_out += pkt.length

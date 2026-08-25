@@ -78,39 +78,23 @@ async def llm_analyze_anomaly(
     # ── 构造 LLM 输入:仅统计摘要 (不传原始报文,token < 200) ──
     cache_key = f"traffic:{ip}:{metric}:{int(detect_result.get('z_score', 0) * 10)}"
 
+    from prompts import render
+    _d = detect_result or {}
     prompt_messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是网络流量安全专家.根据异常检测器输出的统计摘要,判断该异常属于哪类威胁."
-                "严格输出 JSON,不要解释,不要代码块."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"IP: {ip}\n"
-                f"指标: {metric}\n"
-                f"当前值: {detect_result.get('current_value', 0)}\n"
-                f"期望值: {detect_result.get('expected', 0)}\n"
-                f"基线均值: {detect_result.get('mean', 0)}\n"
-                f"标准差: {detect_result.get('std', 0)}\n"
-                f"Z分数: {detect_result.get('z_score', 0)}\n"
-                f"季节分量: {detect_result.get('seasonal_component', 0)}\n"
-                f"原因标签: {detect_result.get('reasons', [])}\n"
-                f"最近模式: {recent_pattern or '无'}\n\n"
-                "判定为下列之一:\n"
-                "  c2_beacon (C2 信标,固定间隔心跳)\n"
-                "  data_exfil (数据外泄,大流量出站)\n"
-                "  dns_tunnel (DNS 隧道,异常 DNS 查询)\n"
-                "  normal_burst (业务突发,可解释的正常流量)\n"
-                "  unknown (信息不足)\n\n"
-                "输出 JSON:\n"
-                '{"verdict":"c2_beacon","confidence":0.8,'
-                '"rationale":"短理由","suggested_action":"isolate_host"}\n\n'
-                "suggested_action 可选: isolate_host / rate_limit / monitor / ignore"
-            ),
-        },
+        {"role": "system", "content": render("security/traffic_anomaly_system")},
+        {"role": "user", "content": render(
+            "security/traffic_anomaly_user",
+            ip=ip,
+            metric=metric,
+            current_value=_d.get("current_value", 0),
+            expected=_d.get("expected", 0),
+            mean=_d.get("mean", 0),
+            std=_d.get("std", 0),
+            z_score=_d.get("z_score", 0),
+            seasonal_component=_d.get("seasonal_component", 0),
+            reasons=_d.get("reasons", []),
+            recent_pattern=recent_pattern,
+        )},
     ]
 
     result = await enhance_traffic(

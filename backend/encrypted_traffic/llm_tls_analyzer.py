@@ -60,47 +60,41 @@ async def llm_analyze_tls_session(
     """
     from llm_enhancer import enhance_encrypted_traffic
 
-    prompt = f"""你是一位加密流量分析专家。请分析以下 TLS 会话元数据，判断是否为恶意工具通信。
-
-## 会话信息
-- 源IP: {src_ip} → 目标IP: {dst_ip}
-- SNI: {sni or '(空)'}
-- JA3 指纹: {ja3_hash or '(未计算)'}
-- TLS 版本: {tls_version}
-- 密码套件: {cipher_suite}
-- 证书 Subject: {cert_subject}
-- 证书 Issuer: {cert_issuer}
-- 自签名: {'是' if cert_is_self_signed else '否'}
-- 风险评分: {risk_score:.2f}
-- 风险原因: {', '.join(risk_reasons) if risk_reasons else '无'}
-
-## 已知恶意 JA3 特征参考
-- Cobalt Strike: 72a589da586844d7f0818ce684948eea
-- Metasploit: 72a589da586844d7f0818ce684948eea (与 CS 相同)
-- Sliver C2: 常见自签名 + 短有效期 + 非标准 SNI
-- 正常浏览器: JA3 通常包含 GREASE 值, 密码套件 > 10 个
-
-## 输出要求 (严格 JSON)
-{{
-  "verdict": "malicious|suspicious|benign|uncertain",
-  "confidence": 0.0-1.0,
-  "tool_family": "Cobalt Strike|Metasploit|Sliver|其他工具名|无",
-  "rationale": "一句话判定理由",
-  "suggested_action": "block|monitor|ignore"
-}}"""
+    from prompts import render
+    prompt = render(
+        "security/tls_analyzer",
+        src_ip=src_ip,
+        dst_ip=dst_ip,
+        sni=sni,
+        ja3_hash=ja3_hash,
+        tls_version=tls_version,
+        cipher_suite=cipher_suite,
+        cert_subject=cert_subject,
+        cert_issuer=cert_issuer,
+        cert_is_self_signed=cert_is_self_signed,
+        risk_score=risk_score,
+        risk_reasons=risk_reasons,
+    )
 
     cache_key = f"tls:{src_ip}:{dst_ip}:{ja3_hash}:{sni}"
 
     result = await enhance_encrypted_traffic(
         cache_key=cache_key,
         prompt_messages=[
-            {"role": "system", "content": "你是加密流量分析专家。只输出 JSON,不加解释。"},
+            {"role": "system", "content": render("security/tls_analyzer_system")},
             {"role": "user", "content": prompt},
         ],
         budget_cost_jpy=0.05,
     )
 
     if result:
+        # PR4: LLM 只作特征；封禁类建议降为 monitor，除非规则分已过触发线
+        result = dict(result)
+        result["as_feature"] = True
+        action = result.get("suggested_action")
+        if action in ("isolate_host", "block_ip", "terminate_process") and risk_score < 0.8:
+            result["suggested_action"] = "monitor"
+            result["action_clamped"] = True
         logger.info(
             "[TLS-LLM] %s→%s verdict=%s family=%s conf=%.2f",
             src_ip, dst_ip,

@@ -95,6 +95,11 @@ def aggregate(
     同类（category）指标：取最高分 + 其余按 0.3 衰减叠加，
     不同类之间直接求和，最终 cap 到 100。
     """
+    try:
+        from metrics import inc_phishing_detection
+        inc_phishing_detection(detection_type or "email")
+    except Exception:
+        pass
     if not indicators:
         return PhishingVerdict(
             detection_type=detection_type,
@@ -178,18 +183,23 @@ def aggregate_with_llm(
 
     new_score = round(min(total, 100.0), 1)
     new_level = _classify(new_score)
-    new_conf = _confidence(new_score, len(merged_indicators))
+    from ops_loop import clamp_llm_risk_level
+    # PR4: LLM 只作附加特征，不得把规则档位升到 phishing
+    official_level = clamp_llm_risk_level(rule_verdict.risk_level, new_level)
+    official_score = rule_verdict.score
+    if official_level == rule_verdict.risk_level:
+        official_score = min(100.0, round(rule_verdict.score + min(10.0, max(0.0, new_score - rule_verdict.score) * 0.3), 1))
+    new_conf = _confidence(official_score, len(merged_indicators))
 
     indicators_sorted = sorted(merged_indicators, key=lambda i: i.score, reverse=True)
 
     return PhishingVerdict(
         detection_type=rule_verdict.detection_type,
         target=rule_verdict.target,
-        risk_level=new_level,
+        risk_level=official_level,
         confidence=new_conf,
-        score=new_score,
+        score=official_score,
         indicators=indicators_sorted,
-        # 追加 LLM 标记到 summary
-        summary=rule_verdict.summary + " + LLM 复核" if llm_indicator else rule_verdict.summary,
-        suggested_actions=_suggested_actions(new_level, indicators_sorted),
+        summary=(rule_verdict.summary + " + LLM 特征") if llm_indicator else rule_verdict.summary,
+        suggested_actions=_suggested_actions(official_level, indicators_sorted),
     )

@@ -176,6 +176,12 @@ class IocMatcher:
             if hit:
                 hits.append(hit)
 
+        if hits:
+            try:
+                from metrics import inc_ioc_match
+                inc_ioc_match()
+            except Exception:
+                pass
         return hits
 
     @property

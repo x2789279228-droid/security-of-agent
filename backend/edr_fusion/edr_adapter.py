@@ -121,11 +121,21 @@ class EdrAdapter:
                 parsed = sysmon_parser.parse_dict(event_dict)
                 if parsed:
                     self._stats["sysmon_events"] += 1
+                    try:
+                        from metrics import inc_edr_event
+                        inc_edr_event("sysmon")
+                    except Exception:
+                        pass
                     return parsed.to_dict()
             else:
                 parsed = winevent_parser.parse_dict(event_dict)
                 if parsed:
                     self._stats["winevent_events"] += 1
+                    try:
+                        from metrics import inc_edr_event
+                        inc_edr_event("winevent")
+                    except Exception:
+                        pass
                     return parsed.to_dict()
 
             return None

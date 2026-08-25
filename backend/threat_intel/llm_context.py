@@ -58,32 +58,23 @@ async def llm_summarize_threat_context(
         for h in ioc_hits[:10]
     )
 
-    prompt = f"""你是一位威胁情报分析师。请根据以下 IOC 命中信息,生成威胁上下文摘要。
-
-## 触发事件
-类型: {event_type}, 源: {src_ip} → 目标: {dst_ip}
-
-## IOC 命中 ({len(ioc_hits)} 条)
-{hits_str}
-
-## 信誉评分
-{reputation_scores}
-
-## 输出要求 (严格 JSON)
-{{
-  "threat_actor": "APT组织名/犯罪团伙/未知",
-  "campaign": "关联的攻击活动名称或描述",
-  "infrastructure_profile": "C2基础设施特征描述(1句话)",
-  "relevance": "high|medium|low (与当前事件的关联度)",
-  "defense_actions": ["建议1", "建议2"]
-}}"""
+    from prompts import render
+    prompt = render(
+        "security/threat_intel_context",
+        event_type=event_type,
+        src_ip=src_ip,
+        dst_ip=dst_ip,
+        ioc_hits=ioc_hits,
+        hits_str=hits_str,
+        reputation_scores=reputation_scores,
+    )
 
     cache_key = f"intel:{src_ip}:{dst_ip}:{len(ioc_hits)}"
 
     result = await enhance_intel(
         cache_key=cache_key,
         prompt_messages=[
-            {"role": "system", "content": "你是威胁情报分析师。只输出 JSON。"},
+            {"role": "system", "content": render("security/threat_intel_context_system")},
             {"role": "user", "content": prompt},
         ],
         budget_cost_jpy=0.03,

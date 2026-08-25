@@ -152,35 +152,19 @@ async def enrich_with_llm(
     # 缓存键:同一 (type + 关键字段 + 规则分数桶) 一段时间内只跑一次
     cache_key = f"phish:{detection_type}:{target[:80]}:{int(rule_verdict.score // 10)}"
 
+    from prompts import render
+    summary_rendered = _format_summary_for_prompt(summary)
     prompt_messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是钓鱼/诈骗检测专家.基于规则引擎产出的初步指标 + 内容摘要,"
-                "判断规则是否误判/漏判.特别关注:"
-                "  1. 品牌仿冒 (paypa1 vs paypal, l33t 写法)"
-                "  2. 紧迫性社工话术 (24小时内冻结)"
-                "  3. BEC 高管语调 (CEO 紧急打款)"
-                "  4. 二维码/短链跳转异常"
-                "严格输出 JSON,不要解释,不要代码块."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"规则 verdict: risk_level={rule_verdict.risk_level}, score={rule_verdict.score}\n"
-                f"规则指标: {summary['rule_indicators']}\n"
-                f"类型: {detection_type}\n"
-                f"目标: {target[:200]}\n"
-                + _format_summary_for_prompt(summary)
-                + "\n\n输出 JSON:\n"
-                '{"is_phishing": true/false, "severity": "high"/"medium"/"low", '
-                '"confidence": 0.0-1.0, "indicator_name": "简短名", '
-                '"detail": "为何判此类别"}\n\n'
-                "若你认为规则判定正确无误,返回 is_phishing 与规则结果一致即可."
-                "若你认为规则误判(规则说钓鱼但实际安全,或反之),给出反向判定."
-            ),
-        },
+        {"role": "system", "content": render("security/phishing_system")},
+        {"role": "user", "content": render(
+            "security/phishing_user",
+            risk_level=rule_verdict.risk_level,
+            score=rule_verdict.score,
+            indicators=summary["rule_indicators"],
+            det_type=detection_type,
+            target=str(target)[:200],
+            summary_rendered=summary_rendered,
+        )},
     ]
 
     result = await enhance_phishing(

@@ -52,37 +52,23 @@ async def llm_narrate_correlation(
     """
     from llm_enhancer import enhance_edr
 
-    prompt = f"""你是一位 SOC 高级分析师。请根据以下跨源关联证据,生成简洁的攻击叙事和处置建议。
-
-## 关联类型
-{correlation_type} (置信度: {confidence:.0%})
-
-## 网络侧证据
-{network_event}
-
-## 终端侧证据
-{edr_event}
-
-## MITRE ATT&CK
-{mitre_technique}
-
-## 检测指标
-{', '.join(indicators) if indicators else '无'}
-
-## 输出要求 (严格 JSON)
-{{
-  "narrative": "2-3句话描述攻击行为",
-  "attack_phase": "initial_access|execution|persistence|lateral_movement|exfiltration|impact",
-  "attacker_capability": "script_kiddie|organized_crime|apt|insider",
-  "priority_actions": ["建议1", "建议2", "建议3"]
-}}"""
+    from prompts import render
+    prompt = render(
+        "security/edr_correlation",
+        correlation_type=correlation_type,
+        confidence=confidence,
+        network_event=network_event,
+        edr_event=edr_event,
+        mitre_technique=mitre_technique,
+        indicators=indicators,
+    )
 
     cache_key = f"edr_corr:{correlation_type}:{network_event.get('src_ip', '')}:{edr_event.get('computer', '')}"
 
     result = await enhance_edr(
         cache_key=cache_key,
         prompt_messages=[
-            {"role": "system", "content": "你是 SOC 高级分析师。只输出 JSON。"},
+            {"role": "system", "content": render("security/edr_correlation_system")},
             {"role": "user", "content": prompt},
         ],
         budget_cost_jpy=0.05,

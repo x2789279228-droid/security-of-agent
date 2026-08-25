@@ -79,6 +79,11 @@ class SandboxConnector:
                         result = await resp.json()
                         task_id = str(result.get("task_id", result.get("task_ids", [""])[0]))
                         logger.info("沙箱提交成功: %s → task_id=%s", filename, task_id)
+                        try:
+                            from metrics import inc_sandbox_submission
+                            inc_sandbox_submission("file")
+                        except Exception:
+                            pass
                         return task_id
                     else:
                         body = await resp.text()

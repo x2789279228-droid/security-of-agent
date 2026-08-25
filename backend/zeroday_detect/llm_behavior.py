@@ -68,42 +68,25 @@ async def llm_interpret_behavior(
         for p in process_tree[:6]
     )
 
-    prompt = f"""你是一位恶意软件逆向工程师。请解读以下沙箱分析结果。
-
-## 样本
-SHA256: {sample_hash}
-判定: {verdict} (评分: {score:.1f}/10)
-
-## 行为摘要
-{behavior_summary}
-
-## MITRE ATT&CK 技术
-{techniques_str or '无'}
-
-## 网络 IOC
-{network_str or '无'}
-
-## 进程树
-{process_str or '无'}
-
-## 触发签名
-{', '.join(signatures[:10]) if signatures else '无'}
-
-## 输出要求 (严格 JSON)
-{{
-  "attack_narrative": "2-3句话描述恶意行为链",
-  "evasion_techniques": ["检测到的防御绕过技术"],
-  "family_assessment": "可能的恶意软件家族及变种关系",
-  "kill_chain": ["阶段1", "阶段2", "阶段3"],
-  "response_actions": ["建议1", "建议2", "建议3"]
-}}"""
+    from prompts import render
+    prompt = render(
+        "security/zeroday_sandbox",
+        sample_hash=sample_hash,
+        verdict=verdict,
+        score=score,
+        behavior_summary=behavior_summary,
+        techniques_str=techniques_str,
+        network_str=network_str,
+        process_str=process_str,
+        signatures=signatures,
+    )
 
     cache_key = f"sandbox:{sample_hash}"
 
     result = await enhance_sandbox(
         cache_key=cache_key,
         prompt_messages=[
-            {"role": "system", "content": "你是恶意软件分析专家。只输出 JSON。"},
+            {"role": "system", "content": render("security/zeroday_sandbox_system")},
             {"role": "user", "content": prompt},
         ],
         budget_cost_jpy=0.05,
