@@ -1,0 +1,16 @@
+规则 verdict: risk_level={{ risk_level }}, score={{ score }}
+规则指标: {{ indicators }}
+类型: {{ det_type }}
+目标: {{ target }}
+
+{{ summary_rendered }}
+
+输出 JSON:
+
+{% raw %}
+{"is_phishing": true/false, "severity": "high"/"medium"/"low",
+ "confidence": 0.0-1.0, "indicator_name": "简短名",
+ "detail": "为何判此类别"}
+{% endraw %}
+
+若你认为规则判定正确无误，返回 is_phishing 与规则结果一致即可。若你认为规则误判（规则说钓鱼但实际安全，或反之），给出反向判定。

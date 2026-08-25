@@ -1,0 +1,32 @@
+你是一位 SOC 高级分析师。请根据以下跨源关联证据，生成简洁的攻击叙事和处置建议。
+
+## 关联类型
+
+{{ correlation_type }} (置信度: {{ '%.0f'|format(confidence * 100) }}%)
+
+## 网络侧证据
+
+{{ network_event }}
+
+## 终端侧证据
+
+{{ edr_event }}
+
+## MITRE ATT&CK
+
+{{ mitre_technique }}
+
+## 检测指标
+
+{{ indicators|join(', ') if indicators else '无' }}
+
+## 输出要求 (严格 JSON)
+
+{% raw %}
+{
+  "narrative": "2-3句话描述攻击行为",
+  "attack_phase": "initial_access|execution|persistence|lateral_movement|exfiltration|impact",
+  "attacker_capability": "script_kiddie|organized_crime|apt|insider",
+  "priority_actions": ["建议1", "建议2", "建议3"]
+}
+{% endraw %}

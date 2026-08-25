@@ -96,10 +96,14 @@ class CADAgent:
             anomaly_detected=hallucination_count > 0,
         )
 
+        from ops_loop import locate_first_failed_hop
+        first_hop = locate_first_failed_hop(audit_llm_data)
+
         # ── 4. 生成 CAD 审计报告 ──
         cad_report = {
             "event_id": event_id,
             "audit_timestamp": datetime.now(timezone.utc).isoformat(),
+            "first_failed_hop": first_hop,
             "penetrating_verification": {
                 "total_claims": total_claims,
                 "verified": verified_claims,

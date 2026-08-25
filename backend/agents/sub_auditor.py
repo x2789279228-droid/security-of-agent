@@ -51,6 +51,7 @@ class ChunkVerdict:
     # Grounding 验证结果（程序化，非 LLM）
     grounding_report: Optional[dict] = None
     grounding_score: float = 1.0        # 0-1, 程序化验证综合分
+    discarded_claims: list[dict] = field(default_factory=list)  # ungrounded，不进投票
 
     # 结构化验证状态
     schema_valid: bool = True
@@ -73,6 +74,7 @@ class ChunkVerdict:
             "grounding_score": self.grounding_score,
             "schema_valid": self.schema_valid,
             "evidence_ids_available": bool(self.all_event_ids_in_chunk),
+            "discarded_claim_count": len(self.discarded_claims),
         }
 
     def validate_evidence(self) -> dict:
@@ -249,6 +251,20 @@ class SubAuditor(BaseAuditComponent):
             }
             verdict.grounding_score = grounding.overall_score
 
+            from veto_gates import strip_ungrounded_claims
+            admitted, discarded = strip_ungrounded_claims(
+                claims, claim_reports=grounding.claims,
+            )
+            verdict.threat_claims = admitted
+            verdict.discarded_claims = discarded
+            if not admitted:
+                verdict.threat_detected = False
+            if discarded:
+                logger.warning(
+                    f"Chunk {chunk.chunk_id}: stripped {len(discarded)} "
+                    f"ungrounded claims, admitted={len(admitted)}"
+                )
+
             if grounding.ungrounded_claims > 0:
                 logger.warning(
                     f"Chunk {chunk.chunk_id}: {grounding.ungrounded_claims} "
@@ -258,6 +274,12 @@ class SubAuditor(BaseAuditComponent):
                     logger.warning(f"  Grounding issue: {ind}")
         except Exception as e:
             logger.warning(f"Grounding verification failed: {e}")
+            from veto_gates import strip_ungrounded_claims
+            admitted, discarded = strip_ungrounded_claims(claims)
+            verdict.threat_claims = admitted
+            verdict.discarded_claims = discarded
+            if not admitted:
+                verdict.threat_detected = False
 
         # ID 存在性验证
         validation = verdict.validate_evidence()
@@ -289,49 +311,12 @@ class SubAuditor(BaseAuditComponent):
         return verdict
 
     def _system_prompt(self) -> str:
-        return (
-            "你是严谨的安全分析专家。"
-            "严格遵循输出格式。每条断言必须附带事件ID和原始字段引用。"
-            "没有证据不要编造。引用必须逐字来自事件数据。"
-        )
+        from prompts import render
+        return render("audit/sub_auditor_system")
 
     def _build_prompt(self, block_text: str) -> str:
-        return f"""请逐条分析以下事件块。
-
-{block_text}
-
-## Grounding 强制要求（违反任何一条将导致结论被丢弃）
-1. 每条威胁判定必须包含 "evidence_ids": [事件ID列表]
-2. 每条威胁判定必须包含 "evidence_quotes": ["从事件原始数据中逐字引用的片段"]
-   - 引用必须来自事件的 message、src_ip、dst_ip 等字段的原始文本
-   - 禁止改写、概括或编造引用内容
-   - 示例: 如果事件 message 是 "SSH暴力破解攻击已拦截"，则引用 "SSH暴力破解攻击已拦截"
-3. 没有事件 ID + 字段引用支撑的断言将被程序化验证器自动丢弃
-
-## 输出格式（严格 JSON，不要输出其他内容）
-{{
-    "threat_detected": true/false,
-    "threat_claims": [
-        {{
-            "type": "C2/DDoS/数据外泄/横向移动/端口扫描/暴力破解/其他",
-            "confidence": 0.0-1.0,
-            "evidence_ids": [事件ID1, 事件ID2],
-            "evidence_quotes": ["从事件原始数据逐字引用的片段1", "片段2"],
-            "severity": "critical/high/medium/low/info",
-            "summary": "该威胁的具体描述（必须引用事件内容）"
-        }}
-    ],
-    "confidence": 0.0-1.0,
-    "severity": "critical/high/medium/low/info",
-    "summary": "该块综合分析",
-    "suspicious_entities": ["IP/用户"],
-    "alert": "一句话告警（如有）"
-}}
-
-## 注意
-1. 没有威胁时 threat_detected=false, threat_claims=[]
-2. evidence_quotes 中的每个字符串必须能在事件原始数据中找到原文
-3. 宁可少报也不捏造证据"""
+        from prompts import render
+        return render("audit/sub_auditor_prompt", block_text=block_text)
 
 
 sub_auditor = SubAuditor()

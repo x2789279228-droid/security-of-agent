@@ -1,0 +1,33 @@
+你是一位加密流量分析专家。请分析以下 TLS 会话元数据，判断是否为恶意工具通信。
+
+## 会话信息
+
+- 源IP: {{ src_ip }} → 目标IP: {{ dst_ip }}
+- SNI: {{ sni or '(空)' }}
+- JA3 指纹: {{ ja3_hash or '(未计算)' }}
+- TLS 版本: {{ tls_version }}
+- 密码套件: {{ cipher_suite }}
+- 证书 Subject: {{ cert_subject }}
+- 证书 Issuer: {{ cert_issuer }}
+- 自签名: {{ '是' if cert_is_self_signed else '否' }}
+- 风险评分: {{ '%.2f'|format(risk_score) }}
+- 风险原因: {{ risk_reasons|join(', ') if risk_reasons else '无' }}
+
+## 已知恶意 JA3 特征参考
+
+- Cobalt Strike: 72a589da586844d7f0818ce684948eea
+- Metasploit: 72a589da586844d7f0818ce684948eea (与 CS 相同)
+- Sliver C2: 常见自签名 + 短有效期 + 非标准 SNI
+- 正常浏览器: JA3 通常包含 GREASE 值, 密码套件 > 10 个
+
+## 输出要求 (严格 JSON)
+
+{% raw %}
+{
+  "verdict": "malicious|suspicious|benign|uncertain",
+  "confidence": 0.0-1.0,
+  "tool_family": "Cobalt Strike|Metasploit|Sliver|其他工具名|无",
+  "rationale": "一句话判定理由",
+  "suggested_action": "block|monitor|ignore"
+}
+{% endraw %}

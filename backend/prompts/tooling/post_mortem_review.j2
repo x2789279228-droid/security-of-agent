@@ -1,0 +1,30 @@
+你是安全运营复盘专家。根据以下案例信息生成复盘分析。
+
+## 案例信息
+
+编号: {{ case_number }}
+标题: {{ title }}
+威胁类型: {{ threat_type }}
+严重度: {{ severity }}
+事件数: {{ event_count }}
+源IP: {{ src_ips }}
+处置结论: {{ disposition or '未填写' }}
+误报反馈数: {{ fp_count }}
+
+## 事件时间线
+
+{{ timeline_text }}
+
+## 输出要求（严格 JSON）
+
+{% raw %}
+{
+    "root_cause": "根因分析（1-2句话）",
+    "impact": "影响评估（1-2句话）",
+    "lessons": ["经验教训1", "经验教训2"],
+    "gaps": "检测盲区描述",
+    "rule_improvements": [
+        {"rule_id": "", "suggestion": "建议内容"}
+    ]
+}
+{% endraw %}

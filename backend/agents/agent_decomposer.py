@@ -36,20 +36,23 @@ logger = logging.getLogger(__name__)
 # ── 规则引擎（非LLM快速决策路径） ──
 
 def _rule_based_depth(event: dict, anomaly_score: float) -> str:
-    """基于规则的快速审核深度决策"""
+    """基于规则的快速审核深度决策。
+
+    PR1 / P0-9: deep 只在非 LLM 信号或 critical 时开启（默认路径 LLM hop ≤ 3）。
+    """
+    from veto_gates import extract_non_llm_signals, HIGH_RISK_EVENT_TYPES
+
     severity = event.get("severity", "info")
     event_type = event.get("event", event.get("type", ""))
+    signals = extract_non_llm_signals(event, anomaly_score=anomaly_score)
 
-    # 高危关键词 → 深度审核
-    high_risk_types = {
-        "C2_BEACON", "DATA_EXFIL", "MALWARE_DETECT",
-        "RANSOMWARE", "LATERAL_MOVE", "PRIV_ESC",
-    }
-    if event_type in high_risk_types:
-        return AUDIT_DEPTH_DEEP
-
-    # 严重度 + 异常分 决策
-    if severity in ("critical",) or anomaly_score > 0.7:
+    # deep：critical / 高异常 / 检测器命中 / 高危事件类型（来自日志源/检测器，非 LLM）
+    if (
+        severity == "critical"
+        or anomaly_score > 0.7
+        or signals.has_signal
+        or event_type in HIGH_RISK_EVENT_TYPES
+    ):
         return AUDIT_DEPTH_DEEP
     if severity in ("high", "medium") or anomaly_score > 0.4:
         return AUDIT_DEPTH_STANDARD
@@ -443,24 +446,18 @@ class Decomposer(BaseAuditComponent):
         event_json = json.dumps(event, ensure_ascii=False, indent=2)
         reasons_str = "\n".join(anomaly_reasons) if anomaly_reasons else "无"
 
-        prompt = f"""你是安全分析专家。请对以下安全事件做初步分析，输出 JSON。
-
-## 安全事件
-{event_json}
-
-## 异常检测报告
-分数: {anomaly_score:.3f}
-原因: {reasons_str}
-
-## 分析要求
-1. 分析该事件是否可能是真实威胁
-2. 判断需要调哪些工具来确认
-3. 输出 JSON: {{"初步判断":"威胁/疑似/正常","需要关注的IP":[],"需要查询的方向":[],"分析理由":"..."}}"""
+        from prompts import render
+        prompt = render(
+            "audit/decomposer_initial_analysis",
+            event_json=event_json,
+            anomaly_score=anomaly_score,
+            reasons_str=reasons_str,
+        )
 
         # D3: 统一使用 self.llm_chat（继承自 BaseAuditComponent）
         # 原 set_trace_context 调用已合并到 llm_chat，避免重复设置
         result = await self.llm_chat([
-            {"role": "system", "content": "你是安全分析专家，输出JSON格式。"},
+            {"role": "system", "content": render("audit/decomposer_initial_analysis_system")},
             {"role": "user", "content": prompt},
         ])
         return result

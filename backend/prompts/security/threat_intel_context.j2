@@ -1,0 +1,25 @@
+你是一位威胁情报分析师。请根据以下 IOC 命中信息，生成威胁上下文摘要。
+
+## 触发事件
+
+类型: {{ event_type }}, 源: {{ src_ip }} → 目标: {{ dst_ip }}
+
+## IOC 命中 ({{ ioc_hits|length }} 条)
+
+{{ hits_str }}
+
+## 信誉评分
+
+{{ reputation_scores }}
+
+## 输出要求 (严格 JSON)
+
+{% raw %}
+{
+  "threat_actor": "APT组织名/犯罪团伙/未知",
+  "campaign": "关联的攻击活动名称或描述",
+  "infrastructure_profile": "C2基础设施特征描述(1句话)",
+  "relevance": "high|medium|low (与当前事件的关联度)",
+  "defense_actions": ["建议1", "建议2"]
+}
+{% endraw %}

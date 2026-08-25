@@ -30,30 +30,15 @@ class AgentA(BaseAgent):
             include_correlation=True,
         )
 
-        prompt = f"""你是安全分析专家。请基于完整的上下文信息分析安全事件，输出 JSON 格式的分析结果。
-
-## 安全上下文（完整事件 + 异常标记 + 攻击链）
-{security_context if security_context else '（无）'}
-
-## 当前待分析事件
-{user_input}
-
-## 分析要求
-1. 仔细查看异常检测标记的事件
-2. 确认攻击链的完整性
-3. 注意低严重度事件的组合风险
-4. 如果发现被遗漏的威胁，务必标记
-
-{{"威胁判定":"是/否/疑似","威胁类型":"C2/DDoS/数据外泄/横向移动/勒索软件/其他","影响评估":"...","涉及实体":{{"src_ip":"...","dst_ip":"..."}},"置信度":0.0-1.0,"分析摘要":"...","需要紧急处理":true/false,"遗漏告警":["之前未识别的事件描述..."]}}"""
+        from prompts import render
+        prompt = render("audit/agent_a_analyze",
+                        security_context=security_context,
+                        user_input=user_input)
 
         result = await self.llm_chat([
             {
                 "role": "system",
-                "content": (
-                    "你是一个严谨的安全分析专家。分析时必须基于完整上下文，"
-                    "注意低严重度事件的组合风险。宁可误报不可漏报。"
-                    "严格按照 JSON 格式输出。"
-                ),
+                "content": render("audit/agent_a_analyze_system"),
             },
             {"role": "user", "content": prompt},
         ])
@@ -63,10 +48,15 @@ class AgentA(BaseAgent):
             f"[分析结果] {result}"
         )
 
-        embedding = await embedder.embed(user_input)
+        from memory_guard import structured_memory_content
+        mem_text = structured_memory_content(
+            "analysis", result[:200], provenance_id=session_id,
+        )
+        embedding = await embedder.embed(mem_text)
         await vector_store.store_memory(
-            session, f"分析Agent处理: {user_input[:100]}", embedding,
-            agent_id=self.agent_id, metadata={"type": "analysis"}
+            session, mem_text, embedding,
+            agent_id=self.agent_id, metadata={"type": "analysis"},
+            source_type="agent_output", provenance_id=session_id,
         )
 
         return {"agent": self.display_name, "result": result}

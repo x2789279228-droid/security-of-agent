@@ -1,0 +1,15 @@
+复核以下审计结论是否完整。请对照各块结论与汇总结论，判断是否有遗漏威胁、是否需要人工复核，并仅输出下列 JSON。
+
+## 各块结论
+
+{{ v_text }}
+
+## 汇总结论
+
+威胁={{ threat_detected }} 类型={{ threat_type }} 置信度={{ confidence }}
+
+## 复核
+
+{% raw %}
+{"is_complete":true/false,"abstain":true/false,"missed_threats":[],"needs_human":true/false,"review_notes":"..."}
+{% endraw %}

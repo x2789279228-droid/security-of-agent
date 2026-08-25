@@ -1,0 +1,26 @@
+HTTP {{ m }} {{ url }}
+
+Content-Type: {{ response_content_type }}
+Response Size: {{ response_size }} bytes
+源IP: {{ src_ip }} → 目标IP: {{ dst_ip }}
+规则命中: {{ rule_hit }}
+响应体片段 (前500):
+{{ body_snippet }}
+
+分类为下列之一:
+
+- PII (个人身份信息)
+- financial (财务/信用卡)
+- credentials (凭证/密钥)
+- ip (知识产权/源码)
+- none (误报)
+
+输出 JSON:
+
+{% raw %}
+{"is_sensitive": true/false, "category": "PII",
+ "confidence": 0.0-1.0, "false_positive_prob": 0.0-1.0,
+ "rationale": "短理由", "recommended_action": "audit"}
+{% endraw %}
+
+recommended_action 可选: block / audit / monitor / ignore

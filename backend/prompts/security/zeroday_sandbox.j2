@@ -1,0 +1,38 @@
+你是一位恶意软件逆向工程师。请解读以下沙箱分析结果。
+
+## 样本
+
+SHA256: {{ sample_hash }}
+判定: {{ verdict }} (评分: {{ '%.1f'|format(score) }}/10)
+
+## 行为摘要
+
+{{ behavior_summary }}
+
+## MITRE ATT&CK 技术
+
+{{ techniques_str or '无' }}
+
+## 网络 IOC
+
+{{ network_str or '无' }}
+
+## 进程树
+
+{{ process_str or '无' }}
+
+## 触发签名
+
+{{ signatures[:10]|join(', ') if signatures else '无' }}
+
+## 输出要求 (严格 JSON)
+
+{% raw %}
+{
+  "attack_narrative": "2-3句话描述恶意行为链",
+  "evasion_techniques": ["检测到的防御绕过技术"],
+  "family_assessment": "可能的恶意软件家族及变种关系",
+  "kill_chain": ["阶段1", "阶段2", "阶段3"],
+  "response_actions": ["建议1", "建议2", "建议3"]
+}
+{% endraw %}

@@ -39,10 +39,12 @@ class AuditChunk:
         for e in self.events:
             sev = e.get("severity", "?").upper()
             et = e.get("event_type", e.get("type", "?"))
-            msg = (e.get("message", "") or "")[:150]
+            from memory_guard import sanitize_untrusted_text
+            msg = sanitize_untrusted_text(e.get("message", "") or "", max_len=150)
             aid = e.get("id", e.get("event_id", "?"))
             lines.append(f"  [{sev}] [{et}] #{aid} {msg}")
-        return "\n".join(lines)
+        body = "\n".join(lines)
+        return f"<untrusted_log source=\"audit_chunk\">\n{body}\n</untrusted_log>"
 
 
 class Chunker:

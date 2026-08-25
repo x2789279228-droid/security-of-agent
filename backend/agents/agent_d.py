@@ -138,17 +138,13 @@ class AgentD(BaseAgent):
         context = "\n".join(context_parts)
 
         # 7. LLM 审查
-        prompt = f"""你是安全审计审查专家，专门发现其他AI Agent遗漏的安全威胁。
-
-{context}"""
+        from prompts import render
+        prompt = render("audit/agent_d_audit", context=context)
 
         result = await self.llm_chat([
             {
                 "role": "system",
-                "content": (
-                    "你是一个严格的审查专家。你的唯一职责是找出前序审核流水线遗漏的安全威胁。"
-                    "宁可误报不可漏报。输出严格的 JSON 格式。"
-                ),
+                "content": render("audit/agent_d_audit_system"),
             },
             {"role": "user", "content": prompt},
         ])

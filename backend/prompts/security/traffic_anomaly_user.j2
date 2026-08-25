@@ -1,0 +1,27 @@
+IP: {{ ip }}
+指标: {{ metric }}
+当前值: {{ current_value }}
+期望值: {{ expected }}
+基线均值: {{ mean }}
+标准差: {{ std }}
+Z分数: {{ z_score }}
+季节分量: {{ seasonal_component }}
+原因标签: {{ reasons }}
+最近模式: {{ recent_pattern or '无' }}
+
+判定为下列之一:
+
+- c2_beacon (C2 信标,固定间隔心跳)
+- data_exfil (数据外泄,大流量出站)
+- dns_tunnel (DNS 隧道,异常 DNS 查询)
+- normal_burst (业务突发,可解释的正常流量)
+- unknown (信息不足)
+
+输出 JSON:
+
+{% raw %}
+{"verdict":"c2_beacon","confidence":0.8,
+ "rationale":"短理由","suggested_action":"isolate_host"}
+{% endraw %}
+
+suggested_action 可选: isolate_host / rate_limit / monitor / ignore

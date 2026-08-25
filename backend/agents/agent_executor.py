@@ -81,10 +81,27 @@ class Executor:
             audit_chunks, knowledge_chunks=knowledge_chunks
         )
 
-        # 5b. EvidenceVerifier 知识库交叉验证（Layer 2 校验）
-        kb_verification = await self._verify_claims_with_knowledge(
-            session, chunk_verdicts, raw_event
+        from veto_gates import (
+            hop_stats_from_verdicts,
+            should_run_deep_llm_hops,
+            extract_non_llm_signals,
         )
+        hop_stats = hop_stats_from_verdicts(chunk_verdicts)
+        skip_reasoning = hop_stats.skip_reasoning
+        run_deep_hops = should_run_deep_llm_hops(depth, skip_reasoning)
+        if skip_reasoning:
+            logger.warning(
+                f"Executor hop-budget early-stop: risk={hop_stats.avg_hallucination_risk:.2f} "
+                f"grounding={hop_stats.avg_grounding:.2f} "
+                f"completeness={hop_stats.evidence_completeness:.2f}"
+            )
+
+        # 5b. EvidenceVerifier 知识库交叉验证 — 仅 deep 且未早停（控制 LLM hop）
+        kb_verification = {"verified": False, "supported": 0, "unsupported": 0, "risk": 0.0}
+        if run_deep_hops:
+            kb_verification = await self._verify_claims_with_knowledge(
+                session, chunk_verdicts, raw_event
+            )
 
         # 6. 收集攻击链信息（如有）
         chain_info = self._extract_chain_info(all_results)
@@ -92,11 +109,14 @@ class Executor:
         # 6b. 收集知识库检索结果 (RAG)
         rag_context = self._extract_rag_context(all_results)
 
-        # 6c. 深度分析 — 前置合成模式：在 synthesize 之前执行，
-        # 让其结论作为额外 section 注入 synthesize prompt，深度分析回流 audit_result
-        # （旧实现把 deep_text 仅塞入 tool_results 展示用，对最终结论无影响）
+        signals = extract_non_llm_signals(
+            raw_event, tool_results=all_results, chain_info=chain_info,
+        )
+
+        # 6c. 深度分析 — 前置合成模式：在 synthesize 之前执行。
+        # PR1: 仅 deep 且未触发早停时运行，禁止用推理 hop 填补无证据。
         deep_text = ""
-        if deep_calls:
+        if deep_calls and run_deep_hops:
             deep_text = await self._llm_deep_analyze(
                 raw_event, audit_chunks, chunk_verdicts, depth
             )
@@ -106,27 +126,40 @@ class Executor:
                     tool="llm.deep_analyze", success=True,
                     data=deep_text, duration_ms=0,
                 ))
+        elif deep_calls:
+            logger.info("Executor: skipped llm.deep_analyze (non-deep or hop budget)")
 
         # 7. LLM 汇总所有块结论 → AuditResult（深度分析作为额外上下文注入）
         audit_result = await self._synthesize_from_chunks(
             raw_event, audit_chunks, chunk_verdicts,
             chain_info, depth, rag_context, kb_verification,
             deep_analysis=deep_text,
+            signals=signals,
+            hop_stats=hop_stats,
         )
         audit_result.deep_analysis = deep_text
 
-        # 8. recheck
-        if recheck_calls:
+        # 8. recheck — 只允许抬升 needs_human，不允许升级威胁
+        if recheck_calls and run_deep_hops:
             recheck = await self._llm_recheck(
                 raw_event, audit_result, chunk_verdicts
             )
-            audit_result.needs_human_review = bool(recheck.get("needs_human", False))
+            audit_result.needs_human_review = bool(
+                audit_result.needs_human_review or recheck.get("needs_human", False)
+            )
+            if recheck.get("abstain"):
+                audit_result.needs_human_review = True
+                if audit_result.verdict == "confirmed" or audit_result.threat_detected:
+                    audit_result.threat_detected = False
+                    audit_result.verdict = "insufficient_evidence"
             for rc in recheck_calls:
                 all_results.append(ToolResult(
                     call_id=rc.call_id, task_id=rc.task_id,
                     tool="llm.recheck", success=True,
                     data=recheck, duration_ms=0,
                 ))
+        elif recheck_calls:
+            logger.info("Executor: skipped llm.recheck (non-deep or hop budget)")
 
         audit_result.tool_results = all_results
 
@@ -384,11 +417,11 @@ class Executor:
                 )
                 verdicts.append(ChunkVerdict(
                     chunk_id=chunk.chunk_id,
-                    threat_detected=True,
+                    threat_detected=False,
                     confidence=0.0,
-                    severity="high",
+                    severity="info",
                     summary=f"审核异常: {type(result).__name__}",
-                    alert="chunk 审核异常，需人工复核",
+                    alert="chunk 审核异常，需人工复核（不计入威胁投票）",
                     unsubstantiated=True,
                     hallucination_risk=1.0,
                     all_event_ids_in_chunk=[
@@ -417,6 +450,8 @@ class Executor:
         rag_context: str = "",
         kb_verification: dict = None,
         deep_analysis: str = "",
+        signals=None,
+        hop_stats=None,
     ) -> AuditResult:
         """汇总所有块级结论 → AuditResult（含交叉验证）
 
@@ -428,8 +463,10 @@ class Executor:
         if not chunks or not verdicts:
             return AuditResult(
                 threat_detected=False,
+                verdict="insufficient_evidence",
                 summary="无事件可审核",
                 severity="info",
+                needs_human_review=True,
             )
 
         # ── 交叉验证：检查每条断言是否有真实事件支撑 ──
@@ -471,8 +508,9 @@ class Executor:
             for issue in all_validation_issues[:5]:
                 logger.warning(f"  Evidence issue: {issue}")
 
-        # 构建汇总 prompt（含 Grounding 报告）
+        # 构建汇总 prompt：只列出 admitted（grounded/partial）主张，ungrounded 单独列出禁止采纳
         block_summaries = []
+        discarded_for_prompt = []
         for chunk, verdict in zip(chunks, verdicts):
             status = "🚨" if verdict.threat_detected else "✅"
             risk_tag = f" [幻觉风险={verdict.hallucination_risk:.2f}]" if verdict.unsubstantiated else ""
@@ -481,9 +519,14 @@ class Executor:
             for claim in verdict.threat_claims:
                 eids = claim.get("evidence_ids", [])
                 quotes = claim.get("evidence_quotes", [])
+                gv = claim.get("grounding_verdict", "admitted")
                 claims_detail += (
-                    f"      - {claim.get('type','?')} conf={claim.get('confidence',0):.2f} "
+                    f"      - [{gv}] {claim.get('type','?')} conf={claim.get('confidence',0):.2f} "
                     f"evidence_ids={eids} quotes={len(quotes)}条\n"
+                )
+            for dc in getattr(verdict, "discarded_claims", None) or []:
+                discarded_for_prompt.append(
+                    f"  - [{chunk.chunk_id}] {dc.get('type','?')}: {str(dc.get('summary',''))[:80]}"
                 )
             block_summaries.append(
                 f"{status} 块 [{chunk.chunk_id}] ({chunk.label}){risk_tag}{grounding_tag}\n"
@@ -495,7 +538,8 @@ class Executor:
             )
 
         summary_text = "\n".join(block_summaries)
-        event_json = json.dumps(raw_event, ensure_ascii=False)[:500] if raw_event else ""
+        from memory_guard import sanitize_event_for_llm
+        event_json = json.dumps(sanitize_event_for_llm(raw_event), ensure_ascii=False)[:500] if raw_event else ""
 
         # 注入验证结果到 prompt
         verification_section = (
@@ -509,8 +553,13 @@ class Executor:
                 f"  ⚠️ {issue}" for issue in all_validation_issues[:5]
             )
         verification_section += (
-            "\n注意: 无证据支撑的断言在汇总时应被忽略或降权。\n"
+            "\n硬约束: ungrounded 断言已剥离，禁止写进 threat_detected；"
+            "不得发明新的 evidence_ids / TTP / 实体。证据不足须 abstain=true。\n"
         )
+        if discarded_for_prompt:
+            verification_section += "已剥离（禁止采纳）:\n" + "\n".join(
+                discarded_for_prompt[:8]
+            ) + "\n"
 
         # 知识库交叉验证结果
         kb_section = ""
@@ -535,54 +584,26 @@ class Executor:
                 f"注意: 该深度研判已经过跨块关联分析，请在汇总时纳入或显式反驳。\n"
             )
 
-        prompt = f"""你是安全审计结论综合专家。汇总以下所有审核块的结论，输出最终审计结论。
-
-## 原始事件
-{event_json}
-
-## 审核深度
-{depth}
-
-## 攻击链信息
-{chain_info if chain_info else '（无）'}
-
-## 安全知识库参考 (RAG)
-{rag_context if rag_context else '（未检索到相关知识）'}
-
-{deep_section}
-
-## 交叉验证
-{verification_section}
-
-{kb_section}
-
-## 各审核块结论（共 {len(verdicts)} 块）
-{summary_text}
-
-## 输出要求（严格遵循）
-1. 只采纳有事件证据支撑的断言（即有 evidence_ids 的）
-2. 无证据的断言应被忽略
-3. 最终置信度应参考交叉验证结果
-4. 如果安全知识库有相关参考，在 summary 中引用知识库条目
-
-{{
-    "threat_detected": true/false,
-    "threat_type": "C2/DDoS/数据外泄/横向移动/勒索软件/端口扫描/暴力破解/其他/混合",
-    "confidence": 0.0-1.0,
-    "severity": "critical/high/medium/low/info",
-    "summary": "最终审计结论摘要（引用具体事件ID）",
-    "affected_entities": {{"src_ip": "", "dst_ip": ""}},
-    "suggested_actions": [],
-    "needs_human_review": true/false,
-    "evidence_summary": "支撑最终结论的关键证据ID列表"
-}}"""
+        from prompts import render
+        prompt = render(
+            "audit/executor_synthesize",
+            event_json=event_json,
+            depth=depth,
+            chain_info=chain_info,
+            rag_context=rag_context,
+            deep_section=deep_section,
+            verification_section=verification_section,
+            kb_section=kb_section,
+            summary_text=summary_text,
+            verdicts=verdicts,
+        )
 
         from trace_hook import set_trace_context
         set_trace_context(operation="execute")
         result = await summary.llm.chat([
             {
                 "role": "system",
-                "content": "你是严谨的安全审计专家。只采纳有证据支撑的结论，输出JSON。",
+                "content": render("audit/executor_synthesize_system"),
             },
             {"role": "user", "content": prompt},
         ])
@@ -596,12 +617,14 @@ class Executor:
         if parsed is None:
             logger.warning("Synthesis parse failed completely")
             return AuditResult(
-                threat_detected=any(v.threat_detected for v in verdicts),
+                threat_detected=False,
+                verdict="insufficient_evidence",
                 summary="汇总解析失败",
                 needs_human_review=True,
             )
 
         try:
+            from veto_gates import apply_confirmation_gate, extract_non_llm_signals
 
             # 应用证据完整度调整（设最低置信度下限 0.1，防止坍缩到 0）
             raw_confidence = parsed.get("confidence", 0.0)
@@ -630,34 +653,79 @@ class Executor:
                 f"= {adjusted_confidence:.2f}"
             )
 
-            needs_human = (
+            admitted_count = sum(len(v.threat_claims) for v in verdicts)
+            discarded_all = []
+            for v in verdicts:
+                discarded_all.extend(getattr(v, "discarded_claims", None) or [])
+
+            gate_signals = signals or extract_non_llm_signals(
+                raw_event, chain_info=chain_info,
+            )
+            extra_human = (
                 parsed.get("needs_human_review", False)
-                or avg_hallucination_risk > 0.6
+                or avg_hallucination_risk > 0.3
                 or evidence_completeness < 0.3
-                or avg_grounding < 0.4
+                or avg_grounding < 0.5
                 or kb_risk > 0.7
+                or bool(parsed.get("abstain"))
+            )
+            decision = apply_confirmation_gate(
+                llm_threat_detected=bool(parsed.get("threat_detected", False)),
+                llm_abstain=bool(parsed.get("abstain")),
+                signals=gate_signals,
+                has_admitted_claims=admitted_count > 0,
+                extra_human=extra_human,
             )
 
+            logger.info(
+                f"Confirmation gate: llm_threat={parsed.get('threat_detected')} "
+                f"→ {decision.verdict} threat={decision.threat_detected} "
+                f"signal={gate_signals.has_signal} admitted={admitted_count} "
+                f"reason={decision.reason}"
+            )
+
+            hop_trace = []
+            if hop_stats is not None:
+                hop_trace.append({
+                    "hop": "sub_auditor",
+                    "avg_hallucination_risk": round(hop_stats.avg_hallucination_risk, 4),
+                    "avg_grounding": round(hop_stats.avg_grounding, 4),
+                    "skip_reasoning": hop_stats.skip_reasoning,
+                })
+            hop_trace.append({
+                "hop": "synthesize",
+                "verdict": decision.verdict,
+                "reason": decision.reason,
+            })
+
             return AuditResult(
-                threat_detected=parsed.get("threat_detected", False),
-                threat_type=parsed.get("threat_type", ""),
+                threat_detected=decision.threat_detected,
+                threat_type=parsed.get("threat_type", "") if decision.threat_detected else "",
                 confidence=round(adjusted_confidence, 4),
-                severity=parsed.get("severity", "info"),
+                severity=parsed.get("severity", "info") if decision.threat_detected else "info",
                 summary=(
                     f"{parsed.get('summary','')} "
-                    f"[证据完整度={evidence_completeness:.0%}]"
+                    f"[证据完整度={evidence_completeness:.0%} "
+                    f"verdict={decision.verdict}]"
                 ),
                 evidence=[v.to_dict() if hasattr(v, 'to_dict') else {"summary": v.summary}
                           for v in verdicts],
                 affected_entities=parsed.get("affected_entities", {}),
-                suggested_actions=parsed.get("suggested_actions", []),
-                needs_human_review=needs_human,
+                suggested_actions=parsed.get("suggested_actions", []) if decision.threat_detected else [],
+                needs_human_review=decision.needs_human_review,
+                verdict=decision.verdict,
+                discarded_claims=discarded_all,
+                hop_trace=hop_trace,
+                non_llm_signals=gate_signals.to_dict(),
+                grounding_score=avg_grounding,
+                kb_verification=kb_verification or {},
             )
         except Exception as e:
             logger.warning(f"Synthesis parse failed: {e}")
             return AuditResult(
-                threat_detected=any(v.threat_detected for v in verdicts),
-                summary=f"汇总解析失败",
+                threat_detected=False,
+                verdict="insufficient_evidence",
+                summary="汇总解析失败",
                 needs_human_review=True,
             )
 
@@ -673,21 +741,12 @@ class Executor:
             f"types={','.join(c.get('type', '') for c in v.threat_claims[:5])} alert={v.alert[:80]}"
             for v in verdicts
         )
-        prompt = f"""你是深度安全分析专家。基于所有审核块的结论，进行深度综合研判。
-
-## 各块结论
-{v_text}
-
-## 深度分析要求
-1. 是否存在多个块之间的关联威胁？
-2. 是否存在跨时间窗口的攻击模式？
-3. 当前的置信度是否合理？
-
-{{"深度研判":"...","跨块关联":[],"置信度评估":"...","补充建议":[]}}"""
+        from prompts import render
+        prompt = render("audit/executor_deep", v_text=v_text)
         from trace_hook import set_trace_context
         set_trace_context(operation="execute_deep")
         return await summary.llm.chat([
-            {"role": "system", "content": "输出JSON格式的深度分析。"},
+            {"role": "system", "content": render("audit/executor_deep_system")},
             {"role": "user", "content": prompt},
         ])
 
@@ -701,20 +760,18 @@ class Executor:
             f"[{v.chunk_id}] threat={v.threat_detected} conf={v.confidence:.2f}"
             for v in verdicts
         )
-        prompt = f"""复核以下审计结论是否完整。
-
-## 各块结论
-{v_text}
-
-## 汇总结论
-威胁={audit.threat_detected} 类型={audit.threat_type} 置信度={audit.confidence}
-
-## 复核
-{{"is_complete":true/false,"missed_threats":[],"needs_human":true/false,"review_notes":"..."}}"""
+        from prompts import render
+        prompt = render(
+            "audit/executor_recheck",
+            v_text=v_text,
+            threat_detected=audit.threat_detected,
+            threat_type=audit.threat_type,
+            confidence=audit.confidence,
+        )
         from trace_hook import set_trace_context
         set_trace_context(operation="execute_recheck")
         result = await summary.llm.chat([
-            {"role": "system", "content": "输出JSON。"},
+            {"role": "system", "content": render("audit/executor_recheck_system")},
             {"role": "user", "content": prompt},
         ])
         try:
@@ -736,6 +793,10 @@ class Executor:
                 return True
 
             parsed["needs_human"] = _as_bool(parsed.get("needs_human", False))
+            parsed["abstain"] = _as_bool(parsed.get("abstain", False))
+            if parsed["abstain"]:
+                parsed["needs_human"] = True
+                parsed["missed_threats"] = []
             # is_complete 用于完整性说明，不强转；保留分析用途
             if "is_complete" in parsed:
                 parsed["is_complete"] = _as_bool(parsed["is_complete"])

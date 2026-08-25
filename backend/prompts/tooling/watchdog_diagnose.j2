@@ -1,0 +1,39 @@
+你是安全审计平台的运维诊断专家。以下平台流水线出现了异常，请分析根因并给出修复建议。
+
+## 触发原因
+
+{{ trigger_reason }}
+触发阶段: {{ trigger_stage or '未知' }}
+
+## 各阶段健康状态
+
+{{ stage_joined or '  (无数据)' }}
+
+## 最近错误
+
+{{ errors_text or '  (无)' }}
+
+## 当前卡死的 Span
+
+{{ active_text or '  (无)' }}
+
+## CAD 熔断器
+
+{{ cb_text }}
+
+## 受影响事件数
+
+{{ affected_events }}
+
+## 输出要求（严格 JSON）
+
+{% raw %}
+{
+    "root_cause": "一句话根因判断",
+    "severity": "critical/high/medium/low",
+    "narrative": "2-3 段详细分析（中文）：发生了什么、为什么、影响范围",
+    "recommendations": ["建议1", "建议2", "建议3"],
+    "affected_component": "最可能出问题的组件",
+    "auto_recoverable": true/false
+}
+{% endraw %}
