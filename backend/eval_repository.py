@@ -270,6 +270,12 @@ async def get_trace_stats(caller: str = "") -> dict:
                 ) if conditions else select(func.count(AgentTrace.id)).where(AgentTrace.status == "error")
             )).scalar() or 0
 
+            degraded = (await session.execute(
+                select(func.count(AgentTrace.id)).where(
+                    *(conditions + [AgentTrace.status == "degraded"])
+                ) if conditions else select(func.count(AgentTrace.id)).where(AgentTrace.status == "degraded")
+            )).scalar() or 0
+
             by_operation = {}
             op_rows = (await session.execute(
                 select(AgentTrace.operation, func.count(AgentTrace.id)).where(*conditions)
@@ -280,6 +286,26 @@ async def get_trace_stats(caller: str = "") -> dict:
             for op, cnt in op_rows:
                 by_operation[op] = int(cnt or 0)
 
+            by_error_type = {}
+            et_rows = (await session.execute(
+                select(AgentTrace.error_type, func.count(AgentTrace.id))
+                .where(*(conditions + [AgentTrace.status == "error"]))
+                .group_by(AgentTrace.error_type)
+            )).all()
+            for et, cnt in et_rows:
+                key = et or "unknown"
+                by_error_type[key] = int(cnt or 0)
+
+            by_degraded_type = {}
+            dt_rows = (await session.execute(
+                select(AgentTrace.error_type, func.count(AgentTrace.id))
+                .where(*(conditions + [AgentTrace.status == "degraded"]))
+                .group_by(AgentTrace.error_type)
+            )).all()
+            for et, cnt in dt_rows:
+                key = et or "unknown"
+                by_degraded_type[key] = int(cnt or 0)
+
             return {
                 "total_calls": int(total),
                 "total_tokens": int(total_tokens),
@@ -288,7 +314,11 @@ async def get_trace_stats(caller: str = "") -> dict:
                 "avg_latency_ms": round(float(avg_latency), 2),
                 "error_rate": round(float(errors) / total, 4) if total else 0.0,
                 "error_count": int(errors),
+                "degraded_count": int(degraded),
+                "degraded_rate": round(float(degraded) / total, 4) if total else 0.0,
                 "by_operation": by_operation,
+                "by_error_type": by_error_type,
+                "by_degraded_type": by_degraded_type,
             }
     except Exception as e:
         logger.error(f"get_trace_stats failed: {e}")

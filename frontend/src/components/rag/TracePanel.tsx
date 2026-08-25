@@ -90,10 +90,10 @@ export function TracePanel() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
   const statCards = [
-    { label: 'LLM 调用次数', value: stats ? String(stats.total_calls) : '—', sub: stats && stats.total_calls > 0 ? `错误 ${stats.error_count}` : '' },
+    { label: 'LLM 调用次数', value: stats ? String(stats.total_calls) : '—', sub: stats && stats.total_calls > 0 ? `失败 ${stats.error_count}` : '' },
     { label: 'Token 消耗', value: stats ? fmtTokens(stats.total_tokens) : '—', sub: stats ? `输入 ${fmtTokens(stats.total_prompt_tokens)} · 输出 ${fmtTokens(stats.total_completion_tokens)}` : '' },
     { label: '平均延迟', value: stats ? fmtMs(stats.avg_latency_ms) : '—', sub: '' },
-    { label: '错误率', value: stats ? `${(stats.error_rate * 100).toFixed(1)}%` : '—', sub: '', danger: (stats?.error_rate ?? 0) > 0.1 },
+    { label: '错误率', value: stats ? `${(stats.error_rate * 100).toFixed(1)}%` : '—', sub: stats && stats.degraded_count ? `降级 ${stats.degraded_count} 次 · ${((stats.degraded_rate ?? 0) * 100).toFixed(1)}%` : '', danger: (stats?.error_rate ?? 0) > 0.1 },
   ]
 
   return (
@@ -132,10 +132,42 @@ export function TracePanel() {
           className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
           <option value="">全部状态</option>
           <option value="success">成功</option>
+          <option value="degraded">降级</option>
           <option value="error">失败</option>
         </select>
         <span className="text-xs font-sans text-ink-faint ml-auto">共 {total} 条</span>
       </div>
+
+      {/* 失败/降级原因分布 */}
+      {(stats?.by_error_type && Object.keys(stats.by_error_type).length > 0) ||
+       (stats?.by_degraded_type && Object.keys(stats.by_degraded_type).length > 0) ? (
+        <div className="grid grid-cols-2 gap-px bg-line border border-line rounded-lg overflow-hidden">
+          {stats?.by_error_type && Object.keys(stats.by_error_type).length > 0 && (
+            <div className="bg-card p-3">
+              <p className="text-[10px] font-sans text-ink-faint mb-1">失败原因分布 (error)</p>
+              <div className="space-y-1">
+                {Object.entries(stats.by_error_type).map(([k, v]) => (
+                  <div key={`e-${k}`} className="flex justify-between text-xs font-sans text-ink-soft">
+                    <span>{k || 'unknown'}</span><span className="tabular-nums text-red-700">{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {stats?.by_degraded_type && Object.keys(stats.by_degraded_type).length > 0 && (
+            <div className="bg-card p-3">
+              <p className="text-[10px] font-sans text-ink-faint mb-1">降级原因分布 (degraded)</p>
+              <div className="space-y-1">
+                {Object.entries(stats.by_degraded_type).map(([k, v]) => (
+                  <div key={`d-${k}`} className="flex justify-between text-xs font-sans text-ink-soft">
+                    <span>{k || 'unknown'}</span><span className="tabular-nums text-amber-700">{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
 
       {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
 
@@ -181,8 +213,13 @@ export function TracePanel() {
                       <td className="px-4 py-2.5 tabular-nums">{fmtMs(t.latency_ms)}</td>
                       <td className="px-4 py-2.5 tabular-nums">{t.retry_count || '—'}</td>
                       <td className="px-4 py-2.5 whitespace-nowrap">
-                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${t.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                          {t.status === 'success' ? '成功' : `失败${t.error_type ? `(${t.error_type})` : ''}`}
+                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                          t.status === 'success' ? 'bg-green-100 text-green-700'
+                          : t.status === 'degraded' ? 'bg-amber-100 text-amber-700'
+                          : 'bg-red-100 text-red-700'}`}>
+                          {t.status === 'success' ? '成功'
+                           : t.status === 'degraded' ? '降级'
+                           : `失败${t.error_type ? `(${t.error_type})` : ''}`}
                         </span>
                       </td>
                     </motion.tr>

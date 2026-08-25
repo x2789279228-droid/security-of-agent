@@ -173,7 +173,7 @@ class AgentTrace(Base):
     total_tokens = Column(Integer, default=0)
     latency_ms = Column(Float, default=0.0)
     cache_hit = Column(Boolean, default=False)
-    status = Column(String(20), default="success", index=True)      # success | error
+    status = Column(String(20), default="success", index=True)      # success | degraded | error
     error_type = Column(String(50), default="")
     retry_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)

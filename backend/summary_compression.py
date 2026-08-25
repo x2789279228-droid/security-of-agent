@@ -130,6 +130,44 @@ cost_tracker = CostTracker(
 )
 
 
+def _extract_text_content(data: dict) -> str:
+    """从 LLM 响应中稳健提取文本内容（兼容 OpenAI 标准与讯飞 MaaS/ASTRON 等非标准 schema）。
+
+    OpenAI 兼容: {choices:[{message:{content}}]} 或 delta.content (流式)
+    ASTRON/讯飞 MaaS: 可能为 {content:...} / {output_text:...} / {text:...} / {response:...}
+    """
+    if not isinstance(data, dict):
+        raise ValueError("LLM 响应不是 JSON 对象")
+    # 标准 OpenAI chat/completions
+    try:
+        choices = data.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or choices[0].get("delta") or {}
+            c = msg.get("content")
+            if isinstance(c, list):  # 多模态 content 数组 → 取首个 text
+                for part in c:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        c = part.get("text")
+                        break
+            if c is not None:
+                return str(c)
+    except Exception:
+        pass
+    # 常见非标准/扁平字段
+    for key in ("output_text", "text", "content", "response", "answer", "result"):
+        v = data.get(key)
+        if isinstance(v, str) and v:
+            return v
+    # 嵌套 choices[0].text (AISTUDIO/部分 vLLM)
+    try:
+        c = data["choices"][0].get("text")
+        if isinstance(c, str) and c:
+            return c
+    except Exception:
+        pass
+    raise ValueError(f"无法从 LLM 响应提取文本: {list(data.keys())[:6]}")
+
+
 class LLMClient:
     """LLM 客户端 — 支持重试、降级、成本控制、响应缓存"""
 
@@ -160,7 +198,7 @@ class LLMClient:
         if cost_tracker.is_over_budget():
             logger.warning(f"[CostControl] Daily budget exhausted, returning fallback")
             emit_trace(
-                status="error", error_type="budget_exhausted",
+                status="degraded", error_type="budget_exhausted",
                 prompt_tokens=prompt_tokens,
                 latency_ms=(time.time() - t_start) * 1000,
             )
@@ -185,7 +223,7 @@ class LLMClient:
         if not self.api_key:
             logger.warning("LLM API key not configured, returning fallback")
             emit_trace(
-                status="error", error_type="no_api_key",
+                status="degraded", error_type="no_api_key",
                 prompt_tokens=prompt_tokens,
                 latency_ms=(time.time() - t_start) * 1000,
             )
@@ -216,7 +254,7 @@ class LLMClient:
                     continue
                 resp.raise_for_status()
                 data = resp.json()
-                content = data["choices"][0]["message"]["content"]
+                content = _extract_text_content(data)
                 usage = data.get("usage") or {}
                 total_tokens = int(usage.get("total_tokens", 0)) or (
                     prompt_tokens + estimate_tokens(content)
@@ -255,7 +293,7 @@ class LLMClient:
                 logger.warning(f"LLM call attempt {attempt+1} failed: {e}")
         logger.error(f"LLM call failed after retries: {last_error}")
         emit_trace(
-            status="error", error_type=type(last_error).__name__ if last_error else "unknown",
+            status="degraded", error_type=type(last_error).__name__ if last_error else "unknown",
             model=self.model,
             prompt_tokens=prompt_tokens,
             latency_ms=(time.time() - t_start) * 1000,

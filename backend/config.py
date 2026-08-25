@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -193,4 +196,35 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_prefix = "SHARED_MEMORY_"
 
+
+def _load_project_root_env() -> None:
+    """从项目根目录加载 .env 并注入 os.environ，兼容乱码注释/非 UTF-8 行。
+
+    背景：pydantic-settings 的 env_file='.env' 只从运行 CWD 查找，且 python-dotenv
+    在 .env 含非 UTF-8(GBK)中文注释时整文件解析失败。此函数逐行按 ASCII 安全解析
+    只提取 KEY=VALUE，跳过注释/乱码行，兼容「本机以 backend/ 为 CWD」。
+    已存在环境变量(如 docker 注入)不覆盖。
+    """
+    import re
+    for cand in (Path(__file__).resolve().parent.parent / ".env", Path.cwd() / ".env"):
+        if not cand.exists():
+            continue
+        try:
+            raw = cand.read_bytes().splitlines()
+        except Exception:
+            continue
+        for ln in raw:
+            if not all(b < 128 for b in ln):    # 跳过含非 ASCII(中文注释/乱码)行
+                continue
+            line = ln.decode("latin-1").strip()
+            if not line or line.startswith("#"):
+                continue
+            m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
+            if m:
+                k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
+                if k not in os.environ:
+                    os.environ[k] = v
+
+
+_load_project_root_env()
 settings = Settings()
