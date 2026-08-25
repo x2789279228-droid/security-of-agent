@@ -511,6 +511,51 @@ class KafkaConsumerManager:
             "trace_id": trace_id,
         })
 
+        # ── P0 修复(审计闭环) ──
+        # Flink 只把"中危以下"事件路由进 security-audit-queue；高异常 / critical / high
+        # 的事件走 security-alerts 响应路径，导致这些"真正的问题"从未进入 Audit-LLM，
+        # 在日志中心永远停留在"待审计/审核中"。此处对命中告警路径的事件同样排队审计，
+        # 使高优先级问题进入审计闭环并标记为已分析。
+        severity = log_data["severity"]
+        if anomaly_score >= 0.6 or severity in ("critical", "high"):
+            self._queue_audit(
+                log_data=log_data,
+                anomaly_score=anomaly_score,
+                anomaly_reasons=anomaly_reasons,
+                session_id=session_id,
+                stored_id=stored.id,
+                trace_id=trace_id,
+            )
+
+    def _queue_audit(
+        self,
+        log_data: dict,
+        anomaly_score: float,
+        anomaly_reasons: list,
+        session_id: str,
+        stored_id: int,
+        trace_id: str,
+    ):
+        """将事件排入 Audit-LLM 流水线（enriched 告警路径与 audit-queue 共用）。"""
+        from log_ingestion import log_ingestor
+        from anomaly_detector import AnomalyReport
+
+        report = AnomalyReport(
+            event_id=stored_id,
+            anomaly_score=anomaly_score,
+            is_anomaly=anomaly_score >= 0.6,
+            deviation_sigma=anomaly_score * 5,
+            reasons=anomaly_reasons,
+        )
+        asyncio.create_task(
+            log_ingestor._audit_pipeline(session_id, stored_id, log_data, report)
+        )
+        logger.info(
+            f"[Kafka-Enriched-Audit] Queued event #{stored_id} for Audit-LLM "
+            f"(alert-path closure): {log_data.get('event')} score={anomaly_score:.2f} "
+            f"trace={trace_id[:8] if trace_id else 'none'}"
+        )
+
     async def _handle_audit_with_backpressure(self, event: dict, trace_id: str):
         """Audit-LLM 入口 — 通过信号量控制并发（背压）"""
         async with self._audit_semaphore:

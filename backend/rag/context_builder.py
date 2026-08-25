@@ -100,26 +100,8 @@ class RAGContextBuilder:
         if not context:
             return ""
 
-        prompt = f"""{context}
-
-## 待验证的断言
-{claim}
-
-## 验证要求
-请严格检查以上知识库内容，判断该断言是否被知识库支撑:
-1. 知识库中有明确证据支撑 → "supported"
-2. 知识库中有矛盾或否定证据 → "contradicted"
-3. 知识库中找不到相关证据 → "unsupported"
-
-输出 JSON:
-{{{{
-    "verdict": "supported/contradicted/unsupported",
-    "confidence": 0.0-1.0,
-    "supporting_evidence": ["引用的知识条目内容"],
-    "contradiction_detail": "矛盾的具体说明（如适用）",
-    "suggestion": "建议"
-}}}}
-"""
+        from prompts import render
+        prompt = render("rag/evidence_verify", context=context, claim=claim)
         return prompt
 
 

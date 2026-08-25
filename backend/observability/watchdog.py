@@ -233,41 +233,23 @@ class WatchdogAgent:
                 f"audit_count={cb.get('audit_count', 0)}"
             )
 
-            prompt = f"""你是安全审计平台的运维诊断专家。以下平台流水线出现了异常，请分析根因并给出修复建议。
-
-## 触发原因
-{trigger_reason}
-触发阶段: {trigger_stage or '未知'}
-
-## 各阶段健康状态
-{chr(10).join(stage_summary) if stage_summary else '  (无数据)'}
-
-## 最近错误
-{errors_text if errors_text else '  (无)'}
-
-## 当前卡死的 Span
-{active_text if active_text else '  (无)'}
-
-## CAD 熔断器
-{cb_text}
-
-## 受影响事件数
-{diag_data.get('affected_events', 0)}
-
-## 输出要求（严格 JSON）
-{{
-    "root_cause": "一句话根因判断",
-    "severity": "critical/high/medium/low",
-    "narrative": "2-3 段详细分析（中文）：发生了什么、为什么、影响范围",
-    "recommendations": ["建议1", "建议2", "建议3"],
-    "affected_component": "最可能出问题的组件",
-    "auto_recoverable": true/false
-}}"""
+            from prompts import render
+            stage_joined = chr(10).join(stage_summary) if stage_summary else "  (无数据)"
+            prompt = render(
+                "tooling/watchdog_diagnose",
+                trigger_reason=trigger_reason,
+                trigger_stage=trigger_stage,
+                stage_joined=stage_joined,
+                errors_text=errors_text,
+                active_text=active_text,
+                cb_text=cb_text,
+                affected_events=diag_data.get("affected_events", 0),
+            )
 
             from trace_hook import set_trace_context
             set_trace_context(operation="watchdog_diagnose", caller="watchdog")
             result = await summary.llm.chat([
-                {"role": "system", "content": "你是运维诊断专家，输出 JSON。"},
+                {"role": "system", "content": render("tooling/watchdog_diagnose_system")},
                 {"role": "user", "content": prompt},
             ])
 

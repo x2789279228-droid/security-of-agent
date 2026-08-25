@@ -4,16 +4,16 @@ LLM 输出的工具名常见不规范形态：
   - 大小写错误：Event_Store.Query / EVENT_STORE_QUERY
   - 分隔符错误：event-store-query / eventstorequery
   - 同义名称：query_events / search_events
-  - 拼写错误：event_store.querys
 
-本模块按以下顺序尝试解析：
-  1. 精确匹配
-  2. 前缀匹配（输入是标准名的前缀或反之）
-  3. 模糊匹配（difflib.SequenceMatcher，阈值 >= 0.6）
+解析顺序（PR1 / P0-6）：
+  1. 精确匹配（含大小写/分隔符归一）
+  2. 显式别名表
 
-完全自包含，仅依赖标准库 difflib。
+禁止：
+  - 前缀匹配（"alert" 误命中 alert_only）
+  - difflib 模糊匹配（阈值 0.6 会把干扰工具"纠正"成最近白名单工具）
+  未知工具必须 abstain，不得执行。
 """
-import difflib
 from typing import Tuple, Optional, List
 
 
@@ -64,49 +64,37 @@ TOOL_ALIASES = {
     "correlation_chains": "correlation.chains",
     "temporal":           "correlation.temporal",
     "entity_link":        "correlation.entity_link",
-    # 向量 / 知识检索
-    "search":             "vector.search",
+    # 向量 / 知识检索（不用过短别名 "search"/"knowledge"，避免干扰工具误匹配）
     "vector_search":      "vector.search",
     "embedding_search":   "vector.search",
-    "knowledge":          "knowledge.search",
     "knowledge_search":   "knowledge.search",
     "rag_search":         "knowledge.search",
     # 记忆树
     "memory_tree":        "memory_tree.related",
-    "related":            "memory_tree.related",
     # 滑动窗口
     "sliding_window":     "sliding_window.get",
     "window_get":         "sliding_window.get",
-    "evicted":            "sliding_window.evicted",
-    # 响应类
-    "block":              "block_ip",
+    "window_evicted":     "sliding_window.evicted",
+    # 响应类 — 只保留明确别名，禁止 block/kill/scan/alert 等短词
     "ban_ip":             "block_ip",
     "block_address":      "block_ip",
     "firewall_block":     "block_ip",
-    "isolate":            "isolate_host",
     "quarantine":         "isolate_host",
     "host_isolation":     "isolate_host",
-    "limit":              "rate_limit",
     "throttle":           "rate_limit",
-    "kill":               "terminate_process",
     "kill_process":       "terminate_process",
-    "alert":              "alert_only",
-    "notify":             "alert_only",
+    "notify_only":        "alert_only",
     "vuln_scan":          "vulnerability_scan",
-    "scan":               "vulnerability_scan",
 }
 
 
 class ToolResolver:
-    """工具名归一化解析器。"""
-
-    # difflib 相似度阈值（0~1，越高越严格）
-    FUZZY_THRESHOLD = 0.6
+    """工具名归一化解析器。只做精确匹配 + 显式别名，未知则 abstain。"""
 
     def resolve(self, raw_name: str) -> Tuple[Optional[str], Optional[str], str]:
         """返回 (标准工具名, 错误信息, 匹配方式)。
 
-        匹配方式：exact / prefix / alias / fuzzy / none
+        匹配方式：exact / alias / none
         """
         if not raw_name or not isinstance(raw_name, str):
             return None, "工具名为空", "none"
@@ -117,59 +105,26 @@ class ToolResolver:
         if name in ALL_TOOLS:
             return name, None, "exact"
 
-        # 2. 规范化匹配：统一小写 + 将 - 和空格替换为 _ 或 .
+        # 2. 规范化匹配：统一小写 + 将 - 和空格替换为 _
         normalized = self._normalize(name)
         for std_name in ALL_TOOLS:
             if self._normalize(std_name) == normalized:
                 return std_name, None, "exact"
 
-        # 3. 前缀匹配：输入是标准名的前缀，或标准名是输入的前缀
-        prefix_match = self._prefix_match(normalized)
-        if prefix_match:
-            return prefix_match, None, "prefix"
-
-        # 4. 别名匹配
-        alias_key = name.lower().replace(" ", "_").replace("-", "_")
+        # 3. 显式别名（含归一化后的别名键）
+        alias_key = self._normalize(name).replace(".", "_")
         if alias_key in TOOL_ALIASES:
             return TOOL_ALIASES[alias_key], None, "alias"
+        if name.lower() in TOOL_ALIASES:
+            return TOOL_ALIASES[name.lower()], None, "alias"
 
-        # 5. 模糊匹配：difflib.SequenceMatcher
-        best_match = None
-        best_ratio = 0.0
-        for std_name in ALL_TOOLS:
-            ratio = difflib.SequenceMatcher(None, normalized, self._normalize(std_name)).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_match = std_name
-
-        if best_match and best_ratio >= self.FUZZY_THRESHOLD:
-            return best_match, None, "fuzzy"
-
-        return None, f"无法识别工具名: '{raw_name}'", "none"
+        return None, f"无法识别工具名: '{raw_name}'（已拒绝模糊/前缀匹配）", "none"
 
     @staticmethod
     def _normalize(name: str) -> str:
         """规范化工具名：小写，- 和空格统一为 _，去掉多余分隔符。"""
         s = name.lower().strip()
         s = s.replace("-", "_").replace(" ", "_")
-        # 将连续多个 _ 或 . 合并
         while "__" in s:
             s = s.replace("__", "_")
         return s
-
-    @staticmethod
-    def _prefix_match(normalized: str) -> Optional[str]:
-        """前缀匹配：找唯一前缀命中的标准工具名。"""
-        candidates = []
-        for std_name in ALL_TOOLS:
-            std_norm = ToolResolver._normalize(std_name)
-            # 输入是标准名前缀（至少4字符避免误匹配）
-            if len(normalized) >= 4 and std_norm.startswith(normalized):
-                candidates.append(std_name)
-            # 标准名是输入前缀
-            elif len(std_norm) >= 4 and normalized.startswith(std_norm):
-                candidates.append(std_name)
-        # 仅在唯一命中时返回，避免歧义
-        if len(candidates) == 1:
-            return candidates[0]
-        return None

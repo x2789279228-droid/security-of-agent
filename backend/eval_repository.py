@@ -330,11 +330,15 @@ async def get_event_token_aggregation(
             if severity:
                 conditions.append(SecurityEvent.severity == severity)
 
-            sum_total = func.coalesce(func.sum(AgentTrace.total_tokens), 0)
             sum_prompt = func.coalesce(func.sum(AgentTrace.prompt_tokens), 0)
             sum_completion = func.coalesce(func.sum(AgentTrace.completion_tokens), 0)
             sum_errors = func.coalesce(
                 func.sum(sa_case((AgentTrace.status == "error", 1), else_=0)), 0
+            )
+            # total_tokens 列部分行缺失(为0), 用 prompt+completion 兜底保证总量/占比/费用一致
+            sum_total = sa_case(
+                (func.sum(AgentTrace.total_tokens) > 0, func.sum(AgentTrace.total_tokens)),
+                else_=sum_prompt + sum_completion,
             )
 
             # 事件总数 (分组行数)
@@ -440,30 +444,98 @@ async def get_event_token_aggregation(
 
 
 async def get_daily_token_usage(days: int = 14) -> list[dict]:
-    """近 N 天每日 token 用量 / 调用数趋势 (缺失日期补 0)"""
+    """近 N 天每日 token 用量 / 调用数趋势 (缺失日期补 0), 含输入输出拆分"""
     try:
         from datetime import datetime, timezone, timedelta
 
         async with async_session() as session:
             cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, days))
             day_col = func.date(AgentTrace.created_at)
+            sum_prompt = func.coalesce(func.sum(AgentTrace.prompt_tokens), 0)
+            sum_completion = func.coalesce(func.sum(AgentTrace.completion_tokens), 0)
+            total_expr = sa_case(
+                (func.sum(AgentTrace.total_tokens) > 0, func.sum(AgentTrace.total_tokens)),
+                else_=sum_prompt + sum_completion,
+            )
             rows = (await session.execute(
                 select(
                     day_col.label("day"),
-                    func.coalesce(func.sum(AgentTrace.total_tokens), 0).label("total_tokens"),
+                    total_expr.label("total_tokens"),
+                    sum_prompt.label("prompt_tokens"),
+                    sum_completion.label("completion_tokens"),
                     func.count(AgentTrace.id).label("calls"),
                 )
                 .where(AgentTrace.created_at >= cutoff)
                 .group_by(day_col)
                 .order_by(day_col)
             )).all()
-            by_day = {str(r.day): {"day": str(r.day), "total_tokens": int(r.total_tokens), "calls": int(r.calls)} for r in rows}
+            by_day = {
+                str(r.day): {
+                    "day": str(r.day), "total_tokens": int(r.total_tokens),
+                    "prompt_tokens": int(r.prompt_tokens),
+                    "completion_tokens": int(r.completion_tokens),
+                    "calls": int(r.calls),
+                }
+                for r in rows
+            }
             out = []
             today = datetime.now(timezone.utc).date()
             for i in range(max(1, days) - 1, -1, -1):
                 d = (today - timedelta(days=i)).isoformat()
-                out.append(by_day.get(d, {"day": d, "total_tokens": 0, "calls": 0}))
+                out.append(by_day.get(d, {
+                    "day": d, "total_tokens": 0,
+                    "prompt_tokens": 0, "completion_tokens": 0, "calls": 0,
+                }))
             return out
     except Exception as e:
         logger.error(f"get_daily_token_usage failed: {e}")
+        return []
+
+
+async def get_cost_by_caller(days: int = 14) -> list[dict]:
+    """按调用来源(caller)聚合 tokens 与调用数, 供“钱花在哪个模块”分账展示。
+
+    返回按 total_tokens 降序的 [{caller, calls, prompt_tokens, completion_tokens,
+    total_tokens, cost_yuan}], cost_yuan 用 cost_tracker 单价估算(¥, 见 estimate_cost_yuan)。
+    """
+    try:
+        from datetime import datetime, timezone, timedelta
+        from summary_compression import cost_tracker
+
+        async with async_session() as session:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+            sum_prompt = func.coalesce(func.sum(AgentTrace.prompt_tokens), 0)
+            sum_completion = func.coalesce(func.sum(AgentTrace.completion_tokens), 0)
+            # total_tokens 列部分行缺失(为0), 用 prompt+completion 兜底保证总量/占比准确
+            total_expr = sa_case(
+                (func.sum(AgentTrace.total_tokens) > 0, func.sum(AgentTrace.total_tokens)),
+                else_=sum_prompt + sum_completion,
+            )
+            rows = (await session.execute(
+                select(
+                    AgentTrace.caller,
+                    func.count(AgentTrace.id).label("calls"),
+                    sum_prompt.label("prompt_tokens"),
+                    sum_completion.label("completion_tokens"),
+                    total_expr.label("total_tokens"),
+                )
+                .where(AgentTrace.created_at >= cutoff)
+                .group_by(AgentTrace.caller)
+                .order_by(total_expr.desc())
+            )).all()
+            out = []
+            for r in rows:
+                prompt = int(r.prompt_tokens)
+                completion = int(r.completion_tokens)
+                out.append({
+                    "caller": r.caller or "unknown",
+                    "calls": int(r.calls),
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                    "total_tokens": int(r.total_tokens),
+                    "cost_yuan": round(cost_tracker.estimate_cost_yuan(prompt, completion), 4),
+                })
+            return out
+    except Exception as e:
+        logger.error(f"get_cost_by_caller failed: {e}")
         return []

@@ -16,7 +16,7 @@ RUN chmod +x /entrypoint.sh
 # 创建非 root 用户
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 # SSH 密钥暂存目录（entrypoint 会从这里复制到 /tmp/ssh 并修正权限）
-RUN mkdir -p /tmp/ssh-keys /tmp/ssh && chmod 777 /tmp/ssh-keys /tmp/ssh
+RUN mkdir -p /tmp/ssh-keys /tmp/ssh && chmod 700 /tmp/ssh-keys /tmp/ssh
 RUN chown -R appuser:appgroup /app
 
 EXPOSE 8000

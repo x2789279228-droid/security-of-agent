@@ -15,6 +15,9 @@ from eval_metrics import (
     tokenize,
     context_text,
     embedding_faithfulness_score,
+    LEXICAL_SUPPORT_THRESHOLD,
+    claim_is_supported,
+    extract_grounding_entities,
 )
 from eval_repository import save_evaluation_run
 
@@ -103,14 +106,15 @@ async def evaluate_faithfulness(
     context_embeddings: Optional[list[list[float]]] = None,
     persist: bool = True,
 ) -> dict:
-    """评估回答对上下文的忠实度（防幻觉）"""
+    """评估回答对上下文的忠实度（防幻觉）。词法阈值 0.35 + 实体蕴含。"""
     claims = split_claims(answer)
+    evidence = "\n".join(context_text(c) for c in (contexts or []))
     support_scores = [
-        max(lexical_overlap_score(claim, context_text(c)) for c in contexts)
-        if contexts else 0.0
+        lexical_overlap_score(claim, evidence) if evidence else 0.0
         for claim in claims
     ]
-    supported = [s for s in support_scores if s >= 0.18]
+    supported_flags = [claim_is_supported(claim, evidence) for claim in claims]
+    supported = [s for s, ok in zip(support_scores, supported_flags) if ok]
     unsupported_count = max(0, len(claims) - len(supported))
     faithfulness = round(len(supported) / len(claims), 4) if claims else 0.0
     citation_coverage = min(1.0, round(len(contexts) / max(1, len(claims)), 4)) if contexts else 0.0
@@ -133,12 +137,22 @@ async def evaluate_faithfulness(
         _score("unsupported_claim_ratio", 1 - (unsupported_count / max(1, len(claims))), 0.75,
                f"检测到 {unsupported_count} 条无支撑断言"),
         _score("semantic_faithfulness", semantic, 0.4, "基于 embedding 的语义忠实度"),
+        _score(
+            "entity_entailment",
+            1.0 if all(
+                not extract_grounding_entities(c) or claim_is_supported(c, evidence)
+                for c in claims
+            ) else 0.0,
+            1.0,
+            f"词法阈值={LEXICAL_SUPPORT_THRESHOLD}；断言实体须出现在证据中",
+        ),
     ]
 
     output = {
         "claim_count": len(claims),
         "unsupported_claim_count": unsupported_count,
         "support_scores": support_scores,
+        "lexical_threshold": LEXICAL_SUPPORT_THRESHOLD,
     }
     if persist:
         return await save_evaluation_run(

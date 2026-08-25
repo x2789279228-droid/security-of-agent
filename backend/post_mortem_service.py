@@ -214,35 +214,21 @@ class PostMortemService:
             for t in timeline[:20]
         )
 
-        prompt = f"""你是安全运营复盘专家。根据以下案例信息生成复盘分析。
-
-## 案例信息
-编号: {case.case_number}
-标题: {case.title}
-威胁类型: {case.threat_type}
-严重度: {case.severity}
-事件数: {case.event_count}
-源IP: {case.src_ips}
-处置结论: {case.disposition or '未填写'}
-误报反馈数: {fp_count}
-
-## 事件时间线
-{timeline_text}
-
-## 输出要求（严格 JSON）
-{{
-    "root_cause": "根因分析（1-2句话）",
-    "impact": "影响评估（1-2句话）",
-    "lessons": ["经验教训1", "经验教训2"],
-    "gaps": "检测盲区描述",
-    "rule_improvements": [
-        {{"rule_id": "", "suggestion": "建议内容"}}
-    ]
-}}"""
+        from prompts import render
+        prompt = render("tooling/post_mortem_review",
+                        case_number=case.case_number,
+                        title=case.title,
+                        threat_type=case.threat_type,
+                        severity=case.severity,
+                        event_count=case.event_count,
+                        src_ips=case.src_ips,
+                        disposition=case.disposition,
+                        fp_count=fp_count,
+                        timeline_text=timeline_text)
 
         set_trace_context(operation="post_mortem", caller="post_mortem_service")
         result = await summary.llm.chat([
-            {"role": "system", "content": "你是安全运营复盘专家，输出 JSON。"},
+            {"role": "system", "content": render("tooling/post_mortem_review_system")},
             {"role": "user", "content": prompt},
         ])
 

@@ -80,13 +80,21 @@ class CostTracker:
         return max(0, self.daily_budget - self._daily_usage[today])
 
     def estimate_cost_jpy(self, prompt_tokens: int, completion_tokens: int) -> float:
-        """按输入/输出每千 token 单价估算费用(¥), 未配置单价返回 0"""
+        """按输入/输出每千 token 单价估算费用。
+
+        注意: 返回值的单位与 price_*_per_1k 一致——本项目按 mimo-v2.5 官方单价配置为
+        ¥/1K tokens(0.001 输入 / 0.002 输出), 故返回人民币元(¥), 非日元。
+        该函数名保留历史命名, 语义请用 estimate_cost_yuan。
+        """
         cost = 0.0
         if self.price_input_per_1k > 0:
             cost += (max(0, int(prompt_tokens or 0)) / 1000) * self.price_input_per_1k
         if self.price_output_per_1k > 0:
             cost += (max(0, int(completion_tokens or 0)) / 1000) * self.price_output_per_1k
         return round(cost, 4)
+
+    # 语义别名: 本项目按 ¥(元) 计价, 避免维护者误读为日元换算
+    estimate_cost_yuan = estimate_cost_jpy
 
     def stats(self) -> dict:
         today = date.today().isoformat()
@@ -182,6 +190,9 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
         }
+        effort = (getattr(settings, "llm_reasoning_effort", "") or "").strip()
+        if effort:
+            payload["reasoning_effort"] = effort
         last_error = None
         retries = 0
         for attempt in range(2):
@@ -194,6 +205,9 @@ class LLMClient:
                     },
                     json=payload,
                 )
+                if resp.status_code == 400 and "reasoning_effort" in payload:
+                    payload.pop("reasoning_effort", None)
+                    continue
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
@@ -317,11 +331,10 @@ class SummaryCompression:
         await self.llm.ensure_client()
 
     async def compress(self, text: str, max_tokens: int = 500) -> str:
-        prompt = f"""请将以下内容压缩为简洁的摘要（{max_tokens} tokens以内），保留关键信息和时间顺序：
-
-{text}"""
+        from prompts import render
+        prompt = render("analysis/summary_compress", max_tokens=max_tokens, text=text)
         return await self.llm.chat([
-            {"role": "system", "content": "你是一个专业的信息压缩助手。请保留核心信息。回复简洁。只用中文。"},
+            {"role": "system", "content": render("analysis/summary_compress_system")},
             {"role": "user", "content": prompt},
         ])
 

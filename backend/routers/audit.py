@@ -26,13 +26,13 @@ router = APIRouter(prefix="/api", tags=["audit"])
 # ── Sigma 检测引擎端点 ──
 
 @router.get("/sigma/stats")
-async def sigma_stats():
+async def sigma_stats(user: UserInfo = Depends(get_current_user)):
     """Sigma 检测引擎状态"""
     from sigma_detector import sigma_detector
     return sigma_detector.stats()
 
 @router.get("/llm/cost")
-async def llm_cost():
+async def llm_cost(user: UserInfo = Depends(get_current_user)):
     """LLM 成本统计（每日预算/用量/调用次数）"""
     from summary_compression import cost_tracker
     return cost_tracker.stats()
@@ -41,7 +41,7 @@ class SigmaDetectRequest(BaseModel):
     events: list[dict]
 
 @router.post("/sigma/detect")
-async def sigma_detect(req: SigmaDetectRequest):
+async def sigma_detect(req: SigmaDetectRequest, user: UserInfo = Depends(get_current_user)):
     """批量 Sigma 规则检测"""
     from sigma_detector import sigma_detector
     return sigma_detector.detect_batch(req.events)
@@ -49,7 +49,7 @@ async def sigma_detect(req: SigmaDetectRequest):
 # ── MCP Guard 网关端点 ──
 
 @router.get("/guard/status")
-async def guard_status():
+async def guard_status(user: UserInfo = Depends(get_current_user)):
     """MCP Guard 网关状态"""
     try:
         from mcp_guard import mcp_guard
@@ -71,7 +71,7 @@ class GuardCallRequest(BaseModel):
     reason: str = ""
 
 @router.post("/guard/call")
-async def guard_call(req: GuardCallRequest):
+async def guard_call(req: GuardCallRequest, user: UserInfo = Depends(get_current_user)):
     """通过 MCP Guard 网关调用安全工具（4 层检查）"""
     if not settings.mcp_guard_enabled:
         raise HTTPException(400, "MCP Guard is disabled")
@@ -285,7 +285,7 @@ async def get_evidence_trail(
 # ── CAD 审计角色端点 ──
 
 @router.get("/cad/status")
-async def cad_status():
+async def cad_status(user: UserInfo = Depends(get_current_user)):
     """获取 CAD 审计角色状态（含熔断器）"""
     cb_status = circuit_breaker.get_status()
     return {
@@ -294,18 +294,18 @@ async def cad_status():
     }
 
 @router.post("/cad/audit-context")
-async def trigger_context_audit():
+async def trigger_context_audit(user: UserInfo = Depends(RequireRole("admin"))):
     """手动触发上下文审计"""
     report = await cad_agent.audit_context()
     return report
 
 @router.get("/cad/circuit-breaker")
-async def get_circuit_breaker():
+async def get_circuit_breaker(user: UserInfo = Depends(get_current_user)):
     """查询熔断器状态"""
     return circuit_breaker.get_status()
 
 @router.post("/cad/circuit-breaker/reset")
-async def reset_circuit_breaker():
+async def reset_circuit_breaker(user: UserInfo = Depends(RequireRole("admin"))):
     """人工重置熔断器"""
     return circuit_breaker.reset()
 
@@ -322,14 +322,15 @@ async def cad_override(event_id: int, user: UserInfo = Depends(RequireRole("admi
     return {"success": True, "event_id": event_id, "accuracy": circuit_breaker.accuracy_stats()}
 
 @router.get("/cad/accuracy")
-async def cad_accuracy():
+async def cad_accuracy(user: UserInfo = Depends(get_current_user)):
     """CAD 自身准确率统计"""
     return circuit_breaker.accuracy_stats()
 
 @router.get("/cad/verification/{event_id}")
 async def get_cad_verification(
     event_id: int,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(get_current_user),
 ):
     """获取指定事件的 CAD 穿透验证结果"""
     evt = await event_store.get_by_id(session, event_id)

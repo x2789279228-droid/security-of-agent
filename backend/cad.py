@@ -191,13 +191,34 @@ class ContextAuditor:
         """审计所有 Agent 的系统指令"""
         risks = []
 
-        # 读取各 Agent 的系统 prompt 进行检查
-        prompts_to_check = {
-            "Decomposer": "你是一个严谨的安全分析专家",
-            "SubAuditor": "你是严谨的安全分析专家。严格遵循输出格式",
-            "Executor": "你是严谨的安全审计专家。只采纳有证据支撑的结论",
-            "Reviewer": "你是一个严格的安全审计复核专家，专门负责防幻觉检查",
+        # 读取各 Agent 的系统 prompt 进行检查。
+        # 优先从 prompts/*.j2 模板渲染实际 system prompt（单一事实源，避免快照漂移）；
+        # 模板渲染失败时回退内联快照。
+        _template_map = {
+            "Decomposer": "audit/decomposer_initial_analysis_system",
+            "SubAuditor": "audit/sub_auditor_system",
+            "Executor": "audit/executor_synthesize_system",
+            "Reviewer": "audit/reviewer_review_system",
         }
+        _fallback_snapshot = {
+            "Decomposer": "你是安全分析专家，输出JSON格式。",
+            "SubAuditor": "你是严谨的安全分析专家。严格遵循输出格式",
+            "Executor": "你是严谨的安全审计专家。只采纳有证据支撑的结论，输出JSON。",
+            "Reviewer": "你是一个严格的安全审计复核专家，专门负责防幻觉检查。",
+        }
+        prompts_to_check = {}
+        try:
+            from prompts import render as _render_prompt
+        except Exception as _e:  # noqa: BLE001
+            _render_prompt = None
+        for _agent, _tpl in _template_map.items():
+            if _render_prompt is not None:
+                try:
+                    prompts_to_check[_agent] = _render_prompt(_tpl)
+                    continue
+                except Exception as _e:  # noqa: BLE001
+                    logger.warning(f"[CAD] render {_tpl} 失败, 回退快照: {_e}")
+            prompts_to_check[_agent] = _fallback_snapshot[_agent]
 
         for agent, prompt_text in prompts_to_check.items():
             # 检查 1: 指令是否清晰明确

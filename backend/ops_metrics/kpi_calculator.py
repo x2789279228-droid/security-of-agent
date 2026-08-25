@@ -36,6 +36,8 @@ METRIC_KEYS = [
     "fp_rate",            # 误报率（平台级）
     "feedback_count",     # 反馈总数
     "order_count",        # 工单总数
+    "automation_rate",    # 自动化处置率（无需人工干预的处置比例）
+    "grounding_pass_rate", # Grounding 验证通过率
 ]
 
 
@@ -212,6 +214,58 @@ class KpiCalculator:
         )
         return int((await session.execute(stmt)).scalar() or 0)
 
+    async def compute_automation_rate(
+        self, session: AsyncSession, *, start: datetime, end: datetime,
+    ) -> float:
+        """
+        自动化处置率 = 无需人工审批的响应动作数 / 总响应动作数
+        从 response_logs 表统计 auto_execute=True 且 action_success=True 的比例
+        """
+        from models import ResponseLog
+        total_stmt = select(func.count(ResponseLog.id)).where(
+            ResponseLog.created_at >= start, ResponseLog.created_at < end
+        )
+        auto_stmt = select(func.count(ResponseLog.id)).where(
+            ResponseLog.created_at >= start, ResponseLog.created_at < end,
+            ResponseLog.auto_execute == True,
+            ResponseLog.action_success == True,
+        )
+        total = (await session.execute(total_stmt)).scalar() or 0
+        auto = (await session.execute(auto_stmt)).scalar() or 0
+        if total == 0:
+            return 0.0
+        return round(auto / total, 4)
+
+    async def compute_grounding_pass_rate(
+        self, session: AsyncSession, *, start: datetime, end: datetime,
+    ) -> float:
+        """
+        Grounding 验证通过率 = grounding_score >= 0.6 的事件数 / 已审计事件数
+        从 security_events 的 raw_data._audit_llm.grounding_score 统计
+        """
+        from models import SecurityEvent
+        analyzed_stmt = select(func.count(SecurityEvent.id)).where(
+            SecurityEvent.created_at >= start, SecurityEvent.created_at < end,
+            SecurityEvent.analyzed == True,
+        )
+        total_analyzed = (await session.execute(analyzed_stmt)).scalar() or 0
+        if total_analyzed == 0:
+            return 0.0
+        # 取 raw_data 中 grounding_score >= 0.6 的事件
+        events_stmt = select(SecurityEvent.raw_data).where(
+            SecurityEvent.created_at >= start, SecurityEvent.created_at < end,
+            SecurityEvent.analyzed == True,
+        )
+        events = (await session.execute(events_stmt)).scalars().all()
+        passed = 0
+        for raw in events:
+            if not raw:
+                continue
+            score = raw.get("_audit_llm", {}).get("grounding_score", 0)
+            if isinstance(score, (int, float)) and score >= 0.6:
+                passed += 1
+        return round(passed / total_analyzed, 4)
+
     # ── 快照写入 ──
 
     async def snapshot_daily(
@@ -252,6 +306,8 @@ class KpiCalculator:
         fp_rate = await self.compute_fp_rate(session, start=start, end=end)
         feedback_count = await self.compute_feedback_count(session, start=start, end=end)
         order_count = await self.compute_order_count(session, start=start, end=end)
+        automation_rate = await self.compute_automation_rate(session, start=start, end=end)
+        grounding_pass_rate = await self.compute_grounding_pass_rate(session, start=start, end=end)
 
         agg_metrics: list[tuple[str, float, dict]] = [
             ("mttd", float(mttd or 0), {}),
@@ -262,6 +318,8 @@ class KpiCalculator:
             ("fp_rate", float(fp_rate), {}),
             ("feedback_count", float(feedback_count), {}),
             ("order_count", float(order_count), {}),
+            ("automation_rate", float(automation_rate), {}),
+            ("grounding_pass_rate", float(grounding_pass_rate), {}),
         ]
 
         # 按 priority 切分（critical / high / medium / low）
@@ -310,6 +368,8 @@ class KpiCalculator:
                 "case_count": case_count,
                 "sla_breach_rate": sla_breach_rate,
                 "fp_rate": fp_rate,
+                "automation_rate": automation_rate,
+                "grounding_pass_rate": grounding_pass_rate,
             },
         }
 

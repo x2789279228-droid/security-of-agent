@@ -100,12 +100,9 @@ class EvidenceVerifier:
         try:
             from trace_hook import set_trace_context
             set_trace_context(caller="evidence_verifier", operation="verify", event_id=0)
+            from prompts import render
             resp = await summary.llm.chat([
-                {
-                    "role": "system",
-                    "content": "你是一个严谨的断言验证专家。严格基于检索到的知识库内容进行判断，"
-                               "没有证据支撑的断言必须标记为 unsupported。输出 JSON。",
-                },
+                {"role": "system", "content": render("rag/evidence_verify_system")},
                 {"role": "user", "content": prompt},
             ])
             parsed = json.loads(resp)

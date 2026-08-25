@@ -82,37 +82,21 @@ async def classify_session(
     )
 
     # 构造 prompt (严格限 token:body_snippet <= 500 chars)
+    from prompts import render
+    _p = http_summary
     prompt_messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是数据安全分析专家.基于 HTTP 会话摘要,判断"
-                "响应体是否真包含敏感数据 (而非业务正常字段)."
-                "严格输出 JSON,不要解释,不要代码块."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"HTTP {http_summary.get('method', 'GET')} {http_summary.get('url', '')[:200]}\n"
-                f"Content-Type: {http_summary.get('response_content_type', '')}\n"
-                f"Response Size: {http_summary.get('response_size', 0)} bytes\n"
-                f"源IP: {http_summary.get('src_ip', '')} → 目标IP: {http_summary.get('dst_ip', '')}\n"
-                f"规则命中: {http_summary.get('rule_hit', '')}\n"
-                f"响应体片段 (前500):\n{http_summary.get('body_snippet', '')[:500]}\n\n"
-                "分类为下列之一:\n"
-                "  PII (个人身份信息)\n"
-                "  financial (财务/信用卡)\n"
-                "  credentials (凭证/密钥)\n"
-                "  ip (知识产权/源码)\n"
-                "  none (误报)\n\n"
-                "输出 JSON:\n"
-                '{"is_sensitive": true/false, "category": "PII", '
-                '"confidence": 0.0-1.0, "false_positive_prob": 0.0-1.0, '
-                '"rationale": "短理由", "recommended_action": "audit"}\n\n'
-                "recommended_action 可选: block / audit / monitor / ignore"
-            ),
-        },
+        {"role": "system", "content": render("security/data_security_classifier_system")},
+        {"role": "user", "content": render(
+            "security/data_security_classifier_user",
+            m=_p.get("method", "GET"),
+            url=str(_p.get("url", ""))[:200],
+            response_content_type=_p.get("response_content_type", ""),
+            response_size=_p.get("response_size", 0),
+            src_ip=_p.get("src_ip", ""),
+            dst_ip=_p.get("dst_ip", ""),
+            rule_hit=_p.get("rule_hit", ""),
+            body_snippet=str(_p.get("body_snippet", ""))[:500],
+        )},
     ]
 
     result = await enhance_data_security(
@@ -173,9 +157,15 @@ async def classify_and_broadcast(
     except Exception:
         pass
 
-    # 2. 高置信 + 真敏感 → 触发响应引擎审计工单
+    # 2. 高置信 + 真敏感 → 仅当规则/传感器已命中时才开工单（LLM 不得单独处置）
+    from ops_loop import llm_may_open_work_order
+    rule_hit = bool(
+        http_summary.get("rule_hit")
+        or http_summary.get("dlp_hit")
+        or http_summary.get("sensor_alert")
+    )
     if (
-        verdict["is_sensitive"]
+        llm_may_open_work_order(rule_hit=rule_hit, llm_sensitive=verdict["is_sensitive"])
         and verdict["confidence"] >= _HIGH_CONF_THRESHOLD
         and verdict["category"] != "none"
     ):

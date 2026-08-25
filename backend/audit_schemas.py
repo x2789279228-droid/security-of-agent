@@ -31,7 +31,9 @@ VALID_THREAT_TYPES = {
     "端口扫描", "暴力破解", "SQL注入", "XSS", "恶意软件",
     "权限提升", "未授权访问", "其他", "混合",
 }
-VALID_CONCLUSIONS = {"threat_confirmed", "false_positive", "suspicious"}
+VALID_CONCLUSIONS = {
+    "threat_confirmed", "false_positive", "suspicious", "insufficient_evidence",
+}
 
 
 # ═══════════════════════════════════════════
@@ -103,6 +105,7 @@ class SynthesisOutputSchema(BaseModel):
     suggested_actions: list[str] = Field(default_factory=list)
     needs_human_review: bool = False
     evidence_summary: str = ""
+    abstain: bool = False
 
     @field_validator("severity")
     @classmethod
@@ -137,6 +140,7 @@ class ReviewerOutputSchema(BaseModel):
     human_intervention: bool = False
     final_summary: str = ""
     reviewer_notes: str = ""
+    abstain: bool = False
 
     @field_validator("conclusion")
     @classmethod

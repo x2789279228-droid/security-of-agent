@@ -37,6 +37,9 @@ class RuleManager:
         """列出规则"""
         if rule_type == "sigma":
             from sigma_detector import sigma_detector
+            if hasattr(sigma_detector, "reload"):   # pySigma 引擎: 读 YAML 文件
+                from sigma_engine import store
+                return store.list_rules()
             return [
                 {
                     "rule_id": r.rule_id,
@@ -73,6 +76,10 @@ class RuleManager:
         """获取规则详情"""
         if rule_type == "sigma":
             from sigma_detector import sigma_detector
+            if hasattr(sigma_detector, "reload"):   # pySigma: 从 YAML
+                from sigma_engine import store
+                data = store.get_rule(rule_id)
+                return data or None
             for r in sigma_detector.rules:
                 if r.rule_id == rule_id:
                     return asdict(r)
@@ -99,7 +106,14 @@ class RuleManager:
     ) -> dict:
         """新增规则"""
         if rule_type == "sigma":
-            from sigma_detector import sigma_detector, SigmaRule
+            from sigma_detector import sigma_detector
+            if hasattr(sigma_detector, "reload"):   # pySigma: 写 YAML + 重载编译
+                from sigma_engine import store
+                result = store.create_rule(content, changed_by=changed_by)
+                if result["success"]:
+                    sigma_detector.reload()
+                return result
+            from sigma_detector import SigmaRule
             rule_id = content.get("rule_id", f"SIG-{len(sigma_detector.rules)+1:03d}")
             # 检查重复
             if any(r.rule_id == rule_id for r in sigma_detector.rules):
@@ -129,6 +143,25 @@ class RuleManager:
         """修改规则（同步更新内存 + 返回待持久化的版本数据）"""
         if rule_type == "sigma":
             from sigma_detector import sigma_detector
+            if hasattr(sigma_detector, "reload"):   # pySigma: 写 YAML + 重载
+                from sigma_engine import store
+                result = store.update_rule(
+                    rule_id, content, changed_by=changed_by)
+                if result["success"]:
+                    sigma_detector.reload()
+                    return {
+                        "success": True,
+                        "rule_id": rule_id,
+                        "change_summary": change_summary,
+                        "version_data": {
+                            "rule_type": "sigma",
+                            "rule_id": rule_id,
+                            "content": store.get_rule(rule_id) or {},
+                            "change_summary": change_summary,
+                            "changed_by": changed_by,
+                        },
+                    }
+                return result
             for i, r in enumerate(sigma_detector.rules):
                 if r.rule_id == rule_id:
                     # 更新字段
@@ -191,6 +224,12 @@ class RuleManager:
         """禁用规则（软删除）"""
         if rule_type == "sigma":
             from sigma_detector import sigma_detector
+            if hasattr(sigma_detector, "reload"):   # pySigma: 删 YAML + 重载
+                from sigma_engine import store
+                result = store.delete_rule(rule_id)
+                if result["success"]:
+                    sigma_detector.reload()
+                return result
             sigma_detector.rules = [
                 r for r in sigma_detector.rules if r.rule_id != rule_id
             ]

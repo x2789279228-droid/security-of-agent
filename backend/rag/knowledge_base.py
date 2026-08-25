@@ -39,10 +39,24 @@ class KnowledgeBaseManager:
         severity: str = "medium",
         tags: Optional[list[str]] = None,
         metadata: Optional[dict] = None,
+        submitted_by: str = "",
+        auto_signed: bool = False,
+        published_at=None,
+        valid_until=None,
+        cutoff_policy: str = "strict",
     ) -> dict:
-        """添加知识文档"""
+        """添加知识文档。internal 默认 pending；导入器签名源自动 signed_import。"""
         from models import KnowledgeDoc
+        from memory_guard import content_hash, kb_source_is_signed
 
+        if auto_signed or kb_source_is_signed(source):
+            status = "signed_import"
+        else:
+            status = "pending"
+
+        digest = content_hash(content or "")
+        meta = dict(metadata or {})
+        meta["content_hash"] = digest
         doc = KnowledgeDoc(
             title=title,
             content=content,
@@ -50,13 +64,41 @@ class KnowledgeBaseManager:
             threat_types=threat_types or [],
             severity=severity,
             tags=tags or [],
-            metadata_=metadata or {},
+            metadata_=meta,
+            content_hash=digest,
+            approval_status=status,
+            submitted_by=submitted_by or "",
+            published_at=published_at,
+            valid_until=valid_until,
+            cutoff_policy=cutoff_policy or "strict",
         )
         session.add(doc)
         await session.commit()
         await session.refresh(doc)
-        logger.info(f"KB doc added: {doc.id} - {title[:50]}")
+        logger.info(
+            f"KB doc added: {doc.id} - {title[:50]} status={status} hash={digest[:12]}"
+        )
         return self._doc_to_dict(doc)
+
+    async def approve_document(
+        self,
+        session: AsyncSession,
+        doc_id: int,
+        approved_by: str,
+    ) -> dict:
+        """第二人审批。提交人不能自己批。"""
+        from models import KnowledgeDoc
+        doc = await session.get(KnowledgeDoc, doc_id)
+        if not doc:
+            return {"success": False, "error": "文档不存在"}
+        if doc.approval_status in ("approved", "signed_import"):
+            return {"success": False, "error": "已审批或导入签名源"}
+        if doc.submitted_by and approved_by and doc.submitted_by == approved_by:
+            return {"success": False, "error": "须第二人审批"}
+        doc.approval_status = "approved"
+        doc.approved_by = approved_by
+        await session.commit()
+        return {"success": True, "doc": self._doc_to_dict(doc)}
 
     async def get_document(self, session: AsyncSession, doc_id: int) -> Optional[dict]:
         from models import KnowledgeDoc
@@ -113,6 +155,12 @@ class KnowledgeBaseManager:
         if doc:
             await session.delete(doc)
             await session.commit()
+            # ── Qdrant 同步删除: 按 doc_id 清该文档的向量 (失败仅记日志) ──
+            try:
+                from qdrant_store import qdrant_store
+                await qdrant_store.delete_by_doc_id(doc_id)
+            except Exception as qe:
+                logger.warning(f"[Qdrant] delete_document 清理失败(降级): {qe}")
             return True
         return False
 
@@ -145,6 +193,13 @@ class KnowledgeBaseManager:
             "tags": doc.tags,
             "metadata": doc.metadata_,
             "created_at": doc.created_at.isoformat() if doc.created_at else "",
+            "content_hash": getattr(doc, "content_hash", "") or "",
+            "approval_status": getattr(doc, "approval_status", "") or "",
+            "submitted_by": getattr(doc, "submitted_by", "") or "",
+            "approved_by": getattr(doc, "approved_by", "") or "",
+            "published_at": doc.published_at.isoformat() if getattr(doc, "published_at", None) else "",
+            "valid_until": doc.valid_until.isoformat() if getattr(doc, "valid_until", None) else "",
+            "cutoff_policy": getattr(doc, "cutoff_policy", "") or "strict",
         }
 
 

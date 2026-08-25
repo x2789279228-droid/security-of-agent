@@ -35,6 +35,12 @@ class Memory(Base):
     metadata_ = Column("metadata", JSON, default=dict)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # PR2 写时门
+    source_type = Column(String(30), default="agent_output")  # event|kb|operator|agent_output
+    provenance_id = Column(String(100), default="")
+    content_hash = Column(String(64), default="")
+    trust = Column(Float, default=0.2)
+    signed = Column(Boolean, default=False)
 
 class Conversation(Base):
     __tablename__ = "conversations"
@@ -101,6 +107,14 @@ class KnowledgeDoc(Base):
     tags = Column(JSON, default=list)
     metadata_ = Column("metadata", JSON, default=dict)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # PR2 RAG 投毒门
+    content_hash = Column(String(64), default="")
+    approval_status = Column(String(20), default="pending")  # pending|approved|rejected|signed_import
+    submitted_by = Column(String(80), default="")
+    approved_by = Column(String(80), default="")
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    valid_until = Column(DateTime(timezone=True), nullable=True)
+    cutoff_policy = Column(String(20), default="strict")
 
 
 class KnowledgeChunk(Base):
@@ -753,6 +767,21 @@ async def _migrate_existing_tables(conn):
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_security_events_event_id ON security_events(event_id)",
         # 可观测: pipeline_spans 增加 trace_id 列 (关联 OTel/Tempo)
         "ALTER TABLE pipeline_spans ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32) DEFAULT ''",
+        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_type VARCHAR(30) DEFAULT 'agent_output'",
+        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS provenance_id VARCHAR(100) DEFAULT ''",
+        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS trust REAL DEFAULT 0.2",
+        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS signed BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64) DEFAULT ''",
+        "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) DEFAULT 'pending'",
+        "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS submitted_by VARCHAR(80) DEFAULT ''",
+        "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS approved_by VARCHAR(80) DEFAULT ''",
+        "UPDATE knowledge_docs SET approval_status = 'signed_import' "
+        "WHERE source IN ('mitre-attack','capec','cve','seed','playbook') "
+        "AND (approval_status IS NULL OR approval_status = 'pending')",
+        "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
+        "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ",
+        "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS cutoff_policy VARCHAR(20) DEFAULT 'strict'",
     ]
     for s in stmts:
         try:

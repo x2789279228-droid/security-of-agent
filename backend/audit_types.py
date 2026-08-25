@@ -132,6 +132,12 @@ class AuditResult:
     kb_verification: dict = field(default_factory=dict)  # 知识库交叉验证结果
     schema_valid: bool = True             # 结构化输出验证是否通过
 
+    # PR1 否决闸
+    verdict: str = ""                     # confirmed / suspicious / false_positive / insufficient_evidence
+    discarded_claims: list[dict] = field(default_factory=list)
+    hop_trace: list[dict] = field(default_factory=list)
+    non_llm_signals: dict = field(default_factory=dict)
+
     # 深度分析输出（前置合成模式：deep_analyze 在 synthesize 之前执行，
     # 其结论注入到汇总 prompt 中作为额外上下文，亦独立保留供前端展示）
     deep_analysis: str = ""
@@ -152,6 +158,10 @@ class AuditResult:
             "kb_supported": self.kb_verification.get("supported", 0),
             "schema_valid": self.schema_valid,
             "has_deep_analysis": bool(self.deep_analysis),
+            "verdict": self.verdict,
+            "discarded_claim_count": len(self.discarded_claims),
+            "non_llm_signal": bool((self.non_llm_signals or {}).get("has_signal")),
+            "hop_trace": list(self.hop_trace or []),
         }
 
 
@@ -165,6 +175,7 @@ class FinalVerdict:
     human_intervention: bool = False
     final_summary: str = ""
     reviewer_notes: str = ""
+    abstain: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -174,4 +185,5 @@ class FinalVerdict:
             "evidence_chain": self.evidence_chain[:5],
             "human_intervention": self.human_intervention,
             "final_summary": self.final_summary[:200],
+            "abstain": self.abstain,
         }

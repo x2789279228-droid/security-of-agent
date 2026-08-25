@@ -1025,3 +1025,32 @@ async def _do_compute(session, model, embedder):
 
     await session.commit()
     logger.info(f"Embeddings computed for {len(chunks)} chunks")
+
+    # ── Qdrant 双写: embedding 回填后同步向量到 Qdrant (RAG 检索事实源) ──
+    # 仅当 model 是 KnowledgeChunk(具备 chunk_id/doc_id) 时才写 qdrant;
+    # qdrant 不可用/失败不阻塞主流程(降级 pgvector)。
+    if getattr(model, "__tablename__", "") == "knowledge_chunks":
+        try:
+            from qdrant_store import qdrant_store
+
+            synced = 0
+            for chunk in chunks:
+                if not chunk.embedding or not getattr(chunk, "chunk_id", None):
+                    continue
+                await qdrant_store.upsert_chunk(
+                    chunk_id=chunk.chunk_id,
+                    doc_id=chunk.doc_id,
+                    vector=[float(x) for x in chunk.embedding],
+                    payload={
+                        "content": (chunk.content or "")[:1500],
+                        "title": getattr(chunk, "title", "") or "",
+                        "threat_types": list(getattr(chunk, "threat_types", []) or []),
+                        "severity": getattr(chunk, "severity", "") or "",
+                        "source": getattr(chunk, "source", "") or "",
+                        "tags": list(getattr(chunk, "tags", []) or []),
+                    },
+                )
+                synced += 1
+            logger.info(f"[Qdrant] 双写 {synced} 个 knowledge_chunks embedding 到 qdrant")
+        except Exception as qe:
+            logger.warning(f"[Qdrant] 双写失败(降级 pgvector): {qe}")

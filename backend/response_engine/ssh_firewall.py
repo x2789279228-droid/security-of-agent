@@ -94,7 +94,7 @@ class SshFirewallAdapter:
             client.load_system_host_keys()
         except Exception:
             pass
-        client.set_missing_host_key_policy(paramiko.WarningPolicy())
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(
             hostname=cfg["host"],
             port=cfg["port"],

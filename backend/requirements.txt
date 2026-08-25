@@ -4,6 +4,7 @@ sqlalchemy>=2.0,<3
 aiosqlite>=0.20,<1        # 测试/本地模式 (sqlite+aiosqlite)
 asyncpg>=0.30,<1
 pgvector>=0.3,<1
+qdrant-client>=1.9,<2      # Qdrant 向量数据库 (RAG 检索)
 redis>=5.2,<6
 PyJWT>=2.8,<3
 pydantic>=2.10,<3
@@ -19,6 +20,14 @@ opentelemetry-api>=1.27,<2
 opentelemetry-sdk>=1.27,<2
 opentelemetry-exporter-otlp>=1.27,<2
 opentelemetry-instrumentation-httpx>=0.48b0,<1
+# Temporal (4 层 Agent 编排: 可靠性/长任务/可视化)
+temporalio>=1.24,<2
+# LLM 提示词模板(Jinja2 集中管理: backend/prompts/*.j2)
+Jinja2>=3.1,<4
+# Sigma 检测引擎 (pySigma 单事件匹配; 规则从 backend/sigma/rules/*.yml 加载)
+# 注: pySigma 主包已含规则解析/匹配与 sigmac 转换; 字段映射 pipelines 留后续按需接入
+pySigma>=0.11,<2
+pySigma-backend-sqlite>=1.0,<2   # SQLite backend: 把 Sigma 规则编译为可对事件求值的谓词
 paramiko>=3.4,<4
 cryptography>=42.0,<44
 # ── NDR 扩展依赖 ──

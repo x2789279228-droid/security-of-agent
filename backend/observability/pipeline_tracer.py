@@ -48,6 +48,19 @@ STATUS_SUCCESS = "success"
 STATUS_ERROR = "error"
 STATUS_TIMEOUT = "timeout"
 
+# 关键审计阶段 → soc.importance (Jaeger 按重要性过滤; 与 HttpTraceMiddleware 一致)
+_CRITICAL_STAGES = {"executor", "reviewer", "cad_verify", "response"}
+_NORMAL_STAGES = {"ingest", "anomaly_detect", "sigma_detect", "store", "tool_builder"}
+
+
+def _stage_importance(stage: str) -> str:
+    """返回阶段重要度: critical(关键裁决/产出) | important | normal"""
+    if stage in _CRITICAL_STAGES:
+        return "critical"
+    if stage in _NORMAL_STAGES:
+        return "normal"
+    return "important"
+
 # ── OpenTelemetry 可选集成 ──
 try:
     from opentelemetry import trace as otel_trace
@@ -135,6 +148,7 @@ class PipelineTracer:
                         "soc.stage": stage,
                         "soc.event_id": event_id,
                         "soc.session_id": session_id or "",
+                        "soc.importance": _stage_importance(stage),
                     },
                 )
                 sc = otel_span.get_span_context()

@@ -2,7 +2,7 @@
 
 四阶段管线：
   1. JsonRepair     —— JSON 解析容错（代码块剥离、尾逗号、单引号等）
-  2. ToolResolver   —— 工具名归一化（精确 / 前缀 / 别名 / 模糊匹配）
+  2. ToolResolver   —— 工具名归一化（精确 / 显式别名；禁止前缀与模糊匹配）
   3. ParamCoercer   —— 参数类型转换 + 默认值补全
   4. SchemaCheck    —— 必填字段校验
 

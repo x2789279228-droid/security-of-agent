@@ -117,7 +117,8 @@ class MemoryTree:
 
     async def reconstruct_context(
         self, session: AsyncSession, session_id: str,
-        query: str = "", max_tokens: int = 2000
+        query: str = "", max_tokens: int = 2000,
+        for_llm: bool = False,
     ) -> list[dict]:
         """
         重建上下文 — 返回所有节点，不做重要性过滤。
@@ -154,13 +155,16 @@ class MemoryTree:
                     "route": "truncated",
                 })
                 break
-            await self._expand_node(session, node, context, tokens_used, max_tokens)
+            await self._expand_node(
+                session, node, context, tokens_used, max_tokens, for_llm=for_llm,
+            )
 
         return context
 
     async def _expand_node(
         self, session: AsyncSession, node: MemoryTreeNode,
         context: list[dict], tokens_used: list[int], max_tokens: int,
+        for_llm: bool = False,
     ):
         if tokens_used[0] >= max_tokens:
             return
@@ -178,6 +182,9 @@ class MemoryTree:
             # 叶子节点 → 返回完整原始内容
             content = node.content or ""
             if content:
+                if for_llm:
+                    from memory_guard import sanitize_untrusted_text
+                    content = sanitize_untrusted_text(content, max_len=1500)
                 meta = node.metadata_ or {}
                 context.append({
                     "role": node.node_type,
@@ -197,7 +204,9 @@ class MemoryTree:
         for child in children:
             if tokens_used[0] >= max_tokens:
                 break
-            await self._expand_node(session, child, context, tokens_used, max_tokens)
+            await self._expand_node(
+                session, child, context, tokens_used, max_tokens, for_llm=for_llm,
+            )
 
     async def find_related(
         self, session: AsyncSession, session_id: str,

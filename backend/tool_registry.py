@@ -277,11 +277,15 @@ async def _vector_search(
     """向量检索语义相关记忆（memories 表，通用记忆）"""
     embedding = await embedder.embed(query)
     memories = await vector_store.search_similar(
-        session, embedding, top_k=top_k
+        session, embedding, top_k=top_k, for_llm=True,
     )
+    from memory_guard import memory_trust_value
     return [
         {"id": m.id, "content": m.content[:200], "agent_id": m.agent_id,
-         "created_at": m.created_at.isoformat()}
+         "created_at": m.created_at.isoformat(),
+         "trust": memory_trust_value(m),
+         "source_type": getattr(m, "source_type", "") or "",
+         }
         for m in memories
     ]
 

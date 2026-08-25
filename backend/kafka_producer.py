@@ -96,6 +96,28 @@ class KafkaProducerWrapper:
         except Exception as e:
             logger.warning(f"Kafka publish alert failed: {e}")
 
+    async def publish_sigma_hit(self, hit: dict, trace_id: str = ""):
+        """发布 Sigma 聚合候选到 sigma-hit topic(供 Flink 阈值窗口聚合)。
+        明文 JSON(聚合信号, 无敏感字段: src_ip/rule_id/threshold/timestamp)。"""
+        if not self._started:
+            return
+        try:
+            import json
+            payload = {
+                "src_ip": hit.get("src_ip", ""),
+                "rule_id": hit.get("rule_id", ""),
+                "threshold": int(hit.get("threshold", 0) or 0),
+                "timestamp": int(hit.get("timestamp", 0) or 0),
+            }
+            await self._producer.send_and_wait(
+                settings.kafka_topic_sigma_hit,
+                key=payload["src_ip"],
+                value=json.dumps(payload),
+                headers=self._trace_headers(trace_id),
+            )
+        except Exception as e:
+            logger.warning(f"Kafka publish_sigma_hit failed: {e}")
+
     @property
     def is_active(self) -> bool:
         return self._started

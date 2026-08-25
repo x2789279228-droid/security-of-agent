@@ -30,7 +30,7 @@ response_logger = get_response_logger()
 # ── SSH 防火墙端点 ──
 
 @router.get("/firewall/status")
-async def firewall_status():
+async def firewall_status(user: UserInfo = Depends(RequireRole("operator"))):
     """SSH 防火墙适配器状态"""
     from response_engine.ssh_firewall import ssh_firewall
     return {
@@ -78,7 +78,7 @@ async def firewall_rollback_all(user: UserInfo = Depends(RequireRole("admin"))):
 # ── SecurityGuard 端点 ──
 
 @router.get("/security-guard/status")
-async def security_guard_status():
+async def security_guard_status(user: UserInfo = Depends(RequireRole("operator"))):
     """SecurityGuard 状态"""
     try:
         from security_guard import security_guard
@@ -104,7 +104,8 @@ class SimulateThreatRequest(BaseModel):
 @router.post("/response/simulate")
 async def simulate_threat(
     req: SimulateThreatRequest,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("operator")),
 ):
     """模拟威胁事件，触发响应引擎"""
     threat_info = {
@@ -126,7 +127,7 @@ async def simulate_threat(
     return result
 
 @router.get("/response/policies")
-async def list_response_policies():
+async def list_response_policies(user: UserInfo = Depends(get_current_user)):
     """查看所有响应策略"""
     policies = policy_engine.get_policies()
     return [
@@ -171,7 +172,7 @@ async def update_response_policy(
     return {"status": "updated", "name": req.name}
 
 @router.get("/response/actions")
-async def list_response_actions():
+async def list_response_actions(user: UserInfo = Depends(get_current_user)):
     """列出所有可用的响应动作"""
     actions = response_registry.list_actions()
     return [
@@ -222,6 +223,7 @@ async def rollback_response(
 @router.get("/response/approvals")
 async def list_approvals(
     pending_only: bool = Query(False, description="仅待审批"),
+    user: UserInfo = Depends(get_current_user),
 ):
     """查看审批队列"""
     if pending_only:
@@ -284,7 +286,8 @@ async def query_response_logs(
     threat_type: str = Query("", description="威胁类型"),
     src_ip: str = Query("", description="源IP"),
     limit: int = Query(50, description="返回条数"),
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(get_current_user),
 ):
     """查询响应日志"""
     logs = await response_logger.query_logs(

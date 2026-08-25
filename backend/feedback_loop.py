@@ -26,9 +26,11 @@ logger = logging.getLogger(__name__)
 FEEDBACK_TYPES = ["false_positive", "true_positive", "missed_threat", "rule_suggestion"]
 FEEDBACK_STATUSES = ["submitted", "reviewed", "applied", "dismissed"]
 
-# 调优阈值
-FP_RATE_ALERT_THRESHOLD = 0.5     # FP 率 > 50% → 建议禁用/提高阈值
+# 调优阈值（PR4: 15% 即降级，禁止自动封禁）
+FP_RATE_ALERT_THRESHOLD = 0.15
 MISSED_THREAT_THRESHOLD = 3       # 漏报 > 3 次 → 建议新增规则
+AUTO_DOWNGRADE_WINDOW_DAYS = 7
+AUTO_DOWNGRADE_MIN_SAMPLES = 5
 
 
 class FeedbackLoop:
@@ -73,7 +75,34 @@ class FeedbackLoop:
             f"[Feedback] Submitted: type={feedback_type} event={event_id} "
             f"rule={rule_id} by={submitted_by}"
         )
+        if feedback_type == "false_positive" and rule_id:
+            try:
+                await self.maybe_auto_downgrade(session, rule_id)
+            except Exception as e:
+                logger.warning(f"[Feedback] auto-downgrade failed for {rule_id}: {e}")
         return record
+
+    async def maybe_auto_downgrade(
+        self, session: AsyncSession, rule_id: str, days: int = AUTO_DOWNGRADE_WINDOW_DAYS,
+    ) -> dict:
+        """同一规则 7 天 FP>15% 且样本足够 → 降级为 alert_only。"""
+        if not rule_id:
+            return {"downgraded": False, "reason": "empty_rule_id"}
+        stats = await self.get_fp_statistics(session, rule_id=rule_id, days=days)
+        by_rule = (stats.get("by_rule") or {}).get(rule_id) or {}
+        total = int(by_rule.get("total") or 0)
+        fp_rate = float(by_rule.get("fp_rate") or 0.0)
+        if total < AUTO_DOWNGRADE_MIN_SAMPLES:
+            return {"downgraded": False, "reason": "insufficient_samples", "total": total}
+        if fp_rate <= FP_RATE_ALERT_THRESHOLD:
+            return {"downgraded": False, "reason": "fp_rate_ok", "fp_rate": fp_rate}
+        from ops_loop import apply_rule_downgrade
+        applied = apply_rule_downgrade(rule_id)
+        logger.warning(
+            f"[Feedback] AUTO-DOWNGRADE rule={rule_id} fp_rate={fp_rate:.0%} "
+            f"n={total} → alert_only {applied}"
+        )
+        return {"downgraded": True, "fp_rate": fp_rate, "total": total, "applied": applied}
 
     async def review_feedback(
         self, session: AsyncSession, feedback_id: int,
@@ -83,6 +112,9 @@ class FeedbackLoop:
         record = await session.get(FeedbackRecord, feedback_id)
         if not record:
             return {"success": False, "error": "反馈不存在"}
+        # LLM 结论不得自动写回检测规则；applied 必须是运营显式选择
+        if new_status == "applied" and (record.original_conclusion or "").startswith("llm:"):
+            return {"success": False, "error": "LLM 结论须人工确认后才能写回规则"}
         record.status = new_status
         record.reviewed_at = datetime.now(timezone.utc)
         await session.commit()
@@ -169,9 +201,9 @@ class FeedbackLoop:
                     "suggestion": (
                         f"规则 {rule_id} 误报率 {rule_stats['fp_rate']:.0%} "
                         f"({rule_stats['false_positive']}/{rule_stats['total']})，"
-                        f"建议提高匹配阈值或添加排除条件"
+                        f"已触发/应触发 alert_only 降级（禁止自动封禁）"
                     ),
-                    "actions": ["提高阈值", "添加白名单排除", "临时禁用"],
+                    "actions": ["alert_only 降级", "提高阈值", "添加白名单排除"],
                 })
 
         # 建议 2: 漏报

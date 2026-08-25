@@ -277,32 +277,22 @@ class TimelineBuilder:
                 for e in timeline.events[:15]
             )
 
-            prompt = f"""你是一位 SOC 威胁狩猎分析师。请根据以下攻击时间线,生成一份简洁的攻击叙事报告。
-
-## 目标
-IP: {timeline.target_ip}, 时间范围: {timeline.time_range}
-
-## 统计
-总事件: {timeline.total_events}, 严重: {timeline.critical_count}
-Kill Chain 进度: {timeline.kill_chain_progress + 1}/{len(_KILL_CHAIN_ORDER)}
-观察到的战术: {', '.join(timeline.tactics_observed) if timeline.tactics_observed else '无'}
-
-## 事件时间线
-{events_summary}
-
-## 输出要求
-用 3-5 句话描述:
-1. 攻击者的行为模式和意图
-2. 攻击推进到了哪个阶段
-3. 当前最紧迫的威胁是什么
-4. 建议的下一步行动
-
-直接输出叙述文本,不要 JSON。"""
+            from prompts import render
+            _tactics = ', '.join(timeline.tactics_observed) if timeline.tactics_observed else '无'
+            prompt = render("analysis/timeline_narrative",
+                            target_ip=timeline.target_ip,
+                            time_range=timeline.time_range,
+                            total_events=timeline.total_events,
+                            critical_count=timeline.critical_count,
+                            kill_chain_pos=timeline.kill_chain_progress + 1,
+                            kill_chain_total=len(_KILL_CHAIN_ORDER),
+                            tactics=_tactics,
+                            events_summary=events_summary)
 
             result = await enhance_edr(
                 cache_key=f"timeline:{timeline.target_ip}:{timeline.time_range}",
                 prompt_messages=[
-                    {"role": "system", "content": "你是 SOC 威胁狩猎分析师。用中文输出简洁的攻击叙事。"},
+                    {"role": "system", "content": render("analysis/timeline_narrative_system")},
                     {"role": "user", "content": prompt},
                 ],
                 budget_cost_jpy=0.05,

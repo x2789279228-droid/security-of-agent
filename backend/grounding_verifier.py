@@ -296,6 +296,7 @@ class GroundingVerifier:
         knowledge_supported = self._verify_knowledge_consistency(
             claim_type=claim_type,
             knowledge_chunks=knowledge_chunks,
+            has_event_evidence=bool(evidence_ids) and ids_valid,
         )
 
         # ── 综合评分 ──
@@ -719,23 +720,23 @@ class GroundingVerifier:
         self,
         claim_type: str,
         knowledge_chunks: list[dict],
+        has_event_evidence: bool = False,
     ) -> bool:
         """
-        检查声明的威胁类型是否有 RAG 知识库支撑
+        检查声明的威胁类型是否有 RAG 知识库支撑。
 
-        安全逻辑：如果 RAG 检索到了相关知识片段，那么声明的威胁类型
-        应当与知识库中的威胁类型有交集。完全不匹配可能意味着 LLM
-        凭空捏造了一种不适用于当前场景的威胁类型。
-
-        注意：当无知识库片段可用时（未执行 RAG 检索或检索为空），
-        返回 True（不惩罚），因为缺少知识库不等于声明错误。
-
-        Returns:
-            True = 知识库支撑或无知识库可验证, False = 有知识库但不匹配
+        PR2 双源：KB 命中且无事件证据时不得 knowledge_supported=True
+        （单源 RAG 不得单独定罪）。无 KB 记 unknown=False，不给满分。
         """
         if not knowledge_chunks:
-            # 无知识库数据，无法验证，不惩罚
-            return True
+            return False
+        if not has_event_evidence:
+            return False
+
+        from ops_loop import filter_fresh_chunks
+        knowledge_chunks = filter_fresh_chunks(knowledge_chunks)
+        if not knowledge_chunks:
+            return False
 
         # 收集知识库中所有威胁类型（小写归一化）
         knowledge_threat_types: set[str] = set()
@@ -748,8 +749,7 @@ class GroundingVerifier:
                 knowledge_threat_types.add(threat_types.lower().strip())
 
         if not knowledge_threat_types:
-            # 知识库片段中无威胁类型标注，无法验证
-            return True
+            return False
 
         # 检查 claim_type 是否与知识库中的威胁类型匹配
         # 使用大小写不敏感匹配 + 子串包含（容忍"DDoS" vs "ddos攻击"的差异）

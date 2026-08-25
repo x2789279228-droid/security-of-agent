@@ -14,6 +14,14 @@ from typing import Any
 
 ASCII_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+", re.UNICODE)
 
+# PR3: 词法支撑阈值从 0.18 提到 0.35，减少同义词/改写误过
+LEXICAL_SUPPORT_THRESHOLD = 0.35
+
+_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.I)
+_ATTACK_RE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
+_PORT_RE = re.compile(r"\b(?:port|端口|dport|sport)\s*[:=]?\s*(\d{2,5})\b", re.I)
+
 
 def _is_cjk(char: str) -> bool:
     codepoint = ord(char)
@@ -53,6 +61,49 @@ def term_frequency_score(text: str, terms: list[str]) -> float:
         return 0.0
     matched = sum(1 for t in normalized if t in tokens or t in text.lower())
     return round(matched / len(normalized), 4)
+
+
+def extract_grounding_entities(text: str) -> set[str]:
+    """从断言中抽出必须能在证据里找到的实体：IP / CVE / ATT&CK / 端口。"""
+    text = text or ""
+    ents: set[str] = set()
+    ents.update(m.lower() for m in _IP_RE.findall(text))
+    ents.update(m.upper() for m in _CVE_RE.findall(text))
+    ents.update(m.upper() for m in _ATTACK_RE.findall(text))
+    for m in _PORT_RE.finditer(text):
+        ents.add(f"port:{m.group(1)}")
+    return ents
+
+
+def entity_entailment_ok(claim: str, evidence: str) -> bool:
+    """claim 中的 IP/CVE/ATT&CK/端口必须全部出现在 evidence 中。无实体则通过。"""
+    ents = extract_grounding_entities(claim)
+    if not ents:
+        return True
+    ev = evidence or ""
+    ev_l = ev.lower()
+    ev_u = ev.upper()
+    for e in ents:
+        if e.startswith("port:"):
+            num = e.split(":", 1)[1]
+            if num not in ev:
+                return False
+        elif e.startswith("CVE-") or e.startswith("T"):
+            if e not in ev_u:
+                return False
+        else:
+            if e not in ev_l:
+                return False
+    return True
+
+
+def claim_is_supported(claim: str, evidence: str, threshold: float = LEXICAL_SUPPORT_THRESHOLD) -> bool:
+    """词法重叠达标 且 实体蕴含通过。"""
+    if not claim.strip():
+        return True
+    if not entity_entailment_ok(claim, evidence):
+        return False
+    return lexical_overlap_score(claim, evidence) >= threshold
 
 
 def context_text(context: dict[str, Any]) -> str:

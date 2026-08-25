@@ -39,6 +39,15 @@ class LogBatchRequest(BaseModel):
 
 # ── 日志接入端点 ──
 
+import re as _re
+
+def _sanitize_value(v):
+    """移除 HTML 标签, 防止存储型 XSS"""
+    if isinstance(v, str):
+        return _re.sub(r'<[^>]*>', '', v)
+    return v
+
+
 @router.post("/logs/ingest")
 async def ingest_log(
     req: LogIngestRequest,
@@ -63,6 +72,9 @@ async def ingest_log(
 
     session_id = req.session_id or str(uuid.uuid4())
     log_data = req.message if isinstance(req.message, dict) else json.loads(req.message)
+    # 输入 sanitization: 移除 message 字段中的 HTML 标签
+    if isinstance(log_data.get("message"), str):
+        log_data["message"] = _sanitize_value(log_data["message"])
     result = await log_ingestor.ingest(session, session_id, log_data)
     return {"session_id": session_id, **result}
 
@@ -72,8 +84,14 @@ async def ingest_log_batch(
     session: AsyncSession = Depends(get_session)
 ):
     """Fast Path: 批量接入安全日志"""
+    if len(req.logs) > 1000:
+        raise HTTPException(413, "Batch size exceeds limit of 1000")
     session_id = req.session_id or str(uuid.uuid4())
     parsed = [d if isinstance(d, dict) else json.loads(d) for d in req.logs]
+    # 输入 sanitization
+    for d in parsed:
+        if isinstance(d.get("message"), str):
+            d["message"] = _sanitize_value(d["message"])
     result = await log_ingestor.ingest_batch(session, session_id, parsed)
     return {"session_id": session_id, **result}
 
