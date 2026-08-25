@@ -14,8 +14,9 @@ processors:
     timeout: 2s
     send_batch_size: 512
   # 注: 尾部采样 (tail_sampling) 在本版本(0.159.0)存在丢弃问题, 已移除;
-  # 当前 SOC 事件量级下全量导出, 采样可在 SDK 侧 (sampler) 或后续版本开启。
-  # 告警/审计等重要 span 由导出侧 soc.importance 属性区分。
+  # 当前 SOC 事件量级下全量导出 (保真优先), 关键 span 由 SDK 侧 soc.importance 标记,
+  # 供 Grafana/Jaeger 按重要性过滤。完整策略见 docs/otel_sampling.md。
+  # 告警/审计 = important; 常规事件 = normal (backend pipeline_tracer/kafka_consumer/http + flink TraceUtil 已统一)。
 
 exporters:
   # 用 otlp_http (Tempo HTTP 4318, 已验证可用)

@@ -50,6 +50,15 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- lz4-java: Kafka 消息压缩/解压库。显式锁定到 1.11.1 (CVE-2026-59949 修复)
+             防御性升级: 即使上游 kafka-clients 传递其他版本, 也确保命中 kafka-deps
+             的 org.lz4 不会被解析成受影响版本。1.11.1 API 向后兼容 kafka-clients 3.4.0。 -->
+        <dependency>
+            <groupId>org.lz4</groupId>
+            <artifactId>lz4-java</artifactId>
+            <version>1.11.1</version>
+        </dependency>
+
         <!-- flink-connector-base: KafkaSink 的 DeliveryGuarantee 枚举所在包
              (provided 依赖不传递, 需显式声明; 运行时由 Flink 发行版 lib 提供) -->
         <dependency>
