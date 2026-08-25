@@ -35,7 +35,7 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest-cov
+        run: pip install -r requirements.lock pytest-cov
 
       - name: Run tests with coverage
         # 覆盖率门禁: 当前基线 21% → 设 20% 防回归; 目标提升至 60% (路线图阶段4)
@@ -86,6 +86,21 @@ jobs:
 
       - name: Build jar
         run: mvn -B -ntp package
+
+      - name: Verify lz4-java (CVE-2026-59949) dependency
+        run: |
+          mvn -B -ntp dependency:tree -Dscope=compile | tee /tmp/dep.txt
+          # org.lz4:lz4-java 已 abandon 且无 CVE-2026-59949 修复版, 必须被排除
+          if grep -q 'org.lz4:lz4-java' /tmp/dep.txt; then
+            echo "::error::org.lz4:lz4-java 不应存在 (abandon, CVE-2026-59949 no fix)"
+            exit 1
+          fi
+          # 必须解析到修复坐标 at.yawk.lz4:lz4-java:1.11.1
+          grep -q 'at.yawk.lz4:lz4-java:jar:1.11.1' /tmp/dep.txt || {
+            echo "::error::缺少 at.yawk.lz4:lz4-java 1.11.1 (CVE-2026-59949 fix)"
+            exit 1
+          }
+          echo "OK: lz4-java = at.yawk.lz4:1.11.1 (CVE-2026-59949 fixed)"
 
       - name: Upload jar
         if: always()
@@ -177,10 +192,10 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - name: Install deps
-        run: pip install -r requirements.txt pytest httpx
+        run: pip install -r requirements.lock pytest httpx
       - name: API smoke (health/login/metrics/capabilities)
         env:
-          SHARED_MEMORY_DATABASE_URL: sqlite+aiosqlite:///:memory:
+          SHARED_MEMORY_DATABASE_URL: "sqlite+aiosqlite:///:memory:"
           SHARED_MEMORY_JWT_SECRET: ci-secret
           SHARED_MEMORY_ADMIN_PASSWORD: ci-admin
         run: |

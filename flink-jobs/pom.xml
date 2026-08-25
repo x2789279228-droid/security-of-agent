@@ -40,6 +40,14 @@
             <artifactId>flink-connector-kafka</artifactId>
             <version>${kafka.connector.version}</version>
             <scope>provided</scope>
+            <exclusions>
+                <!-- 排除 abandon 且无修复版的 org.lz4:lz4-java (CVE-2026-59949, fix not available);
+                     改由下方 at.yawk.lz4:lz4-java:1.11.1 提供 (修复版新坐标)。 -->
+                <exclusion>
+                    <groupId>org.lz4</groupId>
+                    <artifactId>lz4-java</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- Kafka 客户端 (与连接器版本匹配, 由 Flink lib 目录提供, 不打入 fat jar) -->
@@ -50,11 +58,11 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- lz4-java: Kafka 消息压缩/解压库。显式锁定到 1.11.1 (CVE-2026-59949 修复)
-             防御性升级: 即使上游 kafka-clients 传递其他版本, 也确保命中 kafka-deps
-             的 org.lz4 不会被解析成受影响版本。1.11.1 API 向后兼容 kafka-clients 3.4.0。 -->
+        <!-- lz4-java: Kafka 消息压缩/解压库。org.lz4 坐标已 abandon 且无 CVE-2026-59949 修复版,
+             改用社区迁移目标 at.yawk.lz4:lz4-java:1.11.1 (fix, API 向后兼容 kafka-clients 3.4.0)。
+             显式锁定确保 kafka-deps 不解析回受影响版本。 -->
         <dependency>
-            <groupId>org.lz4</groupId>
+            <groupId>at.yawk.lz4</groupId>
             <artifactId>lz4-java</artifactId>
             <version>1.11.1</version>
         </dependency>
@@ -172,7 +180,7 @@
                             <goal>copy-dependencies</goal>
                         </goals>
                         <configuration>
-                            <includeGroupIds>org.apache.kafka,org.apache.flink,org.lz4,org.xerial.snappy,com.github.luben</includeGroupIds>
+                            <includeGroupIds>org.apache.kafka,org.apache.flink,at.yawk.lz4,org.xerial.snappy,com.github.luben</includeGroupIds>
                             <outputDirectory>${project.build.directory}/kafka-deps</outputDirectory>
                             <stripVersion>false</stripVersion>
                         </configuration>
