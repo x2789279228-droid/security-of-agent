@@ -162,7 +162,7 @@ class TestFeedbackLoop:
         assert "rule_suggestion" in FEEDBACK_TYPES
 
     def test_fp_threshold_configured(self):
-        assert FP_RATE_ALERT_THRESHOLD == 0.5
+        assert FP_RATE_ALERT_THRESHOLD == 0.15
         assert MISSED_THREAT_THRESHOLD == 3
 
     def test_feedback_statuses(self):

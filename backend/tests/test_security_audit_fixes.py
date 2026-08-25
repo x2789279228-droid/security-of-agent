@@ -107,39 +107,30 @@ sub_auditor_mod = _load("agents.sub_auditor", BACKEND / "agents" / "sub_auditor.
 
 
 class TestStageA_Braces:
-    """A1/A2: f-string 大括号修复（SubAuditor / Reviewer prompt）"""
+    """A1/A2: f-string 大括号修复 → 已迁移 Jinja2 模板（SubAuditor / Reviewer prompt）"""
 
     def test_sub_auditor_prompt_renders_valid_json_template(self):
-        # 渲染 SubAuditor._build_prompt 输出，断言不含字面量 {{ 或 }}
+        # SubAuditor._build_prompt 已用 prompts.render() 渲染，不再手拼 f-string。
+        # 断言源码已改用 render 模板调用（不再残留 f-string 字面量双大括号）。
         import re as _re
         src = (BACKEND / "agents" / "sub_auditor.py").read_text(encoding="utf-8")
-        m = _re.search(
-            r'def _build_prompt\(self, block_text: str\) -> str:\s*return\s+(f"""[\s\S]+?""")',
-            src,
-        )
-        assert m, "could not locate _build_prompt template"
-        rendered = eval(m.group(1), {"block_text": "TEST"})
-        # Valid JSON template should have single braces around JSON keys
+        assert 'render("audit/sub_auditor_prompt"' in src, "SubAuditor 应使用模板渲染"
+        # 用 loader 渲染模板，断言输出不含字面量 {{ 或 }}
+        from prompts import render
+        rendered = render("audit/sub_auditor_prompt", block_text="TEST")
         assert "{{" not in rendered, "SubAuditor prompt 仍含字面量 {{ — 修复未生效"
         assert "}}" not in rendered, "SubAuditor prompt 仍含字面量 }} — 修复未生效"
 
     def test_reviewer_prompt_renders_valid_json_template(self):
+        # Reviewer prompt 已用 prompts.render("audit/reviewer_review") 渲染。
         import re as _re
         src = (BACKEND / "agents" / "agent_reviewer.py").read_text(encoding="utf-8")
-        m = _re.search(r'prompt =\s+(f"""[\s\S]+?""")', src)
-        assert m, "could not locate reviewer prompt template"
-        # D1: prompt 新增 rag_section 变量，需提供 eval 上下文
-        rendered = eval(
-            m.group(1),
-            {
-                "event_json": "{}",
-                "depth": "standard",
-                "sub_tasks_text": "",
-                "llm_analysis": "",
-                "audit_json": "{}",
-                "tool_data_raw": "",
-                "rag_section": "",
-            },
+        assert 'render("audit/reviewer_review"' in src.replace("\n", "").replace(" ", ""), "Reviewer 应使用模板渲染"
+        from prompts import render
+        rendered = render(
+            "audit/reviewer_review",
+            event_json="{}", depth="standard", sub_tasks_text="",
+            llm_analysis="", audit_json="{}", tool_data_raw="", rag_section="",
         )
         assert "{{" not in rendered
         assert "}}" not in rendered
