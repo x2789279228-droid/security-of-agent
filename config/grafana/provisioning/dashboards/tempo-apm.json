@@ -1,0 +1,42 @@
+{
+  "title": "Tempo APM — 链路追踪",
+  "uid": "tempo-apm",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": ["otel", "tempo", "trace"],
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "type": "tempo",
+      "title": "Trace Service Graph",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "queryType": "serviceMap",
+          "serviceMap": { "datasource": { "type": "prometheus", "uid": "prometheus" } },
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Recent Traces",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "queryType": "traceql",
+          "query": "{}",
+          "limit": 50,
+          "tableType": "traces",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" }
+}

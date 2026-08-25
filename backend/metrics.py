@@ -41,6 +41,15 @@ INTEL_IOC = Counter("soc_intel_ioc_total", "威胁情报 IOC 拉取计数(按源
 IOC_MATCHES = Counter("soc_ioc_matches_total", "IOC 匹配命中计数")
 SANDBOX_SUBMISSIONS = Counter("soc_sandbox_submissions_total", "沙箱提交计数(按类型)", ["kind"])
 PHISHING_DETECTIONS = Counter("soc_phishing_detections_total", "反钓鱼检测计数(按类别)", ["category"])
+LLM_TOKENS = Counter("soc_llm_tokens_total", "LLM token 消耗(按组件)", ["component"])
+
+
+def inc_llm_tokens(component: str = "llm", amount: int = 0) -> None:
+    try:
+        if amount and amount > 0:
+            LLM_TOKENS.labels(component=component or "llm").inc(amount)
+    except Exception:
+        pass
 
 
 def inc_ndr_flow(protocol: str = "tcp") -> None:

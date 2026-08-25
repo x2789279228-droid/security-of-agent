@@ -184,7 +184,27 @@ class BaseAuditComponent:
         self.display_name = display_name
 
     async def llm_chat(self, messages: list[dict]) -> str:
-        """统一 LLM 调用入口，自动注入 caller 标识到 trace"""
+        """统一 LLM 调用入口，自动注入 caller 标识到 trace + 轻量 CoT 思考链"""
         from trace_hook import set_trace_context
         set_trace_context(operation="audit_component", caller=self.agent_id)
-        return await summary.llm.chat(messages)
+        # 轻量 chain-of-thought：最后追加"先逐步推理，再给出结论"工作流引导
+        cot_hint = (f"请先依据上下文逐步推理（列出关键证据链、排除干扰、给出置信度），"
+                    f"再输出最终结论。推理过程简明扼要，结论必须可追溯到事件证据。")
+        try:
+            if isinstance(messages, list) and messages:
+                last = dict(messages[-1])
+                last["content"] = f"{last.get('content', '')}\n\n推理要求：{cot_hint}"
+                messages = messages[:-1] + [last]
+        except Exception:
+            pass
+        result = await summary.llm.chat(messages)
+        # 链式验证日志（reasoning 留痕，供审计/复现）
+        try:
+            import logging
+            logging.getLogger("reasoning").info(
+                "agent=%s decision=%s reasoning_chain_requested=True output_chars=%d",
+                self.agent_id, getattr(self, "last_decision", ""), len(str(result or "")),
+            )
+        except Exception:
+            pass
+        return result

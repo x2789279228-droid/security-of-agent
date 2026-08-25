@@ -60,6 +60,12 @@ class CostTracker:
         self._call_count[today] += 1
         if event_id:
             self._event_costs[event_id] = self._event_costs.get(event_id, 0) + tokens
+        # Prometheus 暴露 token 消耗(供对齐 token reduction 目标)
+        try:
+            from metrics import inc_llm_tokens
+            inc_llm_tokens("llm", int(tokens or 0))
+        except Exception:
+            pass
 
     def restore_today_usage(self, tokens: int, calls: int = 0,
                             prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
