@@ -16,6 +16,8 @@ from typing import Optional
 from sqlalchemy import select, and_, or_, func as sql_func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,27 +65,116 @@ class Retriever:
 
         # 策略 1: 向量检索
         if query_embedding:
-            return await self._vector_search(
+            result = await self._vector_search(
                 session, query_embedding, threat_type, severity, source,
                 top_k, min_score, query,
             )
+            return await self._drop_unapproved(session, result)
 
         # 策略 2: 文本查询 + 过滤
         if query or threat_type or severity or source:
-            return await self._filter_search(
+            result = await self._filter_search(
                 session, query, threat_type, severity, source, top_k,
             )
+            return await self._drop_unapproved(session, result)
 
         return RetrievalResult()
+
+    async def _drop_unapproved(self, session: AsyncSession, result: RetrievalResult) -> RetrievalResult:
+        """未审批 / 已拒绝的内部文档不得进入检索（防 RAG 投毒）。"""
+        if not result.chunks:
+            return result
+        from models import KnowledgeDoc
+        from memory_guard import kb_is_retrievable
+
+        doc_ids = {c.get("doc_id") for c in result.chunks if c.get("doc_id")}
+        if not doc_ids:
+            return result
+        rows = (await session.execute(
+            select(
+                KnowledgeDoc.id,
+                KnowledgeDoc.approval_status,
+                KnowledgeDoc.valid_until,
+            ).where(KnowledgeDoc.id.in_(doc_ids))
+        )).all()
+        from ops_loop import kb_chunk_is_fresh
+        allowed = {did for did, st, _vu in rows if kb_is_retrievable(st or "")}
+        freshness = {did: vu for did, _st, vu in rows}
+        status_map = {did: st for did, st, _vu in rows}
+        kept = []
+        for c in result.chunks:
+            did = c.get("doc_id")
+            if did not in allowed:
+                continue
+            vu = freshness.get(did)
+            if vu is not None:
+                c = dict(c)
+                c["valid_until"] = vu.isoformat() if hasattr(vu, "isoformat") else vu
+            if not kb_chunk_is_fresh(c):
+                continue
+            kept.append(c)
+        result.chunks = kept
+        result.total_found = len(kept)
+        return result
 
     async def _vector_search(
         self, session: AsyncSession, embedding: list[float],
         threat_type: str, severity: str, source: str,
         top_k: int, min_score: float, query: str,
     ) -> RetrievalResult:
-        """向量相似度检索"""
+        """向量相似度检索 (现优先走 Qdrant, 不可用时回退 pgvector)"""
         from models import KnowledgeChunk
 
+        # ── 优先: Qdrant 向量检索 + payload 过滤 ──
+        # qdrant 不可用/无结果时走下方 pgvector 兜底
+        try:
+            from qdrant_store import qdrant_store
+            if settings.qdrant_enabled and settings.qdrant_url:
+                qhits = await qdrant_store.search(
+                    query_vector=[float(x) for x in embedding],
+                    top_k=top_k,
+                    min_score=min_score,
+                    threat_type=threat_type,
+                    severity=severity,
+                    source=source,
+                )
+                if qhits:
+                    # 用 chunk_id 回查 pg 拿完整 chunk 元数据
+                    chunk_ids = [h["chunk_id"] for h in qhits if h.get("chunk_id")]
+                    by_id = {h["chunk_id"]: h for h in qhits}
+                    qchunks = []
+                    if chunk_ids:
+                        from sqlalchemy import select as _sel
+                        rows = (await session.execute(
+                            _sel(KnowledgeChunk).where(KnowledgeChunk.chunk_id.in_(chunk_ids))
+                        )).scalars().all()
+                        row_map = {r.chunk_id: r for r in rows}
+                        for cid in chunk_ids:
+                            r = row_map.get(cid)
+                            h = by_id.get(cid, {})
+                            qchunks.append({
+                                "id": r.id if r else 0,
+                                "doc_id": h.get("doc_id") or (r.doc_id if r else 0),
+                                "content": (r.content if r else (h.get("payload") or {}).get("content", ""))[:1500],
+                                "title": (r.title if r else (h.get("payload") or {}).get("title", "")),
+                                "source": (r.source if r else (h.get("payload") or {}).get("source", "")),
+                                "threat_types": list(r.threat_types or []) if r else list((h.get("payload") or {}).get("threat_types", []) or []),
+                                "severity": (r.severity if r else (h.get("payload") or {}).get("severity", "")),
+                                "tags": list(r.tags or []) if r else list((h.get("payload") or {}).get("tags", []) or []),
+                                "score": h.get("score", 0.0),
+                                "strategy": "vector",
+                            })
+                    if qchunks:
+                        logger.info(f"Vector search (Qdrant): {len(qchunks)} chunks (query='{query[:30]}', threat_type={threat_type})")
+                        return RetrievalResult(
+                            chunks=qchunks,
+                            total_found=len(qchunks),
+                            strategy_used="vector",
+                        )
+        except Exception as qe:
+            logger.warning(f"[Qdrant] 检索降级 pgvector: {qe}")
+
+        # ── 兜底: pgvector 向量检索 ──
         distance_expr = KnowledgeChunk.embedding.cosine_distance(embedding)
         stmt = select(
             KnowledgeChunk,
@@ -288,25 +379,14 @@ class Retriever:
             content_preview = c.get("content", "")[:200]
             items_text += f"[{i}] {title}\n{content_preview}\n\n"
 
-        prompt = f"""你是安全知识检索专家。请对以下检索结果按与查询的相关性排序。
-
-## 查询
-{query}
-
-## 检索结果
-{items_text}
-
-## 要求
-输出与查询最相关的结果编号（从最相关到最不相关），JSON 数组格式:
-[编号1, 编号2, ...]
-
-只输出编号数组，不要其他内容。最多输出 {top_k} 个。"""
+        from prompts import render
+        prompt = render("rag/rerank", query=query, items_text=items_text, top_k=top_k)
 
         try:
             from trace_hook import set_trace_context
             set_trace_context(operation="rerank")
             result = await summary.llm.chat([
-                {"role": "system", "content": "输出 JSON 数组，只含编号。"},
+                {"role": "system", "content": render("rag/rerank_system")},
                 {"role": "user", "content": prompt},
             ])
             import json as _json
