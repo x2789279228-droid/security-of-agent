@@ -1,0 +1,22 @@
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/../../../etc/passwd", "message": "path traversal /etc/passwd", "severity": "high", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/a/../../../../windows/win.ini", "message": "/a/../../../../windows/win.ini", "severity": "high", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/login.jsp?..%252f..%252f..%252fetc%252fpasswd", "message": "/login.jsp?..%252f..%252f..%252fetc%252fpasswd", "severity": "high", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/assets/..%c0%af..%c0%af..%c0%afetc%c0%afshadow", "message": "/assets/..%c0%af..%c0%af..%c0%afetc%c0%afshadow", "severity": "high", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/doc/%252e%252e%252fetc%252fpasswd", "message": "/doc/%252e%252e%252fetc%252fpasswd", "severity": "high", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/download.php?file=C:/Windows/system32/config/SAM", "message": "/download.php?file=C:/Windows/system32/config/SAM", "severity": "medium", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/?path=C:/Users/Public/Desktop/note.txt", "message": "/?path=C:/Users/Public/Desktop/note.txt", "severity": "medium", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/dl?f=C%3A%5CProgram%20Files%5Capp%5Cdata.db", "message": "/dl?f=C%3A%5CProgram%20Files%5Capp%5Cdata.db", "severity": "medium", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/api/users?id=1%3Dselect%20password&x=1", "message": "/api/users?id=1%3Dselect%20password&x=1", "severity": "high", "attack": true, "method": "GET", "status": 200}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/search?q=1%27%27%27%27%27%3D%27", "message": "/search?q=1%27%27%27%27%27%3D%27", "severity": "high", "attack": true, "method": "GET", "status": 200}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/login.php?user=1+UNION+select+@@version,2,3", "message": "/login.php?user=1+UNION+select+@@version,2,3", "severity": "high", "attack": true, "method": "GET", "status": 200}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/q?=<script>alert(1)</script>", "message": "/q?=<script>alert(1)</script>", "severity": "high", "attack": true, "method": "GET", "status": 200}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/comment?body=<iframe%20src=evil>", "message": "/comment?body=<iframe%20src=evil>", "severity": "high", "attack": true, "method": "GET", "status": 200}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/welcome?name=%7B%7Bconfig%7D%7D", "message": "/welcome?name=%7B%7Bconfig%7D%7D", "severity": "high", "attack": true, "method": "GET", "status": 200}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/post?tpl=${7*7}", "message": "/post?tpl=${7*7}", "severity": "high", "attack": true, "method": "GET", "status": 200}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/repo/.git/HEAD", "message": "/repo/.git/HEAD", "severity": "medium", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/static/.git/config", "message": "/static/.git/config", "severity": "medium", "attack": true}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/", "message": "index page", "severity": "medium", "attack": false}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/static/app.js", "message": "static asset", "severity": "medium", "attack": false}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/api/login?user=admin", "message": "login endpoint", "severity": "medium", "attack": false}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/home/dashboard", "message": "dashboard", "severity": "medium", "attack": false}
+{"event": "REQ", "src_ip": "1.2.3.4", "dst_ip": "10.0.0.5", "url": "/img/logo.png", "message": "image asset", "severity": "medium", "attack": false}

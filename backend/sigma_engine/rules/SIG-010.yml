@@ -1,0 +1,27 @@
+title: 横向移动检测
+id: aaaaaaaa-0001-0000-0000-000000000010
+status: test
+description: 检测内网横向移动特征
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: process_creation
+  product: generic
+detection:
+  selection:
+    event|contains:
+      - LATERAL_MOVE
+      - LATERAL_SSH
+      - PRIV_ESCALATION
+  condition: selection
+level: high
+tags:
+  - attack.lateral-movement.t1021
+falsepositives:
+  - bastion host admin hops
+x-soc-id: SIG-010
+x-soc-confidence: medium
+x-soc-action: require_confirmation
+x-soc-attack_type: lateral_movement
+x-soc-severity: high

@@ -1,0 +1,27 @@
+title: C2 通信检测
+id: aaaaaaaa-0001-0000-0000-000000000008
+status: test
+description: 检测 C2 信标通信特征
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: network
+  product: generic
+detection:
+  selection:
+    event|contains:
+      - C2_BEACON
+      - C2_COMM
+      - DNS_TUNNEL
+  condition: selection
+level: critical
+tags:
+  - attack.command-and-control.t1071
+falsepositives:
+  - legit tunneling software
+x-soc-id: SIG-008
+x-soc-confidence: high
+x-soc-action: block_ip
+x-soc-attack_type: c2_communication
+x-soc-severity: critical

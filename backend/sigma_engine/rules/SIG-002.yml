@@ -1,0 +1,34 @@
+title: 敏感信息探测
+id: aaaaaaaa-0001-0000-0000-000000000002
+status: test
+description: 检测对系统信息接口的访问
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: proxy
+  product: generic
+detection:
+  sel_url:
+    url|contains:
+      - /GetSystem
+      - /system/info
+      - /api/status
+  sel_event:
+    event|contains:
+      - INFO_DISCLOSURE
+      - 信息探测
+  condition: 1 of sel_*
+level: medium
+tags:
+  - attack.reconnaissance.t1595.001
+falsepositives:
+  - admin status polling
+x-soc-id: SIG-002
+x-soc-confidence: high
+x-soc-action: block_ip
+x-soc-attack_type: info_disclosure
+x-soc-severity: medium
+x-soc-boost:
+  target_is_internal: true
+  new_severity: high

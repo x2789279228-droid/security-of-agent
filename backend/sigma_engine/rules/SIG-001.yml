@@ -1,0 +1,33 @@
+title: HTTP 登录爆破检测
+id: aaaaaaaa-0001-0000-0000-000000000001
+status: test
+description: 检测对登录接口的高频访问
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: proxy
+  product: generic
+detection:
+  selection:
+    url|contains:
+    - /api/auth/login
+    - /login
+    - /admin/login
+  condition: selection
+level: high
+tags:
+- attack.credential-access.t1110
+falsepositives:
+- legit user login bursts
+x-soc-id: SIG-001
+x-soc-confidence: high
+x-soc-action: block_ip
+x-soc-attack_type: brute_force
+x-soc-severity: high
+x-soc-aggregation:
+  func: count
+  field: src_ip
+  op: '>'
+  threshold: 5
+  timeframe: 5m

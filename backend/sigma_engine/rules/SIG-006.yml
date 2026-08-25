@@ -1,0 +1,24 @@
+title: Elasticsearch 未授权访问
+id: aaaaaaaa-0001-0000-0000-000000000006
+status: test
+description: 检测对 ES 默认端口 9200 的访问
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: network
+  product: generic
+detection:
+  selection:
+    dst_port: 9200
+  condition: selection
+level: critical
+tags:
+  - attack.initial-access.t1190
+falsepositives:
+  - legit elasticsearch admin traffic
+x-soc-id: SIG-006
+x-soc-confidence: high
+x-soc-action: block_ip
+x-soc-attack_type: unauthorized_access
+x-soc-severity: critical

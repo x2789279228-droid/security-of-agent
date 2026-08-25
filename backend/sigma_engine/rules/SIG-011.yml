@@ -1,0 +1,28 @@
+title: 恶意软件检测
+id: aaaaaaaa-0001-0000-0000-000000000011
+status: test
+description: 检测已知恶意软件特征
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: anti_virus
+  product: generic
+detection:
+  selection:
+    event|contains:
+      - MALWARE
+      - RANSOMWARE
+      - TROJAN
+      - WORM
+  condition: selection
+level: critical
+tags:
+  - attack.execution.t1204
+falsepositives:
+  - AV alert sync
+x-soc-id: SIG-011
+x-soc-confidence: high
+x-soc-action: block_ip
+x-soc-attack_type: malware
+x-soc-severity: critical

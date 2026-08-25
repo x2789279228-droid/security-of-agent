@@ -1,0 +1,32 @@
+title: 路径遍历攻击
+id: aaaaaaaa-0001-0000-0000-000000000003
+status: test
+description: 检测对日志/敏感路径的访问
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: proxy
+  product: generic
+detection:
+  sel_url:
+    url|contains:
+      - /access.log
+      - /etc/passwd
+      - /../
+      - '%2e%2e'
+  sel_event:
+    event|contains:
+      - PATH_TRAVERSAL
+      - 路径遍历
+  condition: 1 of sel_*
+level: critical
+tags:
+  - attack.discovery.t1083
+falsepositives:
+  - CDN normalizing .. segments
+x-soc-id: SIG-003
+x-soc-confidence: high
+x-soc-action: block_ip
+x-soc-attack_type: path_traversal
+x-soc-severity: critical

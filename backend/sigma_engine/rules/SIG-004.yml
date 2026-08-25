@@ -1,0 +1,32 @@
+title: 越权访问尝试
+id: aaaaaaaa-0001-0000-0000-000000000004
+status: test
+description: 检测对记录详情接口的非授权访问
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: proxy
+  product: generic
+detection:
+  sel_url:
+    url|contains:
+      - /api/record/runDetail
+      - /api/admin/
+      - /api/internal/
+  sel_event:
+    event|contains:
+      - UNAUTHORIZED_ACCESS
+      - UNAUTH_ACCESS
+      - 越权
+  condition: 1 of sel_*
+level: high
+tags:
+  - attack.privilege-escalation.t1078
+falsepositives:
+  - misconfigured authorization checks
+x-soc-id: SIG-004
+x-soc-confidence: medium
+x-soc-action: block_ip
+x-soc-attack_type: unauthorized_access
+x-soc-severity: high

@@ -1,0 +1,32 @@
+title: 敏感数据下载
+id: aaaaaaaa-0001-0000-0000-000000000005
+status: test
+description: 检测对下载接口的可疑访问
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: proxy
+  product: generic
+detection:
+  sel_url:
+    url|contains:
+      - /api/download
+      - /file/download
+      - /export
+  sel_event:
+    event|contains:
+      - DATA_EXFIL
+      - DATA_DOWNLOAD
+      - 数据外泄
+  condition: 1 of sel_*
+level: medium
+tags:
+  - attack.exfiltration.t1048
+falsepositives:
+  - legit bulk export jobs
+x-soc-id: SIG-005
+x-soc-confidence: medium
+x-soc-action: require_confirmation
+x-soc-attack_type: data_exfiltration
+x-soc-severity: medium

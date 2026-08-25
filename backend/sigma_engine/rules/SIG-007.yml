@@ -1,0 +1,35 @@
+title: SSH 暴力破解
+id: aaaaaaaa-0001-0000-0000-000000000007
+status: test
+description: 检测对 SSH 服务的异常连接
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: auth
+  product: linux
+detection:
+  sel_port:
+    dst_port: 22
+  sel_event:
+    event|contains:
+      - BRUTE_FORCE
+      - SSH_BRUTE
+      - LOGIN_FAIL
+  condition: 1 of sel_*
+level: high
+tags:
+  - attack.credential-access.t1110.001
+falsepositives:
+  - dev ssh admin bursts
+x-soc-id: SIG-007
+x-soc-confidence: medium
+x-soc-action: block_ip
+x-soc-attack_type: brute_force
+x-soc-severity: high
+x-soc-aggregation:
+  func: count
+  field: src_ip
+  op: ">"
+  threshold: 3
+  timeframe: 5m

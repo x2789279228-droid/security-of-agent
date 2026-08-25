@@ -1,0 +1,26 @@
+title: 端口扫描检测
+id: aaaaaaaa-0001-0000-0000-000000000009
+status: test
+description: 检测大规模端口扫描行为
+date: 2026/08/24
+author: SOC Platform
+license: SOC-Internal
+logsource:
+  category: network
+  product: generic
+detection:
+  selection:
+    event|contains:
+      - PORT_SCAN
+      - SCAN_DETECT
+  condition: selection
+level: medium
+tags:
+  - attack.discovery.t1046
+falsepositives:
+  - network mapping tools
+x-soc-id: SIG-009
+x-soc-confidence: high
+x-soc-action: alert
+x-soc-attack_type: port_scan
+x-soc-severity: medium
