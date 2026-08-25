@@ -50,6 +50,20 @@ echo ">>> 提交 Job 2: AnomalyDetectionJob (异常检测 + CEP 攻击链)"
     && echo "✅ AnomalyDetectionJob 提交成功" \
     || echo "❌ AnomalyDetectionJob 提交失败"
 
+sleep 3
+
+# 提交 Job 3: SigmaThresholdAggregationJob (Sigma 聚合阈值窗口 - 阈值类规则分布统计)
+echo ""
+echo ">>> 提交 Job 3: SigmaThresholdAggregationJob (Sigma 聚合阈值窗口)"
+/opt/flink/bin/flink run \
+    -m "${JM_HOST}:${JM_PORT}" \
+    -d \
+    -c com.soc.job.SigmaThresholdAggregationJob \
+    "${PARALLELISM_ARGS[@]}" \
+    "$JAR_PATH" \
+    && echo "✅ SigmaThresholdAggregationJob 提交成功" \
+    || echo "❌ SigmaThresholdAggregationJob 提交失败"
+
 # ── NDR 扩展作业 (可选) ──
 # 默认不提交: 其输出 topic (ndr-flows-aggregated / ndr-tls-enriched)
 # 后端暂未消费, 仅在启用 NDR 流量采集演示时需要。

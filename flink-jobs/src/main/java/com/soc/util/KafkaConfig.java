@@ -40,6 +40,9 @@ public class KafkaConfig {
     /** CEP 模式配置 - Broadcast 热更新通道 */
     public static final String TOPIC_CEP_PATTERNS = "security-cep-patterns";
 
+    /** Sigma 聚合候选 - pySigma 单事件命中带聚合聚合规则(如 SIG-001/007)的事件; Flink 阈值窗口消费 */
+    public static final String TOPIC_SIGMA_HIT = "security-sigma-hit";
+
     // ==================== Kafka 连接配置 ====================
 
     /** Kafka Bootstrap 服务器地址，支持环境变量覆盖 */

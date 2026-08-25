@@ -19,7 +19,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.2-alpine
     container_name: shared-memory-redis
     restart: always
     # 强制密码 + protected-mode;端口仅绑 127.0.0.1 供本机调试,容器间走 Docker 内网
@@ -33,6 +33,24 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # ── Qdrant 向量数据库 (RAG 知识库检索; 端口仅绑 127.0.0.1, 容器间走 Docker 内网) ──
+  qdrant:
+    image: qdrant/qdrant:v1.15.1
+    # 可重现: 运行 `docker pull qdrant/qdrant:v1.15.1` 后追加 `@sha256:<digest>`
+    container_name: soc-qdrant
+    restart: always
+    ports:
+      - "127.0.0.1:6333:6333"   # REST API
+      - "127.0.0.1:6334:6334"   # gRPC (可选)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/6333 && echo -e \"GET /collections HTTP/1.0\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && cat <&3 2>/dev/null | grep -qiE \"HTTP/1.[01] 200\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   # ── Kafka 消息总线 (KRaft 模式, 无需 ZooKeeper) ──
   kafka:
@@ -52,7 +70,7 @@ services:
       # ── SASL/SCRAM 认证 (外部日志源必须持账号+证书才能推送, 账号创建见 tools/create-kafka-users.sh) ──
       KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
       KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/kafka_jaas.conf
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       # 单 broker 事务: 内部主题 __transaction_state 需 RF=1 (默认 3 无法在单 broker 建主题,
       # 导致 Flink KafkaSink EXACTLY_ONCE 的 InitProducerId 超时失败)
@@ -233,7 +251,7 @@ services:
       SHARED_MEMORY_EMBEDDING_API_KEY: ${SHARED_MEMORY_EMBEDDING_API_KEY:?EMBEDDING_API_KEY_REQUIRED}
       SHARED_MEMORY_EMBEDDING_BASE_URL: ${SHARED_MEMORY_EMBEDDING_BASE_URL:-https://maas-api.cn-huabei-1.xf-yun.com/v2}
       SHARED_MEMORY_EMBEDDING_MODEL: ${SHARED_MEMORY_EMBEDDING_MODEL:-mimo-v2.5}
-      SHARED_MEMORY_EMBEDDING_DIM: ${SHARED_MEMORY_EMBEDDING_DIM:-1024}
+      SHARED_MEMORY_EMBEDDING_DIM: ${SHARED_MEMORY_EMBEDDING_DIM:-768}
       # 安全认证配置
       SHARED_MEMORY_JWT_SECRET: ${SHARED_MEMORY_JWT_SECRET:?JWT_SECRET_REQUIRED}
       SHARED_MEMORY_ADMIN_USER: ${SHARED_MEMORY_ADMIN_USER:-admin}
@@ -250,14 +268,45 @@ services:
       # Kafka 消息总线
       SHARED_MEMORY_KAFKA_ENABLED: ${SHARED_MEMORY_KAFKA_ENABLED:-true}
       SHARED_MEMORY_KAFKA_BOOTSTRAP: kafka:9092
+      # Qdrant 向量数据库 (RAG 检索; 容器间走 Docker 内网, 端口仅绑 127.0.0.1)
+      SHARED_MEMORY_QDRANT_URL: ${SHARED_MEMORY_QDRANT_URL:-http://qdrant:6333}
+      SHARED_MEMORY_QDRANT_COLLECTION: ${SHARED_MEMORY_QDRANT_COLLECTION:-soc_knowledge_chunks}
+      # 真实 embedding 维度=768 (与 SHARED_MEMORY_EMBEDDING_DIM 一致)
+      SHARED_MEMORY_QDRANT_VECTOR_SIZE: ${SHARED_MEMORY_QDRANT_VECTOR_SIZE:-768}
       # Confluent Schema Registry (Flink↔Python 跨运行时 Schema 契约)
       SHARED_MEMORY_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       # OpenTelemetry (标准 trace → otel-collector → Tempo)
       SHARED_MEMORY_OTEL_ENABLED: "true"
       SHARED_MEMORY_OTEL_ENDPOINT: http://otel-collector:4317
       SHARED_MEMORY_ENV_NAME: ${SHARED_MEMORY_ENV_NAME:-dev}
+      # Temporal (4 层 Agent 编排; 默认启用, 失败降级 async)
+      SHARED_MEMORY_TEMPORAL_ENABLED: ${SHARED_MEMORY_TEMPORAL_ENABLED:-true}
+      SHARED_MEMORY_TEMPORAL_HOST: temporal:7233
+      SHARED_MEMORY_TEMPORAL_NAMESPACE: default
+      SHARED_MEMORY_TEMPORAL_TASK_QUEUE: audit-pipeline
       # 敏感字段加密（Fernet key, 生成: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"）
       SHARED_MEMORY_FIELD_ENCRYPTION_KEY: ${SHARED_MEMORY_FIELD_ENCRYPTION_KEY:-}
+      # ── B 类高级能力（NDR/EDR/威胁情报/0day/反钓鱼; 默认关闭, 演示经 .env.demo 开启）──
+      SHARED_MEMORY_CAPTURE_ENABLED: ${SHARED_MEMORY_CAPTURE_ENABLED:-false}
+      SHARED_MEMORY_CAPTURE_INTERFACE: ${SHARED_MEMORY_CAPTURE_INTERFACE:-eth0}
+      SHARED_MEMORY_CAPTURE_METHOD: ${SHARED_MEMORY_CAPTURE_METHOD:-libpcap}
+      SHARED_MEMORY_MITM_ENABLED: ${SHARED_MEMORY_MITM_ENABLED:-false}
+      SHARED_MEMORY_EDR_ENABLED: ${SHARED_MEMORY_EDR_ENABLED:-false}
+      SHARED_MEMORY_INTEL_ENABLED: ${SHARED_MEMORY_INTEL_ENABLED:-false}
+      SHARED_MEMORY_MISP_URL: ${SHARED_MEMORY_MISP_URL:-}
+      SHARED_MEMORY_MISP_API_KEY: ${SHARED_MEMORY_MISP_API_KEY:-}
+      SHARED_MEMORY_TAXII_URL: ${SHARED_MEMORY_TAXII_URL:-}
+      SHARED_MEMORY_TAXII_USER: ${SHARED_MEMORY_TAXII_USER:-}
+      SHARED_MEMORY_TAXII_PASSWORD: ${SHARED_MEMORY_TAXII_PASSWORD:-}
+      SHARED_MEMORY_SANDBOX_ENABLED: ${SHARED_MEMORY_SANDBOX_ENABLED:-false}
+      SHARED_MEMORY_SANDBOX_TYPE: ${SHARED_MEMORY_SANDBOX_TYPE:-cape}
+      SHARED_MEMORY_SANDBOX_API_URL: ${SHARED_MEMORY_SANDBOX_API_URL:-http://host.docker.internal:8899}
+      SHARED_MEMORY_SANDBOX_AUTO_SUBMIT: ${SHARED_MEMORY_SANDBOX_AUTO_SUBMIT:-false}
+      # B 类 LLM 增强(可选叙事/解读)
+      SHARED_MEMORY_LLM_EDR_ENABLED: ${SHARED_MEMORY_LLM_EDR_ENABLED:-false}
+      SHARED_MEMORY_LLM_INTEL_ENABLED: ${SHARED_MEMORY_LLM_INTEL_ENABLED:-false}
+      SHARED_MEMORY_LLM_SANDBOX_ENABLED: ${SHARED_MEMORY_LLM_SANDBOX_ENABLED:-false}
+      SHARED_MEMORY_LLM_PHISHING_ENABLED: ${SHARED_MEMORY_LLM_PHISHING_ENABLED:-false}
     volumes:
       # 挂载宿主机 SSH 私钥到中性路径（entrypoint 会复制到 /tmp/ssh 并修正权限）
       - ~/.ssh/id_rsa:/tmp/ssh-keys/id_rsa:ro
@@ -271,6 +320,10 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      temporal:
+        condition: service_started
 
   frontend:
     image: ghcr.io/x2789279228-droid/soc-frontend:${IMAGE_TAG:-dev}
@@ -288,6 +341,36 @@ services:
     depends_on:
       - backend
       - flink-jobmanager
+
+  # ── Temporal Worker (4 层 Agent 编排的执行者; 独立进程跑 workflow/activity) ──
+  temporal-worker:
+    image: ghcr.io/x2789279228-droid/soc-backend:${IMAGE_TAG:-dev}
+    container_name: soc-temporal-worker
+    restart: always
+    command: ["python", "-m", "temporal.worker"]
+    environment:
+      SHARED_MEMORY_DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/shared_memory
+      SHARED_MEMORY_REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
+      SHARED_MEMORY_LLM_API_KEY: ${SHARED_MEMORY_LLM_API_KEY:?LLM_API_KEY_REQUIRED}
+      SHARED_MEMORY_LLM_BASE_URL: ${SHARED_MEMORY_LLM_BASE_URL:-https://api.xiaomimimo.com/v1}
+      SHARED_MEMORY_LLM_MODEL: ${SHARED_MEMORY_LLM_MODEL:-mimo-v2.5}
+      SHARED_MEMORY_EMBEDDING_API_KEY: ${SHARED_MEMORY_EMBEDDING_API_KEY:?EMBEDDING_API_KEY_REQUIRED}
+      SHARED_MEMORY_EMBEDDING_BASE_URL: ${SHARED_MEMORY_EMBEDDING_BASE_URL:-https://maas-api.cn-huabei-1.xf-yun.com/v2}
+      SHARED_MEMORY_EMBEDDING_MODEL: ${SHARED_MEMORY_EMBEDDING_MODEL:-mimo-v2.5}
+      SHARED_MEMORY_EMBEDDING_DIM: ${SHARED_MEMORY_EMBEDDING_DIM:-768}
+      # Temporal (worker 消费编排队列)
+      SHARED_MEMORY_TEMPORAL_HOST: temporal:7233
+      SHARED_MEMORY_TEMPORAL_NAMESPACE: default
+      SHARED_MEMORY_TEMPORAL_TASK_QUEUE: audit-pipeline
+      # OpenTelemetry (activity 内 span → collector → Tempo/Jaeger)
+      SHARED_MEMORY_OTEL_ENABLED: "true"
+      SHARED_MEMORY_OTEL_ENDPOINT: http://otel-collector:4317
+      SHARED_MEMORY_ENV_NAME: ${SHARED_MEMORY_ENV_NAME:-dev}
+      SHARED_MEMORY_FIELD_ENCRYPTION_KEY: ${SHARED_MEMORY_FIELD_ENCRYPTION_KEY:-}
+      SHARED_MEMORY_ALLOWED_ORIGINS: '${SHARED_MEMORY_ALLOWED_ORIGINS:-["http://localhost:3001"]}'
+    depends_on:
+      - temporal
+      - backend
 
   # ════════════════════════════════════════════
   # 可观测性 (标准 OpenTelemetry + Grafana Tempo/Prometheus)
@@ -314,6 +397,69 @@ services:
     volumes:
       - ./config/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo_data:/var/tempo
+
+  # ── Jaeger (trace 可视化; 与 Tempo 并存, collector 双写导出) ──
+  # all-in-one v2: 内置 OTLP gRPC(4317)/HTTP(4318) 接收器 + Query UI(16686)
+  # 经 frontend:3002/jaeger/ 反代访问; base-path 在 config/jaeger 配置。
+  jaeger:
+    image: jaegertracing/jaeger:2.7.0
+    container_name: soc-jaeger
+    restart: always
+    command:
+      - --config=file:/etc/jaeger/jaeger.yaml
+    volumes:
+      - ./config/jaeger/jaeger.yaml:/etc/jaeger/jaeger.yaml:ro
+    ports:
+      - "127.0.0.1:16686:16686"   # Jaeger Query UI (本机调试, 正式走前端反代)
+    depends_on:
+      - backend
+
+  # ── Temporal (4 层 Agent 编排: 可靠性/长任务/可视化; 独立 postgres 存储) ──
+  temporal-postgres:
+    image: postgres:16.4
+    container_name: soc-temporal-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_PASSWORD:-temporal_dev_pwd}
+      POSTGRES_DB: temporal
+    ports:
+      - "127.0.0.1:5434:5432"   # 仅本机调试
+    volumes:
+      - temporal_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:1.27.1
+    container_name: soc-temporal
+    restart: always
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=${TEMPORAL_PASSWORD:-temporal_dev_pwd}
+      - POSTGRES_SEEDS=temporal-postgres
+      - NUM_HISTORY_SHARDS=4
+      - SKIP_DEFAULT_NAMESPACE_CREATION=false
+    ports:
+      - "127.0.0.1:7233:7233"   # gRPC; 供 backend/worker 容器内网访问
+    depends_on:
+      - temporal-postgres
+
+  temporal-ui:
+    image: temporalio/ui:2.38.1
+    container_name: soc-temporal-ui
+    restart: always
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3002
+      - TEMPORAL_UI_BASE_PATH=/temporal
+    depends_on:
+      - temporal
 
   # ── Prometheus (Flink 9250/9251 + Python /metrics, 支持 exemplar) ──
   prometheus:
@@ -379,13 +525,14 @@ services:
     network_mode: host
 
   # ── CAPE Sandbox (恶意软件动态分析) ──
-  # NOTE: `capev2/cape` 在 Docker Hub 不存在 (API 404)。启用 sandbox profile 前
-  # 请替换为真实可用的 CAPE 镜像并锁版本 (如 self-host 的 harbor/镜像仓库)。
+  # NOTE: `capev2/cape` 在 Docker Hub 不存在 (无官方镜像)。本服务列为可选(optional)。
+  #   演示: 用 backend/tests/inc_mock_servers.py 的 mock CAPE(本地, 零外部依赖)替代,
+  #         将 SHARED_MEMORY_SANDBOX_API_URL 指向 mock; 真实生产请自建 CAPE 并锁版本镜像。
   cape:
-    image: capev2/cape:latest
+    image: capev2/cape:latest   # ← 无官方镜像, 演示请勿启用; 需随自建镜像替换
     container_name: soc-cape
     restart: unless-stopped
-    profiles: ["sandbox"]
+    profiles: ["sandbox", "optional"]
     ports:
       - "8090:8090"
     volumes:
@@ -412,7 +559,7 @@ services:
       - misp-db
 
   misp-db:
-    image: mysql:8.0
+    image: mysql:8.0.39
     container_name: soc-misp-db
     restart: unless-stopped
     profiles: ["intel"]
@@ -426,6 +573,7 @@ services:
 
 volumes:
   pgdata:
+  qdrant_data:
   kafka_data:
   flink_state:
   suricata_logs:
@@ -435,3 +583,5 @@ volumes:
   tempo_data:
   prometheus_data:
   grafana_data:
+  jaeger_data:
+  temporal_postgres_data:

@@ -8,11 +8,11 @@ RUN mvn dependency:go-offline -B
 # 拉取 Flink 运行时扩展 jar (RocksDB 状态后端 + Prometheus Reporter)
 # 放入 /opt/flink/lib 由集群类加载器统一加载 (生产级: 大状态 + 指标可观测)
 RUN mvn dependency:copy \
-        -Dartifact=org.apache.flink:flink-statebackend-rocksdb:1.19.3 \
+        -Dartifact=org.apache.flink:flink-statebackend-rocksdb:1.20.5 \
         -DoutputDirectory=/build/extra-lib \
         -Dtransitive=false -B
 RUN mvn dependency:copy \
-        -Dartifact=org.apache.flink:flink-metrics-prometheus:1.19.3 \
+        -Dartifact=org.apache.flink:flink-metrics-prometheus:1.20.5 \
         -DoutputDirectory=/build/extra-lib \
         -Dtransitive=false -B
 
@@ -20,7 +20,7 @@ COPY src ./src
 RUN mvn package -DskipTests -B
 
 # ── 阶段 2: Flink 运行时 ──
-FROM flink:1.19.3-scala_2.12-java11
+FROM flink:1.20.5-scala_2.12-java11
 
 # 复制构建好的 JAR 到 Flink lib 目录
 COPY --from=builder /build/target/flink-jobs-1.0.0.jar /opt/flink/lib/

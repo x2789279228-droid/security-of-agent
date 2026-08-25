@@ -16,9 +16,9 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>11</maven.compiler.source>
         <maven.compiler.target>11</maven.compiler.target>
-        <flink.version>1.19.3</flink.version>
-        <jackson.version>2.15.3</jackson.version>
-        <kafka.connector.version>3.2.0-1.19</kafka.connector.version>
+        <flink.version>1.20.5</flink.version>
+        <jackson.version>2.18.10</jackson.version>
+        <kafka.connector.version>3.3.0-1.20</kafka.connector.version>
         <opentelemetry.version>1.40.0</opentelemetry.version>
     </properties>
 
