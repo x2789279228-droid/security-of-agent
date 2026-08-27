@@ -214,8 +214,8 @@ pysigma-backend-sqlite==1.2.4
     # via -r requirements.txt
 python-dotenv==1.2.3
     # via pydantic-settings
-pywin32==312
-    # via portalocker
+pywin32==312; sys_platform == 'win32'
+    # via portalocker  (仅 Windows; portalocker 依赖 marker platform_system=="Windows", Linux 跳过)
 pyyaml==6.0.3
     # via pysigma
 qdrant-client==1.19.0
