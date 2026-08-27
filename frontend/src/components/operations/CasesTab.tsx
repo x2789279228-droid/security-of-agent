@@ -84,7 +84,7 @@ export function CasesTab() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ ...spring.ui, delay: Math.min(i * 0.03, 0.3) }}
               whileHover={{ y: -2 }}
-              className="w-full text-left bg-white border border-line rounded-2xl px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)] hover:shadow-[0_6px_20px_rgba(0,0,0,0.08)] hover:border-accent/30 transition-all cursor-pointer"
+              className="w-full text-left bg-white border border-line rounded-none px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)] hover:shadow-[0_6px_20px_rgba(0,0,0,0.08)] hover:border-accent/30 transition-all cursor-pointer"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
@@ -107,7 +107,7 @@ export function CasesTab() {
                     <PriorityChip priority={c.priority} />
                     <SeverityChip severity={c.severity} />
                   </div>
-                  <SlaBadge deadline={c.sla_deadline} />
+                  <SlaBadge deadline={c.sla_deadline} breached={c.sla_breached} />
                 </div>
               </div>
             </motion.button>

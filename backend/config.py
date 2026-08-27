@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     mcp_guard_enabled: bool = True       # 启用 4 层 Guard 检查
     security_guard_enabled: bool = True  # 启用 SecurityGuard (意图/频率/序列)
 
+    # ── 案例自动派单 ──
+    # 命中这些 priority 的自动聚合案例 → 自动派生工单并推进到 responding (逗号分隔)
+    case_auto_order_priorities: str = "high,critical"
+
     # ── 安全执行层 (SafeExecutor) ──
     execution_mode: str = "live"             # dry_run | mock | live
     protected_assets: str = ""               # 受保护 IP/CIDR（逗号分隔）

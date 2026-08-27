@@ -24,6 +24,7 @@ export interface SecurityCase {
   event_count: number
   assignee: string
   sla_deadline: string | null
+  sla_breached?: boolean
   disposition: string
   disposition_by: string
   tags: string[]

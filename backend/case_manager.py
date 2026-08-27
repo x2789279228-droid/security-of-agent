@@ -415,7 +415,43 @@ class CaseManager:
             f"[Case] Auto-created: {case.case_number} "
             f"type={threat_type} src={event.src_ip} sev={severity}"
         )
+        # 高/严重告警自动派生工单 (仅新建 case 路径; 聚合复用不重复派单)
+        await self._maybe_auto_dispatch(session, case)
         return case
+
+    async def _maybe_auto_dispatch(self, session: AsyncSession, case: SecurityCase) -> bool:
+        """自动派单：命中阈值优先级的案例 → 派生工单并推进到 responding。
+
+        按 VALID_TRANSITIONS 合法迁移: open→investigating→responding。
+        未命中阈值返回 False。
+        """
+        if case is None:
+            return False
+        try:
+            from config import settings
+            from work_order_service import work_order_service
+            prios = [p.strip().lower() for p in (settings.case_auto_order_priorities or "").split(",") if p.strip()]
+            if (case.priority or "").lower() not in (prios or ["high", "critical"]):
+                return False
+            # open → investigating
+            if case.status == "open":
+                await self.update_status(session, case.id, "investigating", by="system")
+            # 派生工单
+            order = await work_order_service.create_order(
+                session, case_id=case.id,
+                order_type="disposition",
+                title=f"[自动派单] {case.title}",
+                priority=case.priority,
+                created_by="system",
+            )
+            # investigating → responding (已有工单)
+            if case.status == "investigating":
+                await self.update_status(session, case.id, "responding", by="system")
+            logger.info(f"[Case] Auto-dispatched work_order {order.order_number} for {case.case_number}")
+            return True
+        except Exception as e:
+            logger.warning(f"[Case] auto-dispatch failed: {e}")
+            return False
 
     async def _add_event_to_case(
         self, session: AsyncSession, case: SecurityCase, event: SecurityEvent

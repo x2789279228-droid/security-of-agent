@@ -33,6 +33,7 @@ METRIC_KEYS = [
     "case_count",         # 案例总数
     "case_cycle_hours",   # 案例 created→closed 平均时长
     "sla_breach_rate",    # 工单 SLA 违约率
+    "case_sla_breach_rate", # 案例 SLA 违约率
     "fp_rate",            # 误报率（平台级）
     "feedback_count",     # 反馈总数
     "order_count",        # 工单总数
@@ -174,6 +175,29 @@ class KpiCalculator:
             return 0.0
         return round(breached / total, 4)
 
+    async def compute_case_sla_breach_rate(
+        self, session: AsyncSession, *,
+        start: datetime, end: datetime,
+        priority: str = "",
+    ) -> float:
+        """案例 SLA 违约率 = case.sla_breached / 期间新建 case"""
+        conditions = [
+            SecurityCase.created_at >= start,
+            SecurityCase.created_at < end,
+        ]
+        if priority:
+            conditions.append(SecurityCase.priority == priority)
+        total_stmt = select(func.count(SecurityCase.id)).where(and_(*conditions))
+        breached_stmt = (
+            select(func.count(SecurityCase.id))
+            .where(and_(*conditions, SecurityCase.sla_breached == True))
+        )
+        total = (await session.execute(total_stmt)).scalar() or 0
+        breached = (await session.execute(breached_stmt)).scalar() or 0
+        if total == 0:
+            return 0.0
+        return round(breached / total, 4)
+
     async def compute_fp_rate(
         self, session: AsyncSession, *,
         start: datetime, end: datetime,
@@ -303,6 +327,7 @@ class KpiCalculator:
         case_count = await self.compute_case_count(session, start=start, end=end)
         case_cycle = await self.compute_case_cycle_hours(session, start=start, end=end)
         sla_breach_rate = await self.compute_sla_breach_rate(session, start=start, end=end)
+        case_sla_breach_rate = await self.compute_case_sla_breach_rate(session, start=start, end=end)
         fp_rate = await self.compute_fp_rate(session, start=start, end=end)
         feedback_count = await self.compute_feedback_count(session, start=start, end=end)
         order_count = await self.compute_order_count(session, start=start, end=end)
@@ -315,6 +340,7 @@ class KpiCalculator:
             ("case_count", float(case_count), {}),
             ("case_cycle_hours", float(case_cycle or 0), {}),
             ("sla_breach_rate", float(sla_breach_rate), {}),
+            ("case_sla_breach_rate", float(case_sla_breach_rate), {}),
             ("fp_rate", float(fp_rate), {}),
             ("feedback_count", float(feedback_count), {}),
             ("order_count", float(order_count), {}),

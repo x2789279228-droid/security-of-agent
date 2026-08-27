@@ -77,7 +77,7 @@ export function OverviewTab({ onNavigate }: { onNavigate: (tab: string) => void 
   const activeCases = cases.filter((c) => !['closed', 'false_positive'].includes(c.status))
   const openCases = cases.filter((c) => c.status === 'open')
   const now = Date.now()
-  const slaBreached = cases.filter((c) => c.sla_deadline && !['closed', 'false_positive'].includes(c.status) && new Date(c.sla_deadline).getTime() < now)
+  const slaBreached = cases.filter((c) => (c.sla_breached || (c.sla_deadline && new Date(c.sla_deadline).getTime() < now)) && !['closed', 'false_positive'].includes(c.status))
   const activeOrders = orders.filter((o) => ['pending', 'assigned', 'in_progress'].includes(o.status))
   const pendingApprovals = orders.filter((o) => o.order_type === 'approval' && o.approval_status === 'pending')
   const fpRate = fpStats ? Math.round(fpStats.overall_fp_rate * 100) : 0
@@ -130,7 +130,7 @@ export function OverviewTab({ onNavigate }: { onNavigate: (tab: string) => void 
               animate={{ opacity: 1, y: 0 }}
               transition={{ ...spring.gentle, delay: 0.1 + i * 0.06 }}
               whileHover={{ y: -4 }}
-              className="bg-white border border-line rounded-2xl px-4 py-4 text-left shadow-[0_1px_4px_rgba(0,0,0,0.04)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.08)] transition-shadow cursor-pointer"
+              className="bg-white border border-line rounded-none px-4 py-4 text-left shadow-[0_1px_4px_rgba(0,0,0,0.04)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.08)] transition-shadow cursor-pointer"
             >
               <div className="flex items-center gap-1.5 mb-2">
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: m.color }} />
@@ -143,7 +143,7 @@ export function OverviewTab({ onNavigate }: { onNavigate: (tab: string) => void 
       </div>
 
       {/* 右：实时活动流 */}
-      <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_4px_rgba(0,0,0,0.04)] self-start xl:sticky xl:top-16">
+      <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_4px_rgba(0,0,0,0.04)] self-start xl:sticky xl:top-16">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-ink tracking-tight">实时活动</h3>
           <span className="flex items-center gap-1.5 text-[10px] text-ink-faint">

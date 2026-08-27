@@ -333,6 +333,7 @@ class SecurityCase(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     closed_at = Column(DateTime(timezone=True), nullable=True)
+    sla_breached = Column(Boolean, default=False, server_default="false", index=True)
 
 
 class WorkOrder(Base):

@@ -56,6 +56,7 @@ class Scheduler:
             asyncio.create_task(self._cad_context_audit_loop()),
             asyncio.create_task(self._watchdog_patrol_loop()),
             asyncio.create_task(self._sla_check_loop(db_session_factory)),
+            asyncio.create_task(self._case_sla_loop(db_session_factory)),
             asyncio.create_task(self._fp_analytics_loop(db_session_factory)),
             asyncio.create_task(self._kpi_daily_loop(db_session_factory)),
             asyncio.create_task(self._llm_budget_reset_loop()),
@@ -324,6 +325,47 @@ class Scheduler:
                 break
             except Exception as e:
                 logger.warning(f"[SLA] Check failed: {e}")
+
+    async def _case_sla_loop(self, db_factory):
+        """定时扫描超期案例: 标记 sla_breached + 自动推进 open→investigating
+
+        与 _sla_check_loop(工单维度) 并行的案例维度 SLA 监测。
+        """
+        from datetime import datetime, timezone
+        from sqlalchemy import select
+        from models import SecurityCase
+        while self._running:
+            try:
+                await asyncio.sleep(SLA_CHECK_INTERVAL)
+                now = datetime.now(timezone.utc)
+                async with db_factory() as session:
+                    rows = (await session.execute(
+                        select(SecurityCase).where(
+                            SecurityCase.status.in_(["open", "investigating"]),
+                            SecurityCase.sla_deadline.is_not(None),
+                            SecurityCase.sla_deadline < now,
+                            SecurityCase.sla_breached == False,
+                        )
+                    )).scalars().all()
+                    if rows:
+                        from case_manager import case_manager
+                        for case in rows:
+                            case.sla_breached = True
+                            if case.status == "open":
+                                await case_manager.update_status(
+                                    session, case.id, "investigating", by="system"
+                                )
+                        try:
+                            await session.commit()
+                        except Exception:
+                            pass
+                        logger.warning(f"[case-sla] {len(rows)} cases breached SLA")
+            except ImportError:
+                break  # 环境无 SQLAlchemy/model 依赖(只读工具)则跳过
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[case-sla] Check failed: {e}")
 
     # ── 6. 误报统计 ──
 
