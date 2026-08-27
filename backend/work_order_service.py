@@ -76,8 +76,27 @@ class WorkOrderService:
         order.updated_at = datetime.now(timezone.utc)
         if new_status == "completed":
             order.completed_at = datetime.now(timezone.utc)
+            # 处置类工单完成 → 联动关联 case 推进到 resolved (依 VALID_TRANSITIONS 合法迁移)
+            await self._maybe_resolve_case(session, order)
         await session.commit()
         return {"success": True, "status": new_status}
+
+    async def _maybe_resolve_case(self, session: AsyncSession, order: WorkOrder) -> None:
+        """仅 disposition 工单 completed 时, 把关联 case 从 responding 推到 resolved。
+
+        失败仅警告, 不阻断工单状态更新。
+        """
+        try:
+            if order.order_type != "disposition" or not order.case_id:
+                return
+            from case_manager import case_manager
+            result = await case_manager.update_status(
+                session, order.case_id, "resolved", by="system"
+            )
+            if result and not result.get("success"):
+                logger.warning(f"[WorkOrder] case {order.case_id} 未推进 resolved: {result.get('error')}")
+        except Exception as e:
+            logger.warning(f"[WorkOrder] case resolve 联动失败: {e}")
 
     async def assign(
         self, session: AsyncSession, order_id: int, assignee: str

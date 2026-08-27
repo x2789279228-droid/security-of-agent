@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     # 命中这些 priority 的自动聚合案例 → 自动派生工单并推进到 responding (逗号分隔)
     case_auto_order_priorities: str = "high,critical"
 
+    # resolved 案例停留超过该小时数仍未人工 closed → scheduler 自动 closed (0=不自动关闭)
+    case_auto_close_hours: int = 24
+
     # ── 安全执行层 (SafeExecutor) ──
     execution_mode: str = "live"             # dry_run | mock | live
     protected_assets: str = ""               # 受保护 IP/CIDR（逗号分隔）

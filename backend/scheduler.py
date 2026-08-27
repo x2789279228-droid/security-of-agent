@@ -360,12 +360,53 @@ class Scheduler:
                         except Exception:
                             pass
                         logger.warning(f"[case-sla] {len(rows)} cases breached SLA")
+
+                    # resolved 超阈值(默认24h)未人工 closed → 自动 closed
+                    await self._close_stale_resolved(session, now)
             except ImportError:
                 break  # 环境无 SQLAlchemy/model 依赖(只读工具)则跳过
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"[case-sla] Check failed: {e}")
+
+    async def _close_stale_resolved(self, session, now) -> int:
+        """resolved 且超 case_auto_close_hours 未人工 closed 的案例 → 自动 closed。
+
+        返回自动关闭数量。case_auto_close_hours <= 0 时不处理(不自动关闭)。
+        """
+        from datetime import timedelta
+        from sqlalchemy import select
+        from models import SecurityCase
+        try:
+            from config import settings
+            auto_close_hours = getattr(settings, "case_auto_close_hours", 24) or 0
+            if auto_close_hours <= 0:
+                return 0
+            close_cutoff = now - timedelta(hours=auto_close_hours)
+            to_close = (await session.execute(
+                select(SecurityCase).where(
+                    SecurityCase.status == "resolved",
+                    SecurityCase.closed_at.is_(None),
+                    SecurityCase.updated_at < close_cutoff,
+                )
+            )).scalars().all()
+            if not to_close:
+                return 0
+            from case_manager import case_manager
+            for c in to_close:
+                await case_manager.update_status(session, c.id, "closed", by="system")
+            try:
+                await session.commit()
+            except Exception:
+                pass
+            logger.warning(
+                f"[case-sla] auto-closed {len(to_close)} resolved cases (> {auto_close_hours}h)"
+            )
+            return len(to_close)
+        except Exception as e:
+            logger.warning(f"[case-sla] auto-close failed: {e}")
+            return 0
 
     # ── 6. 误报统计 ──
 

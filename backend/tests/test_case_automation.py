@@ -157,6 +157,91 @@ class TestAutoDispatch:
             assert len(orders) >= 1, "high case 应自动派单建工单"
         _run(t())
 
+    def test_disposition_order_completed_resolves_case(self):
+        """disposition 工单 completed → 关联 case 联动到 resolved。"""
+        async def t():
+            from case_manager import case_manager
+            from work_order_service import work_order_service
+            from models import async_session, SecurityCase, WorkOrder
+            from sqlalchemy import select
+            await _reset()
+            evt = await _mk_event("high")
+            from models import SecurityEvent
+            async with async_session() as s:
+                db_evt = await s.get(SecurityEvent, evt.id)
+                case = await case_manager.auto_create_case(s, db_evt)
+                # case 已在 responding; 找到其工单并 completed
+                order = (await s.execute(
+                    select(WorkOrder).where(WorkOrder.case_id == case.id)
+                )).scalars().first()
+                await work_order_service.update_status(s, order.id, "completed")
+            async with async_session() as s:
+                dbc = await s.get(SecurityCase, case.id)
+            assert dbc.status == "resolved", f"工单 completed 后 case 应 resolved, 实得 {dbc.status}"
+        _run(t())
+
+    def test_approval_order_completed_not_resolve_case(self):
+        """非 disposition 工单 completed 不改 case 状态。"""
+        async def t():
+            from case_manager import case_manager
+            from work_order_service import work_order_service
+            from models import SecurityCase, async_session
+            from sqlalchemy import select
+            await _reset()
+            evt = await _mk_event("high")
+            from models import SecurityEvent, WorkOrder
+            async with async_session() as s:
+                db_evt = await s.get(SecurityEvent, evt.id)
+                case = await case_manager.auto_create_case(s, db_evt)
+                # 手动建一个 approval 工单并 completed
+                order = (await s.execute(
+                    select(WorkOrder).where(WorkOrder.case_id == case.id,
+                                            WorkOrder.order_type == "disposition")
+                )).scalars().first()
+                approval = await work_order_service.create_order(
+                    s, case_id=case.id, order_type="approval", title="审批", created_by="system"
+                )
+                await work_order_service.update_status(s, approval.id, "completed")
+            async with async_session() as s:
+                dbc = await s.get(SecurityCase, case.id)
+            # case 仍在 responding(工单 completed 不应由 approval 驱动)
+            assert dbc.status != "resolved"
+        _run(t())
+
+    def test_stale_resolved_auto_closed(self):
+        """resolved 且超 case_auto_close_hours 未 closed → scheduler 自动 closed。"""
+        async def t():
+            import scheduler as sched_mod
+            from models import SecurityCase, async_session
+            from sqlalchemy import select
+            from case_manager import case_manager
+            await _reset()
+            evt = await _mk_event("high")
+            from models import SecurityEvent
+            async with async_session() as s:
+                db_evt = await s.get(SecurityEvent, evt.id)
+                case = await case_manager.auto_create_case(s, db_evt)
+                # 直接置为 resolved 且 updated_at 很久前(模拟工单已完成、搁置超阈值)
+                case.status = "resolved"
+                case.updated_at = datetime.now(timezone.utc) - timedelta(hours=72)
+                await s.commit()
+            # 设置小阈值触发自动关闭 (config 单例, _close_stale_resolved 从 config import 同一对象)
+            import config as cfg
+            old = cfg.settings.case_auto_close_hours
+            cfg.settings.case_auto_close_hours = 1
+            try:
+                scheduler_instance = sched_mod.Scheduler()
+                async with async_session() as s:
+                    closed = await scheduler_instance._close_stale_resolved(
+                        s, datetime.now(timezone.utc)
+                    )
+                    assert closed >= 1
+                    dbc = await s.get(SecurityCase, case.id)
+                    assert dbc.status == "closed"
+            finally:
+                cfg.settings.case_auto_close_hours = old
+        _run(t())
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short", "-s"])
