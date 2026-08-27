@@ -258,6 +258,19 @@ class LogIngestor:
         编排: 优先走 Temporal Workflow(AuditPipelineWorkflow) 获得可靠性/长任务/可视化;
         不可用/失败时降级回本进程 async 兜底(带 900s 整体超时)。
         """
+        # ── 案例自动聚合 (Kafka enriched/audit + HTTP 兜底共用入口) ──
+        # 此前 auto_create_case 仅在 ingest()(HTTP 直连) 被调用, Kafka 路径绕过→从不自动建 case。
+        # 在此调用覆盖全部非 ingest 审计路径; auto_create_case 幂等(同源聚合复用, 不重复建)。
+        try:
+            from models import async_session as db_session
+            from case_manager import case_manager
+            async with db_session() as case_session:
+                db_evt = await case_session.get(SecurityEvent, event_id)
+                if db_evt:
+                    await case_manager.auto_create_case(case_session, db_evt)
+        except Exception as e:
+            logger.debug(f"[Case] audit-pipeline case aggregation skipped: {e}")
+
         # ── Temporal 优先: 启动 4 层 Agent 编排 Workflow ──
         if getattr(anomaly_report, "anomaly_score", 0) is not None:
             try:

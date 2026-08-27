@@ -130,6 +130,33 @@ class TestAutoDispatch:
             assert rate <= 1.0
         _run(t())
 
+    def test_audit_pipeline_path_creates_case(self):
+        """Kafka 审计入口(_audit_pipeline)现会触发 auto_create_case(此前从不)。"""
+        async def t():
+            import log_ingestion
+            from sqlalchemy import select
+            from models import async_session, SecurityCase, WorkOrder
+            from anomaly_detector import AnomalyReport
+            await _reset()
+            evt = await _mk_event("high")
+            # 让流水线主体尽早返回, 只测开头 case 创建
+            real_inner = log_ingestion.log_ingestor._audit_pipeline_inner
+            log_ingestion.log_ingestor._audit_pipeline_inner = lambda *a, **k: None
+            try:
+                report = AnomalyReport(event_id=evt.id, anomaly_score=0.9,
+                                       is_anomaly=True, deviation_sigma=0.1, reasons=[])
+                await log_ingestion.log_ingestor._audit_pipeline(
+                    "sess-kafka", evt.id, {"event": "PORT_SCAN"}, report, max_rounds=1
+                )
+            finally:
+                log_ingestion.log_ingestor._audit_pipeline_inner = real_inner
+            async with async_session() as s:
+                cases = (await s.execute(select(SecurityCase))).scalars().all()
+                orders = (await s.execute(select(WorkOrder))).scalars().all()
+            assert len(cases) >= 1, "_audit_pipeline(Kafka 入口)应自动建 case"
+            assert len(orders) >= 1, "high case 应自动派单建工单"
+        _run(t())
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short", "-s"])
