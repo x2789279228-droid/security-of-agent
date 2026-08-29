@@ -40,11 +40,15 @@ VALID_TRANSITIONS = {
 
 # 聚合时间窗口
 AGGREGATION_WINDOW_MINUTES = 30
+# 同 threat_type + dst_ip 的吸收窗口（防止跨日旧案吞噬新攻击）
+TYPE_TARGET_WINDOW_HOURS = 6
 
 # SLA 时限（小时），按优先级
+# critical 从 1h 调至 4h：告警自动创建的案例在 1h 内几乎不可能走完
+# 分析→响应闭环，导致历史上 100% 超时、徽标失去区分度
 SLA_HOURS = {
-    "critical": 1,
-    "high": 4,
+    "critical": 4,
+    "high": 8,
     "medium": 24,
     "low": 72,
 }
@@ -60,8 +64,9 @@ class CaseManager:
         尝试将新事件聚合到已有案例，或创建新案例
 
         聚合策略:
+          0. 同 session_id 的活跃案例（杀伤链同源优先）
           1. 查找同 src_ip + 时间窗口内的 open/investigating 案例
-          2. 查找同 threat_type + 同 dst_ip 的活跃案例
+          2. 查找同 threat_type + 同 dst_ip 的活跃案例（带时间窗）
           3. 都不匹配 → 创建新案例
         """
         if not event.src_ip and not event.event_type:
@@ -69,6 +74,16 @@ class CaseManager:
 
         now = datetime.now(timezone.utc)
         window_start = now - timedelta(minutes=AGGREGATION_WINDOW_MINUTES)
+        type_window_start = now - timedelta(hours=TYPE_TARGET_WINDOW_HOURS)
+
+        # 策略 0: 同 session 聚合（演示/同源攻击链）
+        if event.session_id:
+            existing = await self._find_active_case_by_session(
+                session, event.session_id
+            )
+            if existing:
+                await self._add_event_to_case(session, existing, event)
+                return existing
 
         # 策略 1: 同 src_ip + 时间窗口
         if event.src_ip:
@@ -79,10 +94,10 @@ class CaseManager:
                 await self._add_event_to_case(session, existing, event)
                 return existing
 
-        # 策略 2: 同 threat_type + 同 dst_ip
+        # 策略 2: 同 threat_type + 同 dst_ip（限时间窗，避免吸进多日前旧案）
         if event.event_type and event.dst_ip:
             existing = await self._find_active_case_by_type_target(
-                session, event.event_type, event.dst_ip
+                session, event.event_type, event.dst_ip, type_window_start
             )
             if existing:
                 await self._add_event_to_case(session, existing, event)
@@ -320,6 +335,34 @@ class CaseManager:
 
     # ── 内部方法 ──
 
+    async def _find_active_case_by_session(
+        self, session: AsyncSession, session_id: str
+    ) -> Optional[SecurityCase]:
+        """同源 session 下已有活跃案例则并入（跨事件类型杀伤链）。"""
+        if not session_id:
+            return None
+        # 通过事件反查：同 session 的事件已挂 case_id
+        stmt = (
+            select(SecurityEvent.case_id)
+            .where(
+                SecurityEvent.session_id == session_id,
+                SecurityEvent.case_id.isnot(None),
+            )
+            .order_by(desc(SecurityEvent.created_at))
+            .limit(5)
+        )
+        result = await session.execute(stmt)
+        case_ids = [row[0] for row in result.all() if row[0]]
+        if not case_ids:
+            return None
+        for cid in case_ids:
+            case = await session.get(SecurityCase, cid)
+            if case and case.status in (
+                "open", "investigating", "responding", "pending_approval"
+            ):
+                return case
+        return None
+
     async def _find_active_case_by_ip(
         self, session: AsyncSession, src_ip: str, window_start: datetime
     ) -> Optional[SecurityCase]:
@@ -339,14 +382,21 @@ class CaseManager:
         return None
 
     async def _find_active_case_by_type_target(
-        self, session: AsyncSession, threat_type: str, dst_ip: str
+        self,
+        session: AsyncSession,
+        threat_type: str,
+        dst_ip: str,
+        window_start: Optional[datetime] = None,
     ) -> Optional[SecurityCase]:
+        filters = [
+            SecurityCase.status.in_(["open", "investigating"]),
+            SecurityCase.threat_type == threat_type,
+        ]
+        if window_start is not None:
+            filters.append(SecurityCase.created_at >= window_start)
         stmt = (
             select(SecurityCase)
-            .where(
-                SecurityCase.status.in_(["open", "investigating"]),
-                SecurityCase.threat_type == threat_type,
-            )
+            .where(*filters)
             .order_by(desc(SecurityCase.created_at))
             .limit(10)
         )
@@ -443,6 +493,7 @@ class CaseManager:
                 title=f"[自动派单] {case.title}",
                 priority=case.priority,
                 created_by="system",
+                assignee=(settings.case_default_assignee or "").strip(),
             )
             # investigating → responding (已有工单)
             if case.status == "investigating":
@@ -503,6 +554,7 @@ class CaseManager:
             "event_count": case.event_count,
             "assignee": case.assignee,
             "sla_deadline": case.sla_deadline.isoformat() if case.sla_deadline else None,
+            "sla_breached": bool(case.sla_breached),
             "disposition": case.disposition,
             "disposition_by": case.disposition_by,
             "tags": case.tags or [],

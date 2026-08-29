@@ -71,6 +71,7 @@ class StoredEvent:
     anomaly_score: float = 0.0
     correlation_id: str = ""
     created_at: str = ""
+    analyzed: bool = False
 
 
 class EventStore:
@@ -92,6 +93,21 @@ class EventStore:
         os.makedirs(self.data_dir, exist_ok=True)
         self._hot_cache: dict[int, dict] = {}
         self._initialized = False
+
+    def invalidate(self, event_id: int) -> None:
+        """审计/响应写回后丢弃热缓存，避免 get_by_id 读到入库时的陈旧快照。"""
+        if event_id is None:
+            return
+        self._hot_cache.pop(int(event_id), None)
+
+    def update_hot_cache(self, event_id: int, **fields) -> None:
+        """就地更新热缓存字段；不存在则忽略（下次 get_by_id 走 DB）。"""
+        if event_id is None:
+            return
+        cached = self._hot_cache.get(int(event_id))
+        if not cached:
+            return
+        cached.update(fields)
 
     async def store(
         self,
@@ -305,6 +321,7 @@ class EventStore:
             anomaly_score=anomaly_score,
             correlation_id=raw.get("_correlation_id", ""),
             created_at=evt.created_at.isoformat(),
+            analyzed=bool(evt.analyzed),
         )
 
     async def get_unreviewed_anomalies(
@@ -420,10 +437,12 @@ class EventStore:
             ).group_by(SecurityEvent.severity)
         )
 
+        total_n = total.scalar() or 0
+        analyzed_n = analyzed.scalar() or 0
         return {
-            "total_events": total.scalar() or 0,
-            "analyzed": analyzed.scalar() or 0,
-            "pending": (total.scalar() or 0) - (analyzed.scalar() or 0),
+            "total_events": total_n,
+            "analyzed": analyzed_n,
+            "pending": total_n - analyzed_n,
             "by_severity": dict(by_severity.all()),
         }
 

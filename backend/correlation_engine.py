@@ -64,18 +64,26 @@ ZH_EVENT_MAP = {
     "DDoS": "DDoS_TRAFFIC",
 }
 
+# 英文别名归一（Kill Chain 常见写法）
+EVENT_TYPE_ALIASES = {
+    "LATERAL_MOVEMENT": "LATERAL_MOVE",
+    "DATA_EXFILTRATION": "DATA_EXFIL",
+    "DATA_EXFILTRATE": "DATA_EXFIL",
+    "C2_COMM": "C2_BEACON",
+    "SSH_BRUTE": "BRUTE_FORCE",
+}
+
+
 def normalize_event_type(raw_type: str) -> str:
-    """将中文事件名归一化为标准英文类型名"""
+    """将事件名归一化为标准英文类型名"""
     if not raw_type:
         return "UNKNOWN"
-    # 已经是英文则直接返回
-    if raw_type.isascii() and raw_type.isupper():
-        return raw_type
     # 中文映射
     mapped = ZH_EVENT_MAP.get(raw_type)
     if mapped:
         return mapped
-    return raw_type
+    upper = raw_type.strip().upper().replace("-", "_").replace(" ", "_")
+    return EVENT_TYPE_ALIASES.get(upper, upper if raw_type.isascii() else raw_type)
 
 # 已知的攻击路径模式：有序的事件类型序列
 ATTACK_CHAIN_PATTERNS = {
@@ -84,12 +92,37 @@ ATTACK_CHAIN_PATTERNS = {
         "steps": ["PORT_SCAN", "BRUTE_FORCE", "C2_BEACON"],
         "max_gap_minutes": 30,
         "severity_required": False,
+        "min_match": 3,
+    },
+    "classic_killchain": {
+        "name": "经典杀伤链",
+        "steps": ["PORT_SCAN", "BRUTE_FORCE", "LATERAL_MOVE", "C2_BEACON", "DATA_EXFIL"],
+        "max_gap_minutes": 60,
+        "severity_required": False,
+        "min_match": 3,  # 允许部分有序子序列（可跳过未出现的中间步）
+        "skippable": ["LATERAL_MOVE"],
+    },
+    # 无横向移动的外部入侵→失陷外联（演示与常见跳板场景）
+    "external_compromise_exfil": {
+        "name": "外部入侵→失陷外联",
+        "steps": ["PORT_SCAN", "BRUTE_FORCE", "C2_BEACON", "DATA_EXFIL"],
+        "max_gap_minutes": 60,
+        "severity_required": False,
+        "min_match": 3,
     },
     "lateral_movement": {
         "name": "横向移动",
         "steps": ["SUSPICIOUS_LOGIN", "FILE_ACCESS", "LATERAL_MOVE", "C2_BEACON"],
         "max_gap_minutes": 60,
         "severity_required": False,
+        "min_match": 2,
+    },
+    "post_compromise": {
+        "name": "失陷后扩散",
+        "steps": ["LATERAL_MOVE", "C2_BEACON", "DATA_EXFIL"],
+        "max_gap_minutes": 30,
+        "severity_required": False,
+        "min_match": 2,
     },
     "data_exfil": {
         "name": "数据外泄",
@@ -240,6 +273,13 @@ class CorrelationEngine:
             groups = self._temporal_grouping(src_ip, ip_events, window_minutes=10)
             temporal_groups.extend(groups)
 
+        # 3c. 枢纽主机模式：先作受害者(dst)后作攻击源(src)的 IP 串联跨源 Kill Chain
+        try:
+            hub_chains = self._match_hub_hosts(events)
+            chains.extend(hub_chains)
+        except Exception as e:
+            logger.warning(f"Hub-host correlation failed: {e}")
+
         # 4. 图关联：通过共同目标IP发现不同源IP的关联
         entity_links = self._entity_linking(events_by_ip)
 
@@ -263,6 +303,71 @@ class CorrelationEngine:
 
         return result
 
+    def _match_hub_hosts(self, events: list) -> list[AttackChain]:
+        """以「先作 dst、后作 src」的枢纽主机串联跨源攻击链。"""
+        # 统一为 dict 视图
+        rows = []
+        for evt in events:
+            rows.append({
+                "id": evt.id,
+                "event_type": evt.event_type,
+                "severity": evt.severity,
+                "src_ip": evt.src_ip,
+                "dst_ip": evt.dst_ip,
+                "message": evt.message or "",
+                "created_at": evt.created_at,
+            })
+
+        dst_set = {r["dst_ip"] for r in rows if r.get("dst_ip")}
+        src_set = {r["src_ip"] for r in rows if r.get("src_ip")}
+        hubs = dst_set & src_set
+        chains: list[AttackChain] = []
+
+        # 优先匹配无强制横向移动的外联模式，再尝试完整经典杀伤链
+        hub_patterns = []
+        if "external_compromise_exfil" in self.patterns:
+            hub_patterns.append(
+                ("hub_external_exfil", self.patterns["external_compromise_exfil"])
+            )
+        hub_patterns.append((
+            "hub_killchain",
+            self.patterns.get("classic_killchain") or {
+                "name": "枢纽主机杀伤链",
+                "steps": ["PORT_SCAN", "BRUTE_FORCE", "LATERAL_MOVE", "C2_BEACON", "DATA_EXFIL"],
+                "max_gap_minutes": 60,
+                "min_match": 3,
+                "skippable": ["LATERAL_MOVE"],
+            },
+        ))
+
+        for hub in hubs:
+            inbound = [r for r in rows if r.get("dst_ip") == hub]
+            outbound = [r for r in rows if r.get("src_ip") == hub]
+            # 时间轴：先入站侦察/突破，再出站横向/外联
+            timeline = sorted(inbound + outbound, key=lambda e: e["created_at"])
+            # 去重同 id
+            seen = set()
+            deduped = []
+            for e in timeline:
+                if e["id"] in seen:
+                    continue
+                seen.add(e["id"])
+                deduped.append(e)
+            for pattern_key, pattern in hub_patterns:
+                chain = self._match_pattern(
+                    pattern_key,
+                    {**pattern, "name": f"{pattern.get('name', '枢纽杀伤链')}({hub})"},
+                    hub,
+                    deduped,
+                )
+                if chain:
+                    chain.chain_id = f"chain_hub_{hub}_{deduped[0]['id']}"
+                    chain.src_ips = {e.get("src_ip") for e in chain.events if e.get("src_ip")}
+                    chain.dst_ips = {e.get("dst_ip") for e in chain.events if e.get("dst_ip")}
+                    chains.append(chain)
+                    break  # 同一 hub 只保留最高优先级命中
+        return chains
+
     def _match_pattern(
         self,
         pattern_key: str,
@@ -279,25 +384,48 @@ class CorrelationEngine:
         steps = pattern["steps"]
         max_gap = pattern["max_gap_minutes"]
         n = len(steps)
+        min_match = int(pattern.get("min_match") or n)
+        skippable = {
+            normalize_event_type(s) for s in (pattern.get("skippable") or [])
+        }
 
-        if len(events) < n:
+        if len(events) < min_match:
             return None
 
         # 将事件类型转换为序列（支持中文事件名映射）
         event_types = [normalize_event_type(e["event_type"]) for e in events]
 
-        # 有序子序列匹配
+        # 有序子序列匹配：可跳过 skippable / 未出现的中间步，满足 min_match 即可
         matched_indices = []
         step_idx = 0
 
         for i, et in enumerate(event_types):
+            if step_idx >= n:
+                break
+            # 当前事件匹配当前期望步骤
             if et == steps[step_idx]:
                 matched_indices.append(i)
                 step_idx += 1
-                if step_idx == n:
+                continue
+            # 向前查找：跳过可跳过步骤，看是否能匹配更后面的步骤
+            advanced = False
+            for look_ahead in range(step_idx + 1, n):
+                # 仅当中间步骤均可跳过（或模式允许任意跳过）时前进
+                middle = steps[step_idx:look_ahead]
+                if all(normalize_event_type(m) in skippable for m in middle) or pattern.get(
+                    "allow_skip_missing", True
+                ):
+                    if et == steps[look_ahead]:
+                        matched_indices.append(i)
+                        step_idx = look_ahead + 1
+                        advanced = True
+                        break
+                else:
                     break
+            if advanced:
+                continue
 
-        if len(matched_indices) < n:
+        if len(matched_indices) < min_match:
             return None
 
         # 验证时间间隔
@@ -316,7 +444,7 @@ class CorrelationEngine:
         max_sev = max(
             severity_scores.get(e["severity"], 0.1) for e in matched_events
         )
-        match_ratio = n / len(steps)  # 匹配比例
+        match_ratio = len(matched_indices) / max(len(steps), 1)
         confidence = min(1.0, max_sev * 0.4 + match_ratio * 0.6)
 
         time_span = (

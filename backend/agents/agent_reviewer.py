@@ -27,6 +27,7 @@ from typing import Optional
 from summary_compression import summary
 from audit_types import (
     AuditResult, FinalVerdict,
+    AUDIT_DEPTH_STANDARD,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,12 +217,18 @@ class Reviewer:
             )
         except Exception as e:
             logger.warning(f"Failed to parse review result: {e}")
+            # 解析失败时保留 Executor 结论，标记 degraded，避免整轮结论蒸发
+            base_conclusion = (
+                "threat_confirmed" if getattr(audit_result, "threat_detected", False)
+                else "suspicious"
+            )
             return FinalVerdict(
-                conclusion="suspicious",
+                conclusion=base_conclusion,
                 confidence=audit_result.confidence * 0.8,
                 human_intervention=True,
                 final_summary=audit_result.summary,
-                reviewer_notes=f"复核结果解析失败: {result[:200]}",
+                reviewer_notes=f"复核结果解析失败(degraded): {str(result)[:200]}",
+                abstain=False,
             )
 
 

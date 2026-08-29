@@ -223,14 +223,19 @@ async def get_pipeline_result(
         raise HTTPException(404, "Event not found")
 
     raw = evt.raw_data or {}
-    pipeline = raw.get("_audit_llm", {})
-    error = raw.get("_audit_llm_error", "")
+    pipeline = raw.get("_audit_llm", {}) or {}
+    error = raw.get("_audit_llm_error", "") or pipeline.get("error", "")
+    analyzed = bool(getattr(evt, "analyzed", False) or pipeline or error)
+    status = pipeline.get("status") or (
+        "failed" if error else ("completed" if pipeline else ("pending" if not analyzed else "unknown"))
+    )
 
     return {
         "event_id": event_id,
         "event_type": evt.event_type,
         "severity": evt.severity,
-        "analyzed": evt.analyzed,
+        "analyzed": analyzed,
+        "status": status,
         "pipeline_result": pipeline,
         "error": error or None,
     }
@@ -265,21 +270,38 @@ async def get_evidence_trail(
         raise HTTPException(404, "Event not found")
 
     raw = evt.raw_data or {}
-    audit = raw.get("_audit_llm", {})
+    audit = raw.get("_audit_llm", {}) or {}
+    error = raw.get("_audit_llm_error", "") or audit.get("error", "")
+    analyzed = bool(getattr(evt, "analyzed", False) or audit or error)
+    status = audit.get("status") or (
+        "failed" if error else ("completed" if audit else ("pending" if not analyzed else "unknown"))
+    )
 
-    evidence_trail = audit.get("evidence_trail", [])
-    hallucination = audit.get("hallucination", {})
+    evidence_trail = audit.get("evidence_trail") or []
+    if not isinstance(evidence_trail, list):
+        evidence_trail = []
+    hallucination = audit.get("hallucination") or {}
+    reviewer = audit.get("reviewer") or audit.get("final_verdict") or {}
+    if not isinstance(reviewer, dict):
+        reviewer = {"raw": str(reviewer)}
+    executor_summary = audit.get("executor") or audit.get("merged") or {}
+    if not isinstance(executor_summary, dict):
+        executor_summary = {"summary": str(executor_summary)}
 
     return {
         "event_id": event_id,
         "event_type": evt.event_type,
         "severity": evt.severity,
+        "analyzed": analyzed,
+        "status": status,
+        "error": error or None,
         "evidence_trail": evidence_trail,
-        "hallucination_risk": hallucination,
-        "executor_summary": audit.get("executor", {}),
-        "reviewer_verdict": audit.get("reviewer", {}),
+        "hallucination_risk": hallucination if isinstance(hallucination, dict) else {},
+        "executor_summary": executor_summary,
+        "reviewer_verdict": reviewer,
         "pipeline_duration_s": audit.get("pipeline_duration_s"),
         "completed_at": audit.get("completed_at"),
+        "fallback": bool(audit.get("fallback")),
     }
 
 # ── CAD 审计角色端点 ──

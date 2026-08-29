@@ -105,6 +105,29 @@ def test_abstain_blocks_response_and_demotes():
     assert out["needs_human"] is True
 
 
+def test_soft_demote_keeps_threat_when_sigma_backed():
+    """Sigma 已命中时，忠实度失败只降级 verdict，不抹掉威胁。"""
+    merged = {
+        "threat_detected": True,
+        "verdict": "confirmed",
+        "confidence": 0.7,
+        "needs_human": False,
+    }
+    answer = "确认 APT 使用 T1090.002 T1132.001 进行隐蔽通信并外泄。"
+    contexts = [{"content": "C2_BEACON src_ip=192.168.1.100 dst_ip=23.129.64.33"}]
+    out = apply_faithfulness_gate(
+        merged,
+        answer=answer,
+        contexts=contexts,
+        non_llm_signals={"sigma_detected": True, "anomaly_score": 0.75},
+    )
+    assert out["threat_detected"] is True
+    assert out["verdict"] == "suspicious"
+    assert out["needs_human"] is True
+    assert out.get("response_blocked") is False
+    assert out.get("demoted_by") == "faithfulness_gate_soft"
+
+
 def _benign_events():
     """一组纯业务/良性日志（NTP、健康检查、正常登录）。"""
     return [

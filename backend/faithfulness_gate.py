@@ -109,6 +109,23 @@ def compute_faithfulness(
     }
 
 
+def has_non_llm_threat_signal(signals: Optional[dict] = None) -> bool:
+    """Sigma / 异常 / 显式 admitted 等非 LLM 背书信号。"""
+    if not signals:
+        return False
+    if signals.get("sigma_detected") or signals.get("detected"):
+        return True
+    if signals.get("has_admitted_claims") or signals.get("confirmation_admitted"):
+        return True
+    try:
+        if float(signals.get("anomaly_score") or 0) >= 0.6:
+            return True
+    except (TypeError, ValueError):
+        pass
+    hits = signals.get("hits") or signals.get("sigma_hits") or []
+    return bool(hits)
+
+
 def apply_faithfulness_gate(
     merged: dict,
     *,
@@ -116,10 +133,13 @@ def apply_faithfulness_gate(
     contexts: list[dict],
     query: str = "",
     abstain: bool = False,
+    non_llm_signals: Optional[dict] = None,
 ) -> dict:
     """
     就地/返回更新 merged：
-      闸失败或 abstain → 不得 confirmed、不得自动响应、强制人审。
+      闸失败或 abstain：
+        - 无非 LLM 信号 → 硬降级（threat=False，禁自动响应，人审）
+        - 有非 LLM 信号 → 软降级（保留 threat，verdict≤suspicious，强制人审）
     """
     out = dict(merged or {})
     report = compute_faithfulness(answer or "", contexts or [], query=query)
@@ -133,15 +153,25 @@ def apply_faithfulness_gate(
 
     if blocked:
         out["needs_human"] = True
-        out["response_blocked"] = True
-        if out.get("verdict") == "confirmed" or out.get("threat_detected"):
+        backed = has_non_llm_threat_signal(non_llm_signals)
+        if backed and (out.get("verdict") == "confirmed" or out.get("threat_detected")):
+            # 规则/异常已背书：保留威胁事实，仅取消 confirmed 自动信任
             out["verdict"] = "suspicious"
-            out["threat_detected"] = False
-            out["demoted_by"] = "faithfulness_gate"
-        if abstain and out.get("verdict") not in ("false_positive",):
-            # 弃权优先于 suspicious：证据不足
-            if not out.get("threat_detected"):
-                out["verdict"] = "insufficient_evidence"
+            out["threat_detected"] = True
+            out["response_blocked"] = False
+            out["demoted_by"] = "faithfulness_gate_soft"
+            report["reasons"] = list(report.get("reasons") or []) + ["soft_demote_non_llm_signal"]
+            out["faithfulness"] = report
+        else:
+            out["response_blocked"] = True
+            if out.get("verdict") == "confirmed" or out.get("threat_detected"):
+                out["verdict"] = "suspicious"
+                out["threat_detected"] = False
+                out["demoted_by"] = "faithfulness_gate"
+            if abstain and out.get("verdict") not in ("false_positive",):
+                # 弃权优先于 suspicious：证据不足（仅硬降级路径）
+                if not out.get("threat_detected"):
+                    out["verdict"] = "insufficient_evidence"
     else:
         out.setdefault("response_blocked", False)
 

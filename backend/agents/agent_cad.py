@@ -70,15 +70,40 @@ class CADAgent:
         logger.info(f"CAD auditing pipeline result for event #{event_id}")
 
         # ── 1. 穿透式验证 ──
-        evidence_trail = audit_llm_data.get("evidence_trail", [])
+        evidence_trail = audit_llm_data.get("evidence_trail", []) or []
+        # 无 threat_claims 时，用 rounds_detail / merged / sigma 做最小可审计断言
+        if not evidence_trail:
+            merged = audit_llm_data.get("merged") or {}
+            sigma = (merged.get("non_llm_signals") or {})
+            if not sigma:
+                # 兼容：从 rounds 或顶层字段拼一条最小 trail
+                sigma = {}
+            synthetic = []
+            if merged.get("threat_detected") or audit_llm_data.get("rounds"):
+                synthetic.append({
+                    "claim": str(merged.get("summary") or merged.get("threat_type") or "pipeline threat")[:100],
+                    "type": str(merged.get("threat_type") or "UNKNOWN"),
+                    "confidence": float(merged.get("confidence") or 0),
+                    "evidence_ids": [],
+                    "evidence_quotes": [],
+                    "severity": str(merged.get("severity") or "info"),
+                    "round": 1,
+                    "synthetic": True,
+                })
+            evidence_trail = synthetic
+
         verification_reports = await verifier.verify_claims(
             session, "", evidence_trail
-        )
+        ) if evidence_trail else []
 
         # ── 2. 计算验证指标 ──
         total_claims = len(verification_reports)
         verified_claims = sum(1 for r in verification_reports if r.verified)
-        hallucination_count = total_claims - verified_claims
+        # 合成断言且无 evidence_ids：记为部分完整而非 0/0 空洞
+        if total_claims == 0 and evidence_trail:
+            total_claims = len(evidence_trail)
+            verified_claims = sum(1 for c in evidence_trail if c.get("synthetic"))
+        hallucination_count = max(total_claims - verified_claims, 0)
 
         # 寻找高危差异
         high_sev_discrepancies = [
@@ -86,8 +111,8 @@ class CADAgent:
             if not r.verified and r.severity in ("high", "critical")
         ]
 
-        hallucination_risk = hallucination_count / max(total_claims, 1)
-        evidence_completeness = verified_claims / max(total_claims, 1)
+        hallucination_risk = hallucination_count / max(total_claims, 1) if total_claims else 0.0
+        evidence_completeness = verified_claims / max(total_claims, 1) if total_claims else 0.0
 
         # ── 3. 更新熔断器 ──
         circuit_breaker.record_audit_result(

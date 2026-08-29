@@ -46,6 +46,17 @@ logger = logging.getLogger(__name__)
 
 # 安全护栏（动作执行前多维度审查）
 from security_guard.security_guard import security_guard
+from security_guard.intent_checker import IntentChecker
+
+
+def normalize_threat_info_for_guard(threat_info: dict) -> dict:
+    """把策略/FastPath 字段归一为 SecurityGuard 期望的 threat_level/reason。"""
+    info = dict(threat_info or {})
+    info["threat_level"] = IntentChecker.resolve_threat_level(info)
+    info["reason"] = IntentChecker.resolve_reason(info)
+    if not info.get("severity") and info["threat_level"] != "unknown":
+        info["severity"] = info["threat_level"]
+    return info
 
 
 class ResponseOrchestrator:
@@ -66,6 +77,7 @@ class ResponseOrchestrator:
           - 通过 → 执行
         执行完毕后调用 SecurityGuard.record() 更新追踪器
         """
+        threat_info = normalize_threat_info_for_guard(threat_info)
         allowed_actions = []
         for action in actions:
             action_name = action.get("action", action.get("name", ""))
@@ -138,6 +150,7 @@ class ResponseOrchestrator:
                 "result": BatchActionResult,
             }
         """
+        threat_info = normalize_threat_info_for_guard(threat_info)
         threat_type = threat_info.get("threat_type", "UNKNOWN")
         confidence = threat_info.get("confidence", 0.0)
         severity = threat_info.get("severity", "info")
@@ -145,7 +158,8 @@ class ResponseOrchestrator:
 
         logger.info(
             f"Orchestrator: threat detected type={threat_type} "
-            f"conf={confidence:.2f} sev={severity} src={src_ip}"
+            f"conf={confidence:.2f} sev={severity} "
+            f"threat_level={threat_info.get('threat_level')} src={src_ip}"
         )
 
         # 1. 策略匹配
@@ -308,6 +322,11 @@ class ResponseOrchestrator:
                     }],
                 }
                 await session.commit()
+                try:
+                    from event_store import event_store
+                    event_store.invalidate(event_id)
+                except Exception:
+                    pass
                 logger.info(f"Updated event #{event_id} with response result")
         except Exception as e:
             logger.warning(f"Failed to update event response: {e}")

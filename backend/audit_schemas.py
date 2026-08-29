@@ -60,6 +60,24 @@ class ThreatClaimSchema(BaseModel):
             raise ValueError(f"无效 severity: {v}，必须是 {VALID_SEVERITIES}")
         return v
 
+    @field_validator("evidence_ids", mode="before")
+    @classmethod
+    def coerce_evidence_ids(cls, v):
+        """兼容 LLM 返回 '#552' / '552' 字符串 ID。"""
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            v = [v]
+        out = []
+        for item in v:
+            if isinstance(item, int):
+                out.append(item)
+                continue
+            s = str(item).strip().lstrip("#")
+            if s.isdigit():
+                out.append(int(s))
+        return out
+
     @field_validator("evidence_ids")
     @classmethod
     def check_evidence_ids(cls, v: list[int]) -> list[int]:
@@ -106,6 +124,16 @@ class SynthesisOutputSchema(BaseModel):
     needs_human_review: bool = False
     evidence_summary: str = ""
     abstain: bool = False
+
+    @field_validator("evidence_summary", mode="before")
+    @classmethod
+    def coerce_evidence_summary(cls, v):
+        """LLM 偶发返回 list（事件 id 列表），归一为字符串。"""
+        if v is None:
+            return ""
+        if isinstance(v, list):
+            return ", ".join(str(x) for x in v)
+        return str(v)
 
     @field_validator("severity")
     @classmethod

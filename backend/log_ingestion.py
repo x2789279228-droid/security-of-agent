@@ -133,6 +133,23 @@ class LogIngestor:
                     f"types={sigma_result['attack_types']}, "
                     f"severity={sigma_result['max_severity']}"
                 )
+                # Sigma 命中抬升异常分，避免「规则已命中但异常层全绿」
+                sev_floor = {
+                    "critical": 0.75, "high": 0.65, "medium": 0.55, "low": 0.45,
+                }.get(str(sigma_result.get("max_severity") or "").lower(), 0.55)
+                if anomaly_report.anomaly_score < sev_floor:
+                    anomaly_report.anomaly_score = sev_floor
+                anomaly_report.is_anomaly = True
+                if "sigma_hit" not in (anomaly_report.reasons or []):
+                    anomaly_report.reasons = list(anomaly_report.reasons or []) + [
+                        f"Sigma命中:{','.join(sigma_result.get('attack_types') or [])}"
+                    ]
+                log_data["_anomaly"] = {
+                    "score": anomaly_report.anomaly_score,
+                    "is_anomaly": True,
+                    "reasons": anomaly_report.reasons,
+                    "sigma": anomaly_report.deviation_sigma,
+                }
         except Exception as e:
             logger.warning(f"Sigma detection failed: {e}")
             log_data["_sigma"] = {"detected": False}
@@ -175,13 +192,47 @@ class LogIngestor:
             try:
                 from response_engine import get_orchestrator
                 _resp_orch = get_orchestrator()
+                sigma_info = log_data.get("_sigma") or {}
+                _sigma_conf_map = {"high": 0.85, "medium": 0.65, "low": 0.45}
+                _sigma_conf = 0.0
+                for hit in (sigma_info.get("hits") or []):
+                    _sigma_conf = max(
+                        _sigma_conf,
+                        _sigma_conf_map.get(str(hit.get("confidence") or "").lower(), 0.5),
+                    )
+                if sigma_info.get("detected") and sigma_info.get("max_severity") == "critical":
+                    _sigma_conf = max(_sigma_conf, 0.85)
+                _evt_conf = log_data.get("confidence", 0)
+                try:
+                    _evt_conf_f = float(_evt_conf)
+                    if _evt_conf_f > 1:
+                        _evt_conf_f = _evt_conf_f / 100.0
+                except (TypeError, ValueError):
+                    _evt_conf_f = 0.0
+                _fused_conf = min(1.0, max(
+                    float(anomaly_report.anomaly_score or 0) * 1.2,
+                    _sigma_conf,
+                    _evt_conf_f,
+                ))
+                _fp_sev = severity if severity in ("critical", "high", "medium") else "high"
+                _fp_msg = log_data.get(
+                    "message",
+                    f"异常检测快速响应: {', '.join(anomaly_report.reasons)}",
+                )
                 fast_threat = {
                     "threat_type": event_type,
-                    "confidence": min(1.0, anomaly_report.anomaly_score * 1.2),
-                    "severity": severity if severity in ("critical", "high") else "high",
+                    "confidence": _fused_conf,
+                    "severity": _fp_sev,
+                    "threat_level": _fp_sev,
                     "src_ip": log_data.get("src_ip", ""),
                     "dst_ip": log_data.get("dst_ip", ""),
-                    "message": log_data.get("message", f"异常检测快速响应: {', '.join(anomaly_report.reasons)}"),
+                    "message": _fp_msg,
+                    "reason": (
+                        f"FastPath: {event_type} severity={_fp_sev} "
+                        f"confidence={_fused_conf:.2f} "
+                        f"sigma={bool(sigma_info.get('detected'))} "
+                        f"anomaly={float(anomaly_report.anomaly_score or 0):.2f}"
+                    ),
                     "session_id": session_id,
                     "event_id": stored.id,
                     "anomaly_reasons": anomaly_report.reasons,
@@ -299,31 +350,45 @@ class LogIngestor:
             )
         except asyncio.TimeoutError:
             logger.error(f"[Audit-LLM] Pipeline TIMEOUT (900s) for event #{event_id}")
-            await self._mark_analyzed(event_id, error="pipeline_timeout_900s")
+            await self._mark_analyzed(event_id, error="pipeline_timeout_900s", status="failed")
             await self._fallback_analysis(event_id, log_data, anomaly_report, "timeout")
         except Exception as e:
             logger.error(
                 f"[Audit-LLM] Pipeline crashed for event #{event_id}: {e}",
                 exc_info=True,
             )
-            await self._mark_analyzed(event_id, error=str(e))
+            await self._mark_analyzed(event_id, error=str(e), status="failed")
             await self._fallback_analysis(event_id, log_data, anomaly_report, "crash")
 
-    async def _mark_analyzed(self, event_id: int, error: str = ""):
-        """确保事件被标记为已分析（即使管道失败）"""
+    async def _mark_analyzed(self, event_id: int, error: str = "", status: str = ""):
+        """确保事件被标记为已分析（即使管道失败）。
+
+        status: completed | failed | fallback；失败时不得伪装成空成功结果。
+        """
         try:
             from models import async_session as db_session
             async with db_session() as session:
                 db_evt = await session.get(SecurityEvent, event_id)
                 if db_evt and not db_evt.analyzed:
                     db_evt.analyzed = True
+                    raw = dict(db_evt.raw_data or {})
                     if error:
-                        db_evt.raw_data = {
-                            **(db_evt.raw_data or {}),
-                            "_audit_llm_error": error,
-                        }
+                        raw["_audit_llm_error"] = error
+                        audit = dict(raw.get("_audit_llm") or {})
+                        audit.setdefault("status", status or "failed")
+                        audit["error"] = error
+                        raw["_audit_llm"] = audit
+                    elif status:
+                        audit = dict(raw.get("_audit_llm") or {})
+                        audit["status"] = status
+                        raw["_audit_llm"] = audit
+                    db_evt.raw_data = raw
                     await session.commit()
-                    logger.info(f"[Audit-LLM] Event #{event_id} marked analyzed (error={error})")
+                    event_store.invalidate(event_id)
+                    logger.info(
+                        f"[Audit-LLM] Event #{event_id} marked analyzed "
+                        f"(status={status or ('failed' if error else 'completed')}, error={error})"
+                    )
         except Exception as e:
             logger.error(f"[Audit-LLM] Failed to mark event #{event_id} as analyzed: {e}")
 
@@ -338,27 +403,56 @@ class LogIngestor:
                 anomaly_report.anomaly_score >= 0.6
                 or sigma.get("detected", False)
             )
+            conf = round(
+                max(
+                    float(anomaly_report.anomaly_score or 0),
+                    0.75 if sigma.get("max_severity") == "critical" else 0,
+                    0.65 if sigma.get("max_severity") == "high" else 0,
+                    0.55 if sigma.get("detected") else 0,
+                ),
+                4,
+            )
             fallback_result = {
                 "prompt_version": AUDIT_PROMPT_VERSION,
+                "status": "fallback",
                 "fallback": True,
                 "fallback_reason": reason,
+                "error": reason,
                 "threat_detected": threat_detected,
-                "confidence": round(anomaly_report.anomaly_score, 4),
+                "confidence": conf,
                 "severity": log_data.get("severity", "info"),
                 "anomaly_score": anomaly_report.anomaly_score,
-                "anomaly_reasons": anomaly_report.reasons[:5],
+                "anomaly_reasons": (anomaly_report.reasons or [])[:5],
                 "sigma_detected": sigma.get("detected", False),
                 "sigma_attack_types": sigma.get("attack_types", []),
+                "evidence_trail": [
+                    {
+                        "claim": f"sigma:{t}",
+                        "type": t,
+                        "confidence": conf,
+                        "evidence_ids": [event_id],
+                        "severity": sigma.get("max_severity", ""),
+                        "round": 0,
+                    }
+                    for t in (sigma.get("attack_types") or [])[:5]
+                ],
+                "reviewer": {
+                    "conclusion": "suspicious" if threat_detected else "insufficient_evidence",
+                    "notes": f"pipeline fallback ({reason})",
+                },
                 "note": f"LLM 管道失败({reason})，降级为统计+规则分析",
             }
             async with db_session() as session:
                 db_evt = await session.get(SecurityEvent, event_id)
                 if db_evt:
+                    db_evt.analyzed = True
                     db_evt.raw_data = {
                         **(db_evt.raw_data or {}),
                         "_audit_llm": fallback_result,
+                        "_audit_llm_error": reason,
                     }
                     await session.commit()
+                    event_store.invalidate(event_id)
             logger.info(
                 f"[Audit-LLM] Fallback analysis for #{event_id}: "
                 f"threat={threat_detected} reason={reason}"
@@ -511,6 +605,21 @@ class LogIngestor:
                         for claim in (rd.get("audit") or {}).get("evidence") or []:
                             if isinstance(claim, dict) and "threat_claims" in claim:
                                 evidence_for_gate.extend(claim.get("threat_claims") or [])
+                    _sigma = log_data.get("_sigma") or {}
+                    _anomaly = log_data.get("_anomaly") or {}
+                    _non_llm = {
+                        "sigma_detected": bool(_sigma.get("detected")),
+                        "hits": _sigma.get("hits") or [],
+                        "anomaly_score": (
+                            _anomaly.get("score")
+                            if _anomaly.get("score") is not None
+                            else getattr(anomaly_report, "anomaly_score", 0)
+                        ),
+                        "confirmation_admitted": bool(
+                            (merged.get("confirmation") or {}).get("admitted")
+                            or merged.get("has_admitted_claims")
+                        ),
+                    }
                     merged = apply_faithfulness_gate(
                         merged,
                         answer=answer_text,
@@ -520,6 +629,7 @@ class LogIngestor:
                             getattr(final_verdict, "abstain", False)
                             or merged.get("verdict") == "insufficient_evidence"
                         ),
+                        non_llm_signals=_non_llm,
                     )
 
                     # ── 写入 DB ──
@@ -547,6 +657,7 @@ class LogIngestor:
                             **(db_evt.raw_data or {}),
                             "_audit_llm": {
                                 "prompt_version": AUDIT_PROMPT_VERSION,
+                                "status": "completed",
                                 "rounds": len(all_rounds),
                                 "max_rounds": max_rounds,
                                 "merged": merged,
@@ -566,6 +677,7 @@ class LogIngestor:
                                     or []
                                 ),
                                 "final_verdict": final_verdict.to_dict() if final_verdict else {},
+                                "reviewer": final_verdict.to_dict() if final_verdict else {},
                                 "evidence_trail": all_evidence,
                                 "hallucination": {
                                     "risk": merged.get("confidence", 0) < 0.3,
@@ -584,6 +696,7 @@ class LogIngestor:
                             },
                         }
                         await session.commit()
+                        event_store.invalidate(event_id)
 
                     duration = time.time() - t_start
                     logger.info(
@@ -602,12 +715,19 @@ class LogIngestor:
                         "rounds": len(all_rounds),
                         "duration_s": round(duration, 1),
                         "src_ip": log_data.get("src_ip", ""),
+                        "stage": "pipeline_complete",
+                        "agent_id": "reviewer",
+                        "agents_completed": [
+                            "decomposer", "tool_builder", "executor", "reviewer",
+                        ],
                     })
 
                     # ── 触发响应引擎（独立 session，避免与流水线 session 并发）──
+                    # confirmed：完整自动响应；suspicious + 未 blocked：软降级后仍允许策略层处置
+                    _verdict = merged.get("verdict")
                     if (
-                        merged.get("verdict") == "confirmed"
-                        and merged.get("threat_detected")
+                        merged.get("threat_detected")
+                        and _verdict in ("confirmed", "suspicious")
                         and merged.get("confidence", 0) >= 0.4
                         and not merged.get("response_blocked")
                     ):
@@ -646,6 +766,8 @@ class LogIngestor:
                                 "src_ip": threat_info.get("src_ip", ""),
                                 "confidence": threat_info["confidence"],
                                 "status": "triggered",
+                                "stage": "response",
+                                "agent_id": "response",
                             })
                         except Exception as resp_err:
                             logger.warning(f"[Response] Trigger setup failed for event #{event_id}: {resp_err}")
@@ -676,7 +798,8 @@ class LogIngestor:
                         f"[Audit-LLM] Pipeline failed for event #{event_id}: {e}",
                         exc_info=True,
                     )
-                    await self._mark_analyzed(event_id, error=str(e))
+                    await self._mark_analyzed(event_id, error=str(e), status="failed")
+                    await self._fallback_analysis(event_id, log_data, anomaly_report, str(e))
                 finally:
                     # 防止 trace context 泄漏: 同任务内后续辅助 LLM 调用
                     # (watchdog/post_mortem/rerank 等) 不会继承本事件的 event_id
