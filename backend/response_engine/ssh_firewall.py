@@ -30,6 +30,7 @@ SSH 防火墙适配器 — 通过 SSH 连接 Linux 虚拟机执行 iptables 真�
 import asyncio
 import ipaddress
 import logging
+import os
 import random
 import time
 from datetime import datetime
@@ -95,15 +96,49 @@ class SshFirewallAdapter:
         except Exception:
             pass
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=cfg["host"],
-            port=cfg["port"],
-            username=cfg["username"],
-            password=cfg["password"],
-            timeout=cfg["connect_timeout"],
-            allow_agent=False,
-            look_for_keys=False,
-        )
+
+        # v4 修复(2026-09-01):私钥类型自动探测,支持 ED25519/RSA/ECDSA/DSS
+        # 之前硬编码 password=cfg["password"],但 SOC 私钥是 ED25519,paramiko 用 password 走不通
+        # 优先用 pkey(cfg 里 private_key_path),回退到 password
+        pkey = None
+        key_path = cfg.get("private_key_path", "")
+        if key_path and os.path.isfile(key_path):
+            try:
+                # paramiko 没有统一 from_private_key_file,按顺序试各种 key 类型
+                for key_cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey, paramiko.DSSKey):
+                    try:
+                        pkey = key_cls.from_private_key_file(key_path)
+                        logger.info(f"SSH firewall: loaded {key_cls.__name__} from {key_path}")
+                        break
+                    except paramiko.ssh_exception.PasswordRequiredException:
+                        logger.warning(f"SSH firewall: {key_path} is encrypted, needs passphrase (not supported)")
+                        break
+                    except paramiko.ssh_exception.SSHException:
+                        continue  # 试下一个 key 类型
+            except Exception as e:
+                logger.warning(f"SSH firewall: failed to load key {key_path}: {e}")
+
+        if pkey is not None:
+            client.connect(
+                hostname=cfg["host"],
+                port=cfg["port"],
+                username=cfg["username"],
+                pkey=pkey,
+                timeout=cfg["connect_timeout"],
+                allow_agent=False,
+                look_for_keys=False,
+            )
+        else:
+            # 回退到密码登录
+            client.connect(
+                hostname=cfg["host"],
+                port=cfg["port"],
+                username=cfg["username"],
+                password=cfg["password"],
+                timeout=cfg["connect_timeout"],
+                allow_agent=False,
+                look_for_keys=False,
+            )
         self._client = client
         self._connected = True
         info = self._exec("uname -a; echo '---'; iptables --version 2>/dev/null || echo 'iptables NOT FOUND'", skip_whitelist=True)

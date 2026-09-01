@@ -39,7 +39,24 @@ class LogIngestor:
     def __init__(self):
         self._last_analysis = {}
         self._analysis_lock = asyncio.Lock()
-        self._review_semaphore = asyncio.Semaphore(5)
+        # v4 复现:5 并发下 200 events / 5 min 完成 0%(8-28 修复)
+        # 默认 20 满足 v4 压测场景,可由环境变量 AUDIT_REVIEW_CONCURRENCY 调优
+        import os
+        self._review_semaphore = asyncio.Semaphore(
+            int(os.environ.get("AUDIT_REVIEW_CONCURRENCY", "20"))
+        )
+        # v4 复现:Temporal 挂掉时降级路径仍用上面的 Semaphore,200 events 卡 5 min
+        # 降级路径用独立的、宽松的 Semaphore,避免被 Temporal 异常拖累
+        # 可由环境变量 AUDIT_FALLBACK_CONCURRENCY 调优
+        self._review_semaphore_fallback = asyncio.Semaphore(
+            int(os.environ.get("AUDIT_FALLBACK_CONCURRENCY", "20"))
+        )
+        # v4 修复(2026-09-01):审计状态可观测性
+        # 之前 analyzed=False 黑洞:事件在 Semaphore 队列里永远 analyzed=False,看不到也排不到
+        # 内存 cache 追踪 pending/running/completed/failed,定期清理(只保留 running/pending)
+        self._audit_status_cache: dict[int, dict] = {}
+        # 上限:cache 不超过 10000 条,防止内存爆
+        self._audit_status_cache_max = 10000
 
     def _merge_rounds(self, all_rounds: list[dict], log_data: dict = None) -> dict:
         """
@@ -97,6 +114,16 @@ class LogIngestor:
                     if v is not None and v != "":
                         normalized[target] = v
                         break
+        # 语义推断: event 名常为自然语言(如 "C2 通信"), 推断标准威胁类型枚举。
+        # 上游已显式提供 threat_type 枚举时尊重不覆盖。
+        if not normalized.get("threat_type"):
+            try:
+                from correlation_engine import infer_threat_type
+                normalized["threat_type"] = infer_threat_type(
+                    str(normalized.get("event") or normalized.get("type") or "")
+                )
+            except Exception as infer_err:
+                logger.debug(f"threat_type inference skipped: {infer_err}")
         return normalized
 
     async def ingest(
@@ -220,7 +247,8 @@ class LogIngestor:
                     f"异常检测快速响应: {', '.join(anomaly_report.reasons)}",
                 )
                 fast_threat = {
-                    "threat_type": event_type,
+                    "threat_type": log_data.get("threat_type") or event_type,
+                    "event": event_type,
                     "confidence": _fused_conf,
                     "severity": _fp_sev,
                     "threat_level": _fp_sev,
@@ -255,6 +283,8 @@ class LogIngestor:
                 logger.warning(f"[FastPath] Quick response setup failed: {fp_err}")
 
         # 6. Audit-LLM 流水线（异步后台审核）
+        # v4 修复(2026-09-01):先标记 pending,避免事件在 Semaphore 队列里 analyzed=False 黑洞
+        self._track_audit_status(stored.id, "pending", event_type=event_type)
         task = asyncio.create_task(self._audit_pipeline(
             session_id, stored.id, log_data, anomaly_report
         ))
@@ -283,6 +313,51 @@ class LogIngestor:
             },
             "sigma": log_data.get("_sigma", {"detected": False}),
         }
+
+    def _track_audit_status(self, event_id: int, status: str, **extra):
+        """v4 修复(2026-09-01):记录事件在审计流水线中的状态。
+
+        status 取值:
+          - "pending"     Semaphore 队列中等待
+          - "running"     正在 LLM 审计
+          - "completed"   成功完成(由 _mark_analyzed 调)
+          - "failed"      失败(由 _mark_analyzed 调)
+          - "skipped"     跳过(如 anomaly_score 为 None)
+
+        cache 上限 10000,防止长跑内存爆。
+        """
+        if event_id is None:
+            return
+        if len(self._audit_status_cache) >= self._audit_status_cache_max:
+            # LRU 简化:清掉最早的 20%
+            n = self._audit_status_cache_max // 5
+            for k in list(self._audit_status_cache.keys())[:n]:
+                self._audit_status_cache.pop(k, None)
+        self._audit_status_cache[event_id] = {
+            "status": status,
+            "ts": time.time(),
+            **extra,
+        }
+        # 每 100 条打印一次聚合,避免日志爆
+        if event_id % 100 == 0:
+            stats = self.get_audit_stats()
+            logger.info(
+                f"[Audit-Stats] pending={stats['pending']} "
+                f"running={stats['running']} "
+                f"completed={stats['completed']} "
+                f"failed={stats['failed']} "
+                f"total={stats['total']}"
+            )
+
+    def get_audit_stats(self) -> dict:
+        """v4 修复:对外暴露审计状态聚合,供 /api/logs/audit-stats 等查询使用"""
+        agg = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0, "total": 0}
+        for v in self._audit_status_cache.values():
+            s = v.get("status", "unknown")
+            if s in agg:
+                agg[s] += 1
+            agg["total"] += 1
+        return agg
 
     def _audit_task_done(self, task: asyncio.Task):
         """asyncio.create_task 的 done 回调 — 捕获被静默吞掉的异常"""
@@ -323,6 +398,10 @@ class LogIngestor:
             logger.debug(f"[Case] audit-pipeline case aggregation skipped: {e}")
 
         # ── Temporal 优先: 启动 4 层 Agent 编排 Workflow ──
+        # 标志:本次调用是否走降级路径(决定 _audit_pipeline_inner 用哪个 Semaphore)
+        # v4 复现:Temporal 容器持续 Restarting 时所有调用都走降级,降级路径仍用主 Semaphore=5
+        #         → 200 events / 5 min 完成 0%。修复:降级走独立、宽松的 Semaphore。
+        _fallback_routed = False
         if getattr(anomaly_report, "anomaly_score", 0) is not None:
             try:
                 from temporal.client import start_audit_workflow
@@ -339,12 +418,14 @@ class LogIngestor:
                     return
             except Exception as e:
                 logger.warning(f"[Audit-LLM] Temporal route failed, fallback async: {e}")
+                _fallback_routed = True  # ← 标记走降级,后续用 fallback Semaphore
 
         # ── 降级兜底: 原 async 编排(整体 900s 超时) ──
         try:
             await asyncio.wait_for(
                 self._audit_pipeline_inner(
-                    session_id, event_id, log_data, anomaly_report, max_rounds
+                    session_id, event_id, log_data, anomaly_report, max_rounds,
+                    use_fallback_semaphore=_fallback_routed,  # ← 新增参数
                 ),
                 timeout=900,
             )
@@ -365,6 +446,14 @@ class LogIngestor:
 
         status: completed | failed | fallback；失败时不得伪装成空成功结果。
         """
+        # v4 修复(2026-09-01):同步写内存 cache,让可观测性追上 DB
+        # 注意:即使 DB 写失败,cache 仍要更新,避免事件永远卡在 pending/running
+        cache_status = "failed" if error else (status or "completed")
+        try:
+            self._track_audit_status(event_id, cache_status, error=error)
+        except Exception as cache_err:
+            logger.warning(f"[Audit-LLM] cache status update failed for #{event_id}: {cache_err}")
+
         try:
             from models import async_session as db_session
             async with db_session() as session:
@@ -467,6 +556,7 @@ class LogIngestor:
         log_data: dict,
         anomaly_report,
         max_rounds: int = 3,
+        use_fallback_semaphore: bool = False,  # v4 修复:Temporal 降级时走独立 Semaphore
     ):
         """
         Audit-LLM 迭代审核流水线（多次审核，补充遗漏）
@@ -481,7 +571,11 @@ class LogIngestor:
           - 置信度取加权平均（轮次越大权重越低）
           - 所有轮的 evidence_trail 合并
         """
-        async with self._review_semaphore:
+        # v4 修复:Temporal 降级路径走独立 Semaphore(默认 20),避免被主 Semaphore 拥堵
+        _sem = self._review_semaphore_fallback if use_fallback_semaphore else self._review_semaphore
+        async with _sem:
+            # v4 修复:Semaphore 拿到后,状态从 pending → running
+            self._track_audit_status(event_id, "running", use_fallback=use_fallback_semaphore)
             from agents import decomposer, tool_builder, executor, reviewer
             from agents.agent_cad import cad_agent
             from models import async_session as db_session
@@ -619,6 +713,15 @@ class LogIngestor:
                             (merged.get("confirmation") or {}).get("admitted")
                             or merged.get("has_admitted_claims")
                         ),
+                        "event_type": log_data.get("event") or log_data.get("type") or "",
+                        "event_severity": log_data.get("severity") or "",
+                        "sigma_severity": (
+                            _sigma.get("max_severity") or _sigma.get("severity") or ""
+                        ),
+                        "cep_chain": bool(
+                            (merged.get("non_llm_signal"))
+                            or log_data.get("_chain")
+                        ),
                     }
                     merged = apply_faithfulness_gate(
                         merged,
@@ -734,8 +837,14 @@ class LogIngestor:
                         try:
                             from response_engine import get_orchestrator
                             _resp_orch = get_orchestrator()
+                            _audit_event_name = log_data.get("event", log_data.get("type", "UNKNOWN"))
                             threat_info = {
-                                "threat_type": log_data.get("event", log_data.get("type", "UNKNOWN")),
+                                "threat_type": (
+                                    merged.get("threat_type")
+                                    or log_data.get("threat_type")
+                                    or _audit_event_name
+                                ),
+                                "event": _audit_event_name,
                                 "confidence": merged.get("confidence", 0),
                                 "severity": merged.get("severity", "info"),
                                 "src_ip": log_data.get("src_ip", ""),

@@ -136,9 +136,12 @@ class ResponseRegistry:
             import asyncio
             result = await asyncio.wait_for(fn(**kwargs), timeout=action.timeout_ms / 1000)
             rollback_token = f"rb_{name}_{kwargs.get('src_ip', kwargs.get('target', 'unknown'))}_{int(__import__('time').time())}"
+            inner_ok = True
+            if isinstance(result, dict) and result.get("success") is False:
+                inner_ok = False
             logger.info(f"Action {name} executed: {str(result)[:100]}")
             return {
-                "success": True,
+                "success": inner_ok,
                 "result": result,
                 "rollback_token": rollback_token,
             }
@@ -168,6 +171,37 @@ class ResponseRegistry:
 
 
 response_registry = ResponseRegistry()
+
+
+# ── 动作分级辅助（审批分级强制用）──
+
+_SEVERITY_ORDER = [
+    ACTION_SEVERITY_LOW,
+    ACTION_SEVERITY_MEDIUM,
+    ACTION_SEVERITY_HIGH,
+    ACTION_SEVERITY_CRITICAL,
+]
+
+
+def max_action_severity(actions: list) -> str:
+    """返回动作列表中的最高危险等级（未知动作按 CRITICAL 保守处理）"""
+    best = ACTION_SEVERITY_LOW
+    for act in actions or []:
+        name = act.get("name", "") if isinstance(act, dict) else ""
+        action_def = response_registry.get_action(name)
+        sev = action_def.severity if action_def else ACTION_SEVERITY_CRITICAL
+        if _SEVERITY_ORDER.index(sev) > _SEVERITY_ORDER.index(best):
+            best = sev
+    return best
+
+
+def has_critical_action(actions: list) -> bool:
+    """动作列表中是否包含 CRITICAL 级动作。
+
+    CRITICAL 动作（如 isolate_host）无论策略 auto_execute 与否，
+    一律必须人工审批；HIGH 动作（如 block_ip）允许策略显式豁免。
+    """
+    return max_action_severity(actions) == ACTION_SEVERITY_CRITICAL
 
 
 # ════════════════════════════════════════════
@@ -226,11 +260,15 @@ def _ps_cmd(script: str) -> str:
     return f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"
 
 
-async def _exec(cmd: str, action: str, **fields) -> dict:
+async def _exec(cmd: str, action: str, platform: str = "windows", **fields) -> dict:
     """
     统一执行入口 — 通过 SafeExecutor 安全层路由
 
     安全检查链: 命令白名单 → 参数校验 → 资产保护 → 幂等 → 模式路由 → 执行 → 验证
+
+    platform 参数(2026-09-01 v4 修复):
+      - "windows" (默认): 保留原 netsh / PowerShell 行为,向后兼容
+      - "linux": 触发 LINUX_RULES 白名单(iptables),用于 soc-firewall 等 Linux 目标
     """
     from .safe_executor import safe_executor
 
@@ -242,107 +280,191 @@ async def _exec(cmd: str, action: str, **fields) -> dict:
         """真实 SSH 执行（保留原有 stub 回退逻辑）"""
         mode = _mode()
         if mode == "ssh" or (mode == "auto" and ssh_transport.enabled):
-            result = await ssh_transport.run(command, powershell=False)
+            # Linux 目标用 sh(无 PowerShell),Windows 用 PowerShell
+            use_powershell = platform != "linux"
+            result = await ssh_transport.run(command, powershell=use_powershell)
             if result["success"]:
-                logger.info(f"[SSH] {action} OK: {result['stdout'][:100]}")
+                logger.info(f"[SSH/{platform}] {action} OK: {result['stdout'][:100]}")
                 return {"action": action, "mode": "ssh", **fields, **result}
             elif mode == "ssh":
-                logger.error(f"[SSH] {action} FAILED: {result['stderr'][:200]}")
+                logger.error(f"[SSH/{platform}] {action} FAILED: {result['stderr'][:200]}")
                 return {"action": action, "mode": "ssh", "success": False, **fields, **result}
             else:
-                logger.warning(f"[SSH] {action} failed, fallback to stub: {result['stderr'][:100]}")
+                logger.warning(f"[SSH/{platform}] {action} failed, fallback to stub: {result['stderr'][:100]}")
         return await _stub_fallback(action, **fields)
 
     return await safe_executor.execute(
         action_name=action,
         command=cmd,
         params=fields,
-        platform="windows",
+        platform=platform,
         live_fn=_live_fn,
         ttl_seconds=ttl_seconds,
         rule_id=rule_id,
     )
 
 
-# ── 1. block_ip / unblock_ip (Windows 防火墙) ──
+# ── 1. block_ip / unblock_ip (Linux iptables) ──
+# v4 修复(2026-09-01):目标 soc-firewall 是 alpine Linux,改用 iptables
+# 旧实现用 netsh advfirewall(Windows 命令),在 Linux 上 exit 127 + stub fallback 假装成功
+#
+# v4.1 修复(2026-09-01):走 ssh_firewall.SshFirewallAdapter (paramiko) 而不是 transport.ssh_transport
+# 原因:Docker 9p bind mount 在 uvicorn 进程 namespace 不可见,transport.ssh_transport 永远走 stub
+# ssh_firewall 用 paramiko + /api/firewall/connect 已在容器内真验证可连 soc-firewall
 
 async def _block_ip(src_ip: str, reason: str = "", duration_minutes: int = 60, **kwargs) -> dict:
     """
-    封禁源IP — Windows 防火墙入站规则
-    命令: netsh advfirewall firewall add rule ...
-    支持自动解封: 创建计划任务在 duration 后删除规则
+    封禁源IP — Linux iptables INPUT DROP 规则
+    走 ssh_firewall.SshFirewallAdapter.block_ip (paramiko + 真实 iptables)
+    支持自动解封: 记录 rule_id, asyncio.create_task 在 duration 后调 ssh_firewall.rollback
     """
     src_ip = _validate_ip(src_ip)
     duration_minutes = _validate_positive_int(duration_minutes, "duration_minutes")
-    safe_reason = _sanitize_powershell_string(reason[:200])
     rule_name = f"RE_Block_{src_ip.replace('.','_')}"
-    safe_reason = _sanitize_powershell_string(reason[:200])
-    cmd = (
-        f'netsh advfirewall firewall add rule '
-        f'name="{rule_name}" '
-        f'direction=in action=block '
-        f'remoteip="{src_ip}" '
-        f'description="ResponseEngine auto-block: {safe_reason}"'
-    )
-    result = await _exec(cmd, "block_ip", src_ip=src_ip, duration_minutes=duration_minutes, rule_name=rule_name)
 
-    # SSH 成功后创建自动解封任务
-    if result.get("success") and duration_minutes > 0 and result.get("mode") == "ssh":
-        unblock_script = (
-            f'Start-Sleep -Seconds {duration_minutes * 60}\n'
-            f'netsh advfirewall firewall delete rule name="{rule_name}"'
-        )
-        # 超时必须覆盖整个等待期, 否则 SSH 会话在解封前被 kill
-        asyncio.create_task(ssh_transport.run(
-            _ps_cmd(unblock_script), powershell=False,
-            timeout=duration_minutes * 60 + 120,
-        ))
-        logger.info(f"[SSH] Auto-unblock scheduled for {src_ip} in {duration_minutes}min")
+    # v4.1:走 ssh_firewall 路径,绕开 transport.ssh_transport 的 9p namespace 问题
+    from .ssh_firewall import ssh_firewall
+    # ssh_firewall 是单例,可能未 connect 或 configure 不完整 — 首次调用前自动 (re-)configure + connect
+    if not ssh_firewall._connected or not ssh_firewall._config.get("host"):
+        try:
+            from config import settings as _settings
+            import asyncio as _asyncio
+            if not ssh_firewall._config.get("host"):
+                ssh_firewall.configure(
+                    host=_settings.fw_ssh_host,
+                    port=_settings.fw_ssh_port,
+                    username=_settings.fw_ssh_user,
+                    password=_settings.fw_ssh_password,
+                    use_sudo=_settings.fw_use_sudo,
+                )
+                logger.info(f"[block_ip] ssh_firewall auto-configured {_settings.fw_ssh_user}@{_settings.fw_ssh_host}")
+            await _asyncio.to_thread(ssh_firewall.connect)
+            logger.info(f"[block_ip] ssh_firewall auto-connected for {src_ip}")
+        except Exception as ce:
+            logger.error(f"[block_ip] ssh_firewall auto-connect failed: {ce}")
+            return {"success": False, "error": f"ssh_firewall connect failed: {ce}", "mode": "error", "src_ip": src_ip, "rule_name": rule_name}
+    try:
+        fw_result = ssh_firewall.block_ip(src_ip, duration=duration_minutes * 60)
+    except Exception as e:
+        logger.error(f"[block_ip] ssh_firewall.block_ip failed: {e}")
+        return {"success": False, "error": str(e), "mode": "error", "src_ip": src_ip, "rule_name": rule_name}
+
+    # ssh_firewall 返回 {"status": "success" | "blocked" | "error", "rule_id": ...}
+    success = fw_result.get("status") == "success"
+    fw_rule_id = fw_result.get("rule_id", "")
+
+    result = {
+        "action": "block_ip",
+        "success": success,
+        "mode": "ssh_firewall_paramiko",
+        "src_ip": src_ip,
+        "duration_minutes": duration_minutes,
+        "rule_name": rule_name,
+        "firewall_rule_id": fw_rule_id,
+        "detail": fw_result,
+    }
+
+    # 自动解封: 通过 ssh_firewall.rollback(rule_id) 删除规则
+    # 用 asyncio.sleep 不需要后台进程,简单可靠
+    if success and duration_minutes > 0 and fw_rule_id:
+        async def _auto_unblock():
+            try:
+                await asyncio.sleep(duration_minutes * 60)
+                rb = ssh_firewall.rollback(fw_rule_id)
+                logger.info(f"[block_ip] auto-unblock {src_ip} (rule_id={fw_rule_id}): {rb.get('status')}")
+            except Exception as e:
+                logger.error(f"[block_ip] auto-unblock failed for {src_ip}: {e}")
+        asyncio.create_task(_auto_unblock())
+        logger.info(f"[block_ip] auto-unblock scheduled for {src_ip} in {duration_minutes}min (rule_id={fw_rule_id})")
 
     return result
 
 
 async def _unblock_ip(src_ip: str, reason: str = "", **kwargs) -> dict:
-    """解封IP — 删除防火墙规则"""
-    rule_name = f"RE_Block_{src_ip.replace('.','_')}"
-    cmd = f'netsh advfirewall firewall delete rule name="{rule_name}"'
-    return await _exec(cmd, "unblock_ip", src_ip=src_ip, rule_name=rule_name)
+    """解封IP — 通过 ssh_firewall.rollback 按 rule_id 删除规则"""
+    # v4.1:走 ssh_firewall.get_active_rules (按 ip 过滤) + ssh_firewall.rollback
+    from .ssh_firewall import ssh_firewall
+    try:
+        active = ssh_firewall.get_active_rules()
+        target_ip_safe = src_ip.replace(".", "_")
+        deleted = 0
+        for r in active:
+            rip = r.get("ip", "")
+            if rip == src_ip or target_ip_safe in rip:
+                rb = ssh_firewall.rollback(r.get("rule_id", ""))
+                if rb.get("status") == "success":
+                    deleted += 1
+        return {
+            "action": "unblock_ip",
+            "success": deleted > 0,
+            "mode": "ssh_firewall_paramiko",
+            "src_ip": src_ip,
+            "deleted_count": deleted,
+        }
+    except Exception as e:
+        logger.error(f"[unblock_ip] ssh_firewall failed: {e}")
+        return {"action": "unblock_ip", "success": False, "error": str(e), "mode": "error", "src_ip": src_ip}
 
 
 # ── 2. isolate_host / restore_host (防火墙全阻断) ──
+# v4.1(2026-09-01):改走 ssh_firewall.isolate_host / rollback,绕开 9p namespace 问题
 
 async def _isolate_host(host_ip: str, reason: str = "", **kwargs) -> dict:
     """
-    隔离主机 — 添加入站+出站全阻断规则
+    隔离主机 — ssh_firewall.isolate_host (入站 + 出站 DROP)
     相当于把该主机从网络中彻底断开
     """
     host_ip = _validate_ip(host_ip)
-    rule_name_in = f"RE_Isolate_In_{host_ip.replace('.','_')}"
-    rule_name_out = f"RE_Isolate_Out_{host_ip.replace('.','_')}"
-    safe_reason = _sanitize_powershell_string(reason[:200])
-    cmd_in = (
-        f'netsh advfirewall firewall add rule '
-        f'name="{rule_name_in}" direction=in action=block '
-        f'remoteip="{host_ip}" description="ISOLATE: {safe_reason}"'
-    )
-    cmd_out = (
-        f'netsh advfirewall firewall add rule '
-        f'name="{rule_name_out}" direction=out action=block '
-        f'remoteip="{host_ip}" description="ISOLATE: {safe_reason}"'
-    )
-    result_in = await _exec(cmd_in, "isolate_host", host_ip=host_ip, rule_names=[rule_name_in])
-    if not result_in.get("success"):
-        return result_in
-    result_out = await _exec(cmd_out, "isolate_host", host_ip=host_ip, rule_names=[rule_name_in, rule_name_out])
-    return result_out
+    from .ssh_firewall import ssh_firewall
+    # 自动 connect (同 _block_ip)
+    if not ssh_firewall._connected or not ssh_firewall._config.get("host"):
+        try:
+            from config import settings as _settings
+            import asyncio as _asyncio
+            if not ssh_firewall._config.get("host"):
+                ssh_firewall.configure(
+                    host=_settings.fw_ssh_host, port=_settings.fw_ssh_port,
+                    username=_settings.fw_ssh_user, password=_settings.fw_ssh_password,
+                    use_sudo=_settings.fw_use_sudo,
+                )
+            await _asyncio.to_thread(ssh_firewall.connect)
+        except Exception as ce:
+            logger.error(f"[isolate_host] ssh_firewall connect failed: {ce}")
+            return {"success": False, "error": f"connect failed: {ce}", "mode": "error", "host_ip": host_ip}
+    try:
+        fw_result = ssh_firewall.isolate_host(host_ip, isolation_type="network")
+    except Exception as e:
+        logger.error(f"[isolate_host] ssh_firewall.isolate_host failed: {e}")
+        return {"success": False, "error": str(e), "mode": "error", "host_ip": host_ip}
+    success = fw_result.get("status") == "success"
+    return {
+        "action": "isolate_host", "success": success,
+        "mode": "ssh_firewall_paramiko",
+        "host_ip": host_ip, "detail": fw_result,
+    }
 
 
 async def _restore_host(host_ip: str, reason: str = "", **kwargs) -> dict:
-    """恢复主机 — 删除隔离规则"""
-    safe_ip = host_ip.replace('.', '_')
-    cmd_in = f'netsh advfirewall firewall delete rule name="RE_Isolate_In_{safe_ip}"'
-    cmd_out = f'netsh advfirewall firewall delete rule name="RE_Isolate_Out_{safe_ip}"'
-    result_in = await _exec(cmd_in, "restore_host", host_ip=host_ip)
+    """恢复主机 — 通过 ssh_firewall.rollback 按 isolation_id 删除规则"""
+    from .ssh_firewall import ssh_firewall
+    try:
+        active = ssh_firewall.get_active_rules()
+        target_ip_safe = host_ip.replace(".", "_")
+        deleted = 0
+        for r in active:
+            rip = r.get("host", "") or r.get("ip", "")
+            if rip == host_ip or target_ip_safe in rip:
+                rb = ssh_firewall.rollback(r.get("rule_id", ""))
+                if rb.get("status") == "success":
+                    deleted += 1
+        return {
+            "action": "restore_host", "success": deleted > 0,
+            "mode": "ssh_firewall_paramiko",
+            "host_ip": host_ip, "deleted_count": deleted,
+        }
+    except Exception as e:
+        logger.error(f"[restore_host] ssh_firewall failed: {e}")
+        return {"action": "restore_host", "success": False, "error": str(e), "mode": "error", "host_ip": host_ip}
     result_out = await _exec(cmd_out, "restore_host", host_ip=host_ip)
     return {"success": result_in.get("success", False) or result_out.get("success", False),
             "results": [result_in, result_out]}

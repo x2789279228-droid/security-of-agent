@@ -238,6 +238,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      # 强制 UTF-8 (python:3.12-slim 没装 locales, 默认 POSIX/ASCII 会让含中文的 .py SyntaxError)
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
       SHARED_MEMORY_DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/shared_memory
       SHARED_MEMORY_REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env}@redis:6379/0
       # 必填：请在运行前设置 API Key，否则 LLM/Embedding 将返回降级响应
@@ -264,7 +269,13 @@ services:
       SHARED_MEMORY_RESPONSE_SSH_HOST: ${SHARED_MEMORY_RESPONSE_SSH_HOST:-host.docker.internal}
       SHARED_MEMORY_RESPONSE_SSH_PORT: ${SHARED_MEMORY_RESPONSE_SSH_PORT:-22}
       SHARED_MEMORY_RESPONSE_SSH_USER: ${SHARED_MEMORY_RESPONSE_SSH_USER:-Admin}
-      SHARED_MEMORY_RESPONSE_SSH_KEY_FILE: ${SHARED_MEMORY_RESPONSE_SSH_KEY_FILE:-/root/.ssh/id_rsa}
+      SHARED_MEMORY_RESPONSE_SSH_KEY_FILE: ${SHARED_MEMORY_RESPONSE_SSH_KEY_FILE:-/tmp/ssh/id_rsa}
+      # Firewall VM (v3 SSH 链路性能验证用, 指向 soc-firewall 容器)
+      SHARED_MEMORY_FW_SSH_HOST: ${SHARED_MEMORY_FW_SSH_HOST:-soc-firewall}
+      SHARED_MEMORY_FW_SSH_PORT: ${SHARED_MEMORY_FW_SSH_PORT:-22}
+      SHARED_MEMORY_FW_SSH_USER: ${SHARED_MEMORY_FW_SSH_USER:-root}
+      SHARED_MEMORY_FW_SSH_PASSWORD: ${SHARED_MEMORY_FW_SSH_PASSWORD:-}
+      SHARED_MEMORY_FW_USE_SUDO: ${SHARED_MEMORY_FW_USE_SUDO:-false}
       # Kafka 消息总线
       SHARED_MEMORY_KAFKA_ENABLED: ${SHARED_MEMORY_KAFKA_ENABLED:-true}
       SHARED_MEMORY_KAFKA_BOOTSTRAP: kafka:9092
@@ -308,9 +319,12 @@ services:
       SHARED_MEMORY_LLM_SANDBOX_ENABLED: ${SHARED_MEMORY_LLM_SANDBOX_ENABLED:-false}
       SHARED_MEMORY_LLM_PHISHING_ENABLED: ${SHARED_MEMORY_LLM_PHISHING_ENABLED:-false}
     volumes:
-      # 挂载宿主机 SSH 私钥到中性路径（entrypoint 会复制到 /tmp/ssh 并修正权限）
-      - ~/.ssh/id_rsa:/tmp/ssh-keys/id_rsa:ro
-      - ~/.ssh/id_rsa.pub:/tmp/ssh-keys/id_rsa.pub:ro
+      # 挂载专用 soc-firewall 密钥（性能验证用，test only，未做 from/no-pty 等加固）
+      - ./config/ssh/firewall_key:/tmp/ssh/firewall_key:ro
+      # v4 修复(2026-09-01):同时挂到 entrypoint 期望路径,让 ssh_transport 真正可用
+      # entrypoint.sh 启动时 if [ -f /tmp/ssh-keys/id_rsa ] → cp 到 /tmp/ssh/ 和 /root/.ssh/
+      # 之前只挂 /tmp/ssh/firewall_key,entrypoint 永远找不到, ssh_transport 走 stub
+      - ./config/ssh/firewall_key:/tmp/ssh-keys/id_rsa:ro
     ports:
       - "8001:8000"
     depends_on:

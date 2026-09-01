@@ -1,3 +1,4 @@
+﻿# -*- coding: utf-8 -*-
 """
 共享记忆安全审计 Agent 平台 — FastAPI 主入口
 
@@ -78,6 +79,9 @@ async def lifespan(app: FastAPI):
         embedder.set_redis(redis_client)
         context_stream.set_redis(redis_client)
         anomaly_detector.set_redis(redis_client)
+        # 回滚记录双写 Redis：进程重启后已执行动作仍可回滚
+        from response_engine.response_executor import rollback_store
+        rollback_store.set_redis(redis_client)
         await anomaly_detector.load_baselines_from_redis()
     logger.info("安全审计模式: 所有事件全量存储，无有损压缩 + 异常基线持久化")
     if not settings.llm_api_key:
@@ -86,15 +90,44 @@ async def lifespan(app: FastAPI):
         logger.warning("Embedding API key not set — embeddings will return zero vectors")
     logger.info(f"LLM: {settings.llm_model} @ {settings.llm_base_url}")
     logger.info(f"Embedding: {settings.embedding_model} @ {settings.embedding_base_url}")
+    logger.info(f"Embedding dim: {settings.embedding_dim}")
+
+    # Qdrant 知识库 / 记忆集合就绪（缺失则创建，避免检索 404）
+    try:
+        from qdrant_store import qdrant_store
+        from vector_store import vector_store as _mem_vs
+        ok = await qdrant_store.ensure_collection()
+        logger.info(
+            f"Qdrant knowledge collection ready={ok} "
+            f"name={settings.qdrant_collection} "
+            f"size={settings.qdrant_vector_size or settings.embedding_dim}"
+        )
+        await _mem_vs._ensure_memories_collection()
+    except Exception as e:
+        logger.warning(f"Qdrant ensure_collection skipped: {e}")
+
     # 配置响应引擎传输层
     if settings.response_ssh_host:
+        # v4 修复(2026-09-01):key_file 解析顺序:
+        #   1. settings.response_ssh_key_file (env 显式配置)
+        #   2. /tmp/ssh-keys/id_rsa (entrypoint 期望路径)
+        #   3. /root/.ssh/id_rsa (兼容旧配置,entrypoint 也会 cp 到这里)
+        import os as _os
+        key_candidates = [
+            settings.response_ssh_key_file,
+            "/tmp/ssh-keys/id_rsa",
+            "/root/.ssh/id_rsa",
+        ]
+        _key_file = next((p for p in key_candidates if p and _os.path.isfile(p)), settings.response_ssh_key_file)
+        if not _os.path.isfile(_key_file):
+            logger.warning(f"Response SSH key not found at any candidate: {key_candidates}; transport will be stub")
         ssh_transport.configure(
             host=settings.response_ssh_host,
             port=settings.response_ssh_port,
             user=settings.response_ssh_user,
-            key_file=settings.response_ssh_key_file,
+            key_file=_key_file,
         )
-        logger.info(f"Response SSH transport configured: {settings.response_ssh_user}@{settings.response_ssh_host}:{settings.response_ssh_port}")
+        logger.info(f"Response SSH transport configured: {settings.response_ssh_user}@{settings.response_ssh_host}:{settings.response_ssh_port} key={_key_file}")
     else:
         logger.info("Response transport mode: stub (set RESPONSE_SSH_HOST to enable real execution)")
 
@@ -242,6 +275,40 @@ async def lifespan(app: FastAPI):
     pipeline_tracer.enable_persist()
     logger.info("Observability: health monitor + watchdog + pipeline tracer initialized")
 
+    # 启动时清理长期 stuck 未分析事件，避免积压拖垮队列
+    if settings.stuck_auto_reset_minutes and settings.stuck_auto_reset_minutes > 0:
+        try:
+            from datetime import datetime, timezone, timedelta
+            from sqlalchemy import select
+            from models import SecurityEvent
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=settings.stuck_auto_reset_minutes)
+            async with async_session() as _s:
+                rows = (await _s.execute(
+                    select(SecurityEvent).where(
+                        SecurityEvent.analyzed == False,
+                        SecurityEvent.created_at < cutoff,
+                    ).limit(500)
+                )).scalars().all()
+                n = 0
+                for e in rows:
+                    e.analyzed = True
+                    raw = dict(e.raw_data or {})
+                    raw["_audit_llm_error"] = "auto_reset_stuck_on_startup"
+                    audit = dict(raw.get("_audit_llm") or {})
+                    audit.update({
+                        "status": "failed",
+                        "error": "auto_reset_stuck_on_startup",
+                        "note": "cleared on backend startup",
+                    })
+                    raw["_audit_llm"] = audit
+                    e.raw_data = raw
+                    n += 1
+                if n:
+                    await _s.commit()
+                    logger.warning(f"Cleared {n} stuck unanalyzed events older than {settings.stuck_auto_reset_minutes}m")
+        except Exception as e:
+            logger.warning(f"Stuck auto-reset skipped: {e}")
+
     yield
 
     # ── Shutdown ──
@@ -285,6 +352,7 @@ app.add_middleware(
 
 _PUBLIC_PATHS = frozenset({
     "/api/auth/login",
+    "/api/auth/register",
     "/api/health",
     "/docs", "/redoc", "/openapi.json",
     "/metrics",
@@ -328,25 +396,85 @@ _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 _RATE_LIMIT_CLEANUP_INTERVAL = 300
 _last_rate_limit_cleanup = 0.0
 
+# 限流白名单 — 这些路径高频访问或本身已有限流, 不计入全局限流
+#   /api/health         — K8s liveness/readiness probe + 前端轮询
+#   /api/llm/cost       — LLM 成本只读查询, O(1) 内存读取, 不应限流
+#   /api/feedback/*     — feedback 统计/建议, 只读
+#   /api/auth/*         — 登录/注册, auth.py 已有自己的 brute force 429
+#   /api/logs/ingest    — 真实日志源入站(2026-09-01 v4 复现:同机 ingest 被打 429)
+#   /api/logs/events    — 监控查询(Monitor 页 SSE/轮询,被打 429 会断流)
+#   /api/firewall/*     — 防火墙状态查询(只读,被限会让 SOC 失去态势感知)
+#   /api/response/*     — 响应引擎状态/动作查询(只读,被限会让响应链断)
+_RATE_LIMIT_WHITELIST = (
+    "/api/health",
+    "/api/llm/cost",
+    "/api/feedback",
+    "/api/auth",
+    "/api/logs/ingest",
+    "/api/logs/events",
+    "/api/firewall",
+    "/api/response",
+)
+
+
+def _is_rate_limit_whitelisted(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in _RATE_LIMIT_WHITELIST)
+
+
+def _resolve_rate_limit_key(request: Request) -> str:
+    """v4 修复(2026-09-01):按 (api_key | X-Forwarded-For | client_ip) 分桶,避免 127.0.0.1 共桶
+
+    优先级:
+      1. X-API-Key 头(真实数据源)→ key:<truncated>
+      2. Authorization Bearer token  → key:<truncated>
+      3. X-Forwarded-For 第一项      → ip:<xff>
+      4. request.client.host         → ip:<host>
+
+    桶 key 截断到 32 字符,防止恶意长 header 撑爆 _rate_limit_store 内存
+    """
+    # 1. X-API-Key
+    api_key = request.headers.get("X-API-Key", "").strip()
+    if api_key:
+        return f"key:{api_key[:32]}"
+    # 2. Authorization Bearer
+    auth = request.headers.get("Authorization", "").strip()
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        if token:
+            return f"key:{token[:32]}"
+    # 3. X-Forwarded-For(取第一项 = 真实客户端 IP)
+    xff = request.headers.get("X-Forwarded-For", "").strip()
+    if xff:
+        first_ip = xff.split(",")[0].strip()
+        if first_ip:
+            return f"ip:{first_ip[:64]}"
+    # 4. client.host
+    return f"ip:{request.client.host if request.client else 'unknown'}"
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     global _last_rate_limit_cleanup
+    # 白名单路径直接 pass, 不计入限流
+    if _is_rate_limit_whitelisted(request.url.path):
+        return await call_next(request)
     if settings.rate_limit_per_minute <= 0:
         return await call_next(request)
-    client_ip = request.client.host if request.client else "unknown"
+    # v4 修复:按 (api_key | xff | client_ip) 分桶,而非纯 client_ip
+    rate_key = _resolve_rate_limit_key(request)
     now = time.time()
     window = 60.0
     if now - _last_rate_limit_cleanup > _RATE_LIMIT_CLEANUP_INTERVAL:
         _last_rate_limit_cleanup = now
-        stale_ips = [ip for ip, ts in _rate_limit_store.items() if not ts or ts[-1] < now - window]
-        for ip in stale_ips:
-            del _rate_limit_store[ip]
-    timestamps = _rate_limit_store[client_ip]
+        stale_keys = [k for k, ts in _rate_limit_store.items() if not ts or ts[-1] < now - window]
+        for k in stale_keys:
+            del _rate_limit_store[k]
+    timestamps = _rate_limit_store[rate_key]
     cutoff = now - window
-    _rate_limit_store[client_ip] = [t for t in timestamps if t > cutoff]
-    if len(_rate_limit_store[client_ip]) >= settings.rate_limit_per_minute:
+    _rate_limit_store[rate_key] = [t for t in timestamps if t > cutoff]
+    if len(_rate_limit_store[rate_key]) >= settings.rate_limit_per_minute:
         return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
-    _rate_limit_store[client_ip].append(now)
+    _rate_limit_store[rate_key].append(now)
     return await call_next(request)
 
 

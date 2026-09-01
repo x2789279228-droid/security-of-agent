@@ -50,13 +50,21 @@ class WhitelistRule:
 LINUX_RULES: list[WhitelistRule] = [
     WhitelistRule(
         rule_id="LX-001",
-        pattern=r"^(sudo\s+)?iptables\s+-I\s+(INPUT|OUTPUT)\s+-[sd]\s+\d{1,3}(\.\d{1,3}){3}\s+-j\s+DROP(\s+-m\s+comment\s+--comment\s+'[A-Za-z0-9\-]+')?$",
+        # v4 修复(2026-09-01):[A-Za-z0-9_\-]+ 接受下划线,允许 rule_name 含 RE_Block_<ip> 这种命名
+        pattern=r"^(sudo\s+)?iptables\s+-I\s+(INPUT|OUTPUT)\s+-[sd]\s+\d{1,3}(\.\d{1,3}){3}\s+-j\s+DROP(\s+-m\s+comment\s+--comment\s+'[A-Za-z0-9_\-]+')?$",
         desc="iptables 插入 DROP 规则（封禁/隔离）",
     ),
     WhitelistRule(
         rule_id="LX-002",
         pattern=r"^(sudo\s+)?iptables\s+-D\s+(INPUT|OUTPUT)\s+\d+$",
         desc="iptables 按行号删除规则（回滚）",
+    ),
+    WhitelistRule(
+        rule_id="LX-006",
+        # v4 修复(2026-09-01):按 comment 删除规则,支持 response_registry._unblock_ip
+        # 模式: iptables -D <chain> -s <ip> -j <target> -m comment --comment '<name>'
+        pattern=r"^(sudo\s+)?iptables\s+-D\s+(INPUT|OUTPUT)\s+-[sd]\s+\d{1,3}(\.\d{1,3}){3}\s+-j\s+(DROP|ACCEPT|REJECT)(\s+-m\s+comment\s+--comment\s+'[A-Za-z0-9_\-]+')?$",
+        desc="iptables 按 comment 删除规则（解封）",
     ),
     WhitelistRule(
         rule_id="LX-003",
