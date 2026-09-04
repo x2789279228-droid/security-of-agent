@@ -614,6 +614,15 @@ class LogIngestor:
                 db_evt = await session.get(SecurityEvent, event_id)
                 if db_evt and not db_evt.analyzed:
                     db_evt.analyzed = True
+                    try:
+                        from stats_counter import inc_analyzed_done
+                    except Exception:
+                        pass
+                    else:
+                        try:
+                            await inc_analyzed_done()
+                        except Exception:
+                            pass
                     raw = dict(db_evt.raw_data or {})
                     if error:
                         raw["_audit_llm_error"] = error
@@ -689,6 +698,15 @@ class LogIngestor:
                 db_evt = await session.get(SecurityEvent, event_id)
                 if db_evt:
                     db_evt.analyzed = True
+                    try:
+                        from stats_counter import inc_analyzed_done
+                    except Exception:
+                        pass
+                    else:
+                        try:
+                            await inc_analyzed_done()
+                        except Exception:
+                            pass
                     db_evt.raw_data = {
                         **(db_evt.raw_data or {}),
                         "_audit_llm": fallback_result,
@@ -905,6 +923,15 @@ class LogIngestor:
                     db_evt = await session.get(SecurityEvent, event_id)
                     if db_evt:
                         db_evt.analyzed = True
+                    try:
+                        from stats_counter import inc_analyzed_done
+                    except Exception:
+                        pass
+                    else:
+                        try:
+                            await inc_analyzed_done()
+                        except Exception:
+                            pass
 
                         # 合并证据链
                         all_evidence = []

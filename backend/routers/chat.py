@@ -284,18 +284,39 @@ async def get_summary(session_id: str):
 
 # ── 全局统计 ──
 
-# /api/stats 高压下被前端以秒级频率轮询，6 个全表 COUNT 逐条执行会拖垮 DB。
-# 合并为单条 SELECT（标量子查询一次往返）+ 5s 进程内 TTL 缓存。
-STATS_TTL_S = 5.0
-_stats_cache: dict = {"data": None, "ts": 0.0}
+# global stats (Monitor). Real-time approximate via Redis counters + low-freq COUNT reconcile.
+STATS_RECONCILE_EVERY_S = float(__import__("os").environ.get("SHARED_MEMORY_STATS_RECONCILE_EVERY_S", "8.0"))
+_cache_ts = 0.0
+_cache_payload = None
+_reconcile_lock = None
 
+def _get_reconcile_lock():
+    global _reconcile_lock
+    if _reconcile_lock is None:
+        import asyncio as _a
+        _reconcile_lock = _a.Lock()
+    return _reconcile_lock
 
-@router.get("/stats")
-async def stats(session: AsyncSession = Depends(get_session)):
-    now = time.monotonic()
-    if _stats_cache["data"] is not None and now - _stats_cache["ts"] < STATS_TTL_S:
-        return _stats_cache["data"]
+def _stats_payload(total, pending, done, tree_total, tree_leaves,
+                   mem_count, conv_count, redis_keys):
+    return {
+        "memories_count": mem_count,
+        "conversations_count": conv_count,
+        "security_events": total,
+        "security_pending": pending,
+        "tree_nodes": tree_total,
+        "tree_leaves": tree_leaves,
+        "redis_keys": redis_keys,
+        "audit_llm": {"total": total, "completed": done, "pending": pending},
+        "services": {
+            "pgvector": "active",
+            "redis": "active",
+            "llm": settings.llm_model,
+            "embedding": settings.embedding_model,
+        },
+    }
 
+async def _stats_reconcile(session) -> dict:
     row = (await session.execute(
         select(
             select(func.count(Memory.id)).scalar_subquery(),
@@ -310,33 +331,47 @@ async def stats(session: AsyncSession = Depends(get_session)):
             ).scalar_subquery(),
         )
     )).one()
-    mem_count, conv_count, evt_count, evt_pending, tree_total, tree_leaves = row
-    redis_keys = await sliding_window.dbsize()
+    mem_count, conv_count, evt_total, evt_pending, tree_total, tree_leaves = row
+    done = evt_total - evt_pending
+    try:
+        from stats_counter import reconcile
+        await reconcile(evt_total, done, evt_pending)
+    except Exception:
+        pass
+    redis_keys = 0
+    try:
+        redis_keys = await sliding_window.dbsize()
+    except Exception:
+        pass
+    return _stats_payload(evt_total, evt_pending, done, tree_total, tree_leaves,
+                          mem_count, conv_count, redis_keys)
 
-    # Audit-LLM 统计（使用 analyzed 字段代替 JSON 内嵌判断）
-    audit_total = evt_count
-    audit_done = evt_count - evt_pending
-
-    payload = {
-        "memories_count": mem_count,
-        "conversations_count": conv_count,
-        "security_events": evt_count,
-        "security_pending": evt_pending,
-        "tree_nodes": tree_total,
-        "tree_leaves": tree_leaves,
-        "redis_keys": redis_keys,
-        "audit_llm": {
-            "total": audit_total,
-            "completed": audit_done,
-            "pending": evt_pending,
-        },
-        "services": {
-            "pgvector": "active",
-            "redis": "active",
-            "llm": settings.llm_model,
-            "embedding": settings.embedding_model,
-        },
-    }
-    _stats_cache["data"] = payload
-    _stats_cache["ts"] = now
-    return payload
+@router.get("/stats")
+async def stats(session: AsyncSession = Depends(get_session)):
+    global _cache_ts, _cache_payload
+    now = __import__("time").monotonic()
+    async with _get_reconcile_lock():
+        fresh = bool(_cache_payload) and (now - _cache_ts) < STATS_RECONCILE_EVERY_S
+        if not fresh:
+            payload = await _stats_reconcile(session)
+            _cache_ts = now
+            _cache_payload = dict(payload)
+            return payload
+        # real-time approximate overlay on last full-reconcile payload (keeps tree/redis)
+        snap = None
+        try:
+            from stats_counter import snapshot
+            snap = await snapshot()
+        except Exception:
+            snap = None
+        if snap is not None:
+            base = dict(_cache_payload)
+            base["security_events"] = snap["total"]
+            base["security_pending"] = snap["pending"]
+            au = dict(base.get("audit_llm") or {})
+            au.update({"total": snap["total"], "completed": snap["done"],
+                       "pending": snap["pending"]})
+            base["audit_llm"] = au
+            return base
+        # Redis counters unavailable -> return last reconcile truth (no extra COUNT cost)
+        return dict(_cache_payload)

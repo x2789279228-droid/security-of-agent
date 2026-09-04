@@ -250,6 +250,16 @@ class EventStore:
                     return existing
             raise
         await session.refresh(evt)
+        # real-time approx counters (Redis; no-op when unavailable); genuine inserts only
+        try:
+            from stats_counter import inc_insert
+        except Exception:
+            pass
+        else:
+            try:
+                await inc_insert()
+            except Exception:
+                pass
 
         stored = StoredEvent(
             id=evt.id,
