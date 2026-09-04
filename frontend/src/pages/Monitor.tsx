@@ -22,7 +22,7 @@ const healthMeta: Record<string, { label: string; color: string; text: string }>
   alert: { label: '异常', color: 'bg-hui', text: 'text-ink' },
 }
 
-const STATS_MIN_INTERVAL = 5_000 // stats 刷新最短间隔
+const STATS_MIN_INTERVAL = 2_000 // stats 刷新最短间隔（/api/stats 已 Redis 计数秒回,可近实时刷新）
 let lastStatsAt = 0
 
 export default function Monitor() {
