@@ -1124,16 +1124,43 @@ class LogIngestor:
     async def ingest_batch(
         self, session: AsyncSession, session_id: str, logs: list[dict]
     ) -> dict:
-        """批量接入"""
-        results = []
-        for log_data in logs:
-            r = await self.ingest(session, session_id, log_data)
-            results.append(r)
-        return {
-            "status": "batch_ingested",
-            "count": len(results),
-            "session_id": session_id,
-        }
+        """Batch ingest with bounded concurrency.
+
+        Each item runs on its own async DB session (independent transaction/connection)
+        so asyncio.gather cannot interleave SQL on a single shared connection.
+        Concurrency is capped by asyncio.Semaphore. limit = env BATCH_INGEST_CONCURRENCY
+        (default 12). Default stays conservative: the asyncpg pool is pool_size=10 +
+        max_overflow=20 (~30 ceiling) and must leave headroom for the Kafka authoritative
+        workers (default 8) and other API/audit clients; bump the env var to go higher.
+
+        Exception: when the DB URL is sqlite (:memory: makes every new connection an
+        isolated empty DB) or the batch has a single item, fall back to serial and reuse
+        the caller-provided session so in-memory/tests semantics are preserved.
+        """
+        _url = str(getattr(settings, "database_url", "") or "")
+        _sqlite = _url.startswith("sqlite")
+        if _sqlite or len(logs) <= 1:
+            results = []
+            for log_data in logs:
+                results.append(await self.ingest(session, session_id, log_data))
+            return {"status": "batch_ingested", "count": len(results),
+                    "session_id": session_id}
+
+        import os as _os
+        limit = max(1, int(_os.environ.get("BATCH_INGEST_CONCURRENCY", "12") or "12"))
+        sem = asyncio.Semaphore(limit)
+        from models import async_session as db_session
+
+        async def _one(d: dict):
+            async with sem:
+                async with db_session() as own:
+                    return await self.ingest(own, session_id, d)
+
+        # gather without return_exceptions keeps serial semantics: first failure raises
+        # (does not silently drop events) while still parallelizing the happy path.
+        await asyncio.gather(*[_one(d) for d in logs])
+        return {"status": "batch_ingested", "count": len(logs),
+                "session_id": session_id}
 
     async def get_status(
         self, session: AsyncSession, session_id: str
