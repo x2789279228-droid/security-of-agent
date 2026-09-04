@@ -42,6 +42,36 @@ class LogBatchRequest(BaseModel):
 
 import re as _re
 
+
+# ---------- Kafka decoupling gateway helpers ----------
+def _ingest_producer_active() -> bool:
+    from kafka_producer import kafka_producer as _kp
+    return bool(getattr(settings, "kafka_enabled", False) and _kp.is_active)
+
+def _peek_type(d: dict) -> str:
+    return str(d.get("event") or d.get("type") or d.get("eventType") or "UNKNOWN")
+
+def _peek_source(api_key: str) -> str:
+    if api_key:
+        src = source_registry.authenticate(api_key)
+        if src and getattr(src, "name", ""):
+            return src.name
+    return "http-admin"
+
+async def _enqueue_ingest(session_id: str, api_key: str, events: list) -> int:
+    from kafka_producer import kafka_producer as _kp
+    messages = [{
+        "uuid": uuid.uuid4().hex,
+        "type": "security_event",
+        "session_id": session_id,
+        "source_id": _peek_source(api_key),
+        "source_key": api_key or "",
+        "_ts": round(__import__("time").time(), 3),
+        "body": ev,
+    } for ev in events]
+    return await _kp.produce_raw_batch(
+        messages, topic=settings.kafka_topic_ingest_process, key_field="uuid")
+
 def _sanitize_value(v):
     """移除 HTML 标签, 防止存储型 XSS"""
     if isinstance(v, str):
@@ -76,6 +106,11 @@ async def ingest_log(
     # 输入 sanitization: 移除 message 字段中的 HTML 标签
     if isinstance(log_data.get("message"), str):
         log_data["message"] = _sanitize_value(log_data["message"])
+    if _ingest_producer_active():
+        produced = await _enqueue_ingest(session_id, api_key, [log_data])
+        return {"session_id": session_id, "status": "queued", "produced": produced,
+                "event_type": _peek_type(log_data), "severity": log_data.get("severity", "info")}
+
     result = await log_ingestor.ingest(session, session_id, log_data)
     return {"session_id": session_id, **result}
 
@@ -93,6 +128,11 @@ async def ingest_log_batch(
     for d in parsed:
         if isinstance(d.get("message"), str):
             d["message"] = _sanitize_value(d["message"])
+    if _ingest_producer_active():
+        produced = await _enqueue_ingest(session_id, "", parsed)
+        return {"session_id": session_id, "status": "queued", "produced": produced,
+                "count": len(parsed)}
+
     result = await log_ingestor.ingest_batch(session, session_id, parsed)
     return {"session_id": session_id, **result}
 

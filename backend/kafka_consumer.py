@@ -80,6 +80,7 @@ class KafkaConsumerManager:
             "enriched_consumed": 0,
             "audit_consumed": 0,
             "alerts_consumed": 0,
+            "python_ingest_consumed": 0,
             "behavior_alerts_consumed": 0,
             "rejected_consumed": 0,
             "errors": 0,
@@ -121,6 +122,8 @@ class KafkaConsumerManager:
             asyncio.create_task(self._consume_cep_partial()),
             asyncio.create_task(self._lag_monitor()),
         ]
+        if settings.python_process_ingest_queue and settings.kafka_enabled:
+            self._tasks.append(asyncio.create_task(self._consume_python_ingest()))
         logger.info(
             f"Kafka consumer started: {settings.kafka_bootstrap}, "
             f"topics=[{settings.kafka_topic_enriched}, "
@@ -388,6 +391,74 @@ class KafkaConsumerManager:
             pass
 
     # ── 各 topic 消费入口 ──
+    # ── Python 权威处理: HTTP 网关队列(security-events-ingest) ──
+    async def _consume_python_ingest(self):
+        # batching + concurrent park + batch commit for higher ingest-process drain speed
+        if not settings.python_process_ingest_queue or not settings.kafka_enabled:
+            logger.info("Python ingest queue consumer disabled")
+            return
+        import os as _os
+        workers = max(1, int(_os.environ.get("KAFKA_INGEST_WORKERS", "8") or "8"))
+        poll_ms = int(_os.environ.get("KAFKA_INGEST_POLL_MS", "500") or "500")
+        consumer = AIOKafkaConsumer(
+            settings.kafka_topic_ingest_process,
+            bootstrap_servers=settings.kafka_bootstrap,
+            group_id=f"{settings.kafka_consumer_group}-ingestpy",
+            value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+            auto_offset_reset="earliest",
+            enable_auto_commit=False,
+            max_poll_records=MAX_POLL_RECORDS,
+        )
+        try:
+            await consumer.start()
+            logger.info(f"Consuming python-ingest {settings.kafka_topic_ingest_process} "
+                        f"(workers={workers}, poll={poll_ms}ms, batch-commit)")
+            while self._running:
+                try:
+                    fetched = await consumer.getmany(timeout_ms=poll_ms,
+                                                     max_records=MAX_POLL_RECORDS)
+                except Exception as e:
+                    logger.warning(f"Python-ingest poll error: {e}")
+                    await asyncio.sleep(0.5)
+                    continue
+                msgs = [m for batch in fetched.values() for m in batch]
+                if not msgs:
+                    continue
+                for i in range(0, len(msgs), workers):
+                    chunk = msgs[i:i + workers]
+                    await asyncio.gather(*[self._safe_py_handle(m) for m in chunk])
+                await consumer.commit()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Python-ingest consumer crashed: {e}")
+        finally:
+            await consumer.stop()
+
+
+    async def _safe_py_handle(self, msg):
+        try:
+            event = msg.value if isinstance(msg.value, dict) else json.loads(msg.value)
+            await self._handle_python_ingest(event, "")
+            self._stats["python_ingest_consumed"] = self._stats.get("python_ingest_consumed", 0) + 1
+            self._stats["last_message_at"] = time.time()
+            inc_kafka_consumed(getattr(settings, "kafka_topic_ingest_process", ""))
+        except Exception as e:
+            self._stats["errors"] = self._stats.get("errors", 0) + 1
+            self._stats["python_ingest_consumed"] = self._stats.get("python_ingest_consumed", 0)
+            logger.error(f"[Python-ingest] handle error: {e}")
+
+
+    async def _handle_python_ingest(self, wrapper: dict, trace_id: str):
+        from log_ingestion import log_ingestor
+        from models import async_session as db_session
+        body = wrapper.get("body")
+        if not isinstance(body, dict):
+            raise ValueError("python ingest wrapper lacks dict body")
+        session_id = str(wrapper.get("session_id") or ("http-" + str(wrapper.get("uuid", ""))))
+        async with db_session() as session:
+            await log_ingestor.ingest(session, session_id, body)
+
 
     async def _consume_enriched(self):
         """消费 security-events-enriched → 全量存储 + 记忆树索引"""

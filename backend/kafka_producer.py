@@ -118,6 +118,62 @@ class KafkaProducerWrapper:
         except Exception as e:
             logger.warning(f"Kafka publish_sigma_hit failed: {e}")
 
+    # ── Kafka 解耦: Http 网关 → raw 入口直发 ──
+    # 网关按 Flink raw 契约(camelCase avsc)归一化事件后投递到 security-logs-raw,
+    # 由 Flink LogValidation → AnomalyDetection 转 validated/audit-queue/enriched/alerts。
+    # 采用"批量 send + 一次性 await delivery"保证吞吐与 acks=all 持久化, 同时不阻塞上游。
+
+    async def _deliver_batch(self, futures: list, label: str) -> int:
+        """统一等待一批 send future 落盘(DeliveryGuarantee), 返回成功条数; 失败条记日志。"""
+        ok = 0
+        for fut in futures:
+            try:
+                await fut
+                ok += 1
+            except Exception as e:
+                logger.warning(f"Kafka {label} message delivery failed: {e}")
+        return ok
+
+    async def produce_raw_batch(
+        self,
+        events: list[dict],
+        topic: str = "",
+        key_field: str = "sourceId",
+        trace_id: str = "",
+    ) -> int:
+        """批量写入 raw topic(网关用)。
+        events: 已按 Flink raw 契约归一化的 camelCase dict。
+        topic 缺省 = settings.kafka_topic_raw。
+        返回成功投递条数; producer 未启动则返回 0(不应发生: 网关仅在 started 时调用)。
+        """
+        if not self._started or not events:
+            return 0
+        dst = topic or settings.kafka_topic_raw
+        futures = []
+        for ev in events:
+            try:
+                futures.append(self._producer.send(
+                    dst,
+                    key=str(ev.get(key_field) or ev.get("eventId") or ""),
+                    value=ev,
+                    headers=self._trace_headers(trace_id),
+                ))
+            except Exception as e:
+                logger.warning(f"Kafka produce_raw send enqueue failed: {e}")
+        return await self._deliver_batch(futures, dst)
+
+    async def produce_raw(
+        self,
+        event: dict,
+        topic: str = "",
+        key_field: str = "sourceId",
+        trace_id: str = "",
+    ) -> bool:
+        """包装单条 produce_raw_batch。"""
+        n = await self.produce_raw_batch([event], topic=topic,
+                                         key_field=key_field, trace_id=trace_id)
+        return n == 1
+
     @property
     def is_active(self) -> bool:
         return self._started

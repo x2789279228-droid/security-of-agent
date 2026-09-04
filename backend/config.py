@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     kafka_topic_cep_patterns: str = "security-cep-patterns"
     kafka_topic_sigma_hit: str = "security-sigma-hit"   # pySigma 聚合候选 → Flink 阈值窗口
     kafka_topic_behavior_alerts: str = "security-behavior-alerts"  # L4 Flink 行为基线
+    # Kafka 三解耦: HTTP 网关处理队列 (Python 权威检测的排队消费通道)
+    kafka_topic_ingest_process: str = "security-events-ingest"
+    # Python 从 ingest-process 队列消费做全量检测(启=权威); 置 false 可退回到旧 Flink enriched/alerts 驱动
+    python_process_ingest_queue: bool = True
+    # 旧 Flink enriched handler 不再补排 LLM 审计(Python 主导权威时关闭双 LLM 成本与双审计)
+    kafka_flink_secondary_llm: bool = False
     kafka_consumer_group: str = "soc-backend"
     kafka_enabled: bool = False              # True=Kafka 模式, False=兼容旧 HTTP 直连模式
     # Confluent Schema Registry (跨运行时 Schema 契约, 见 schema_registry.py)
