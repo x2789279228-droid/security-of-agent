@@ -49,3 +49,16 @@ KAFKA_ENABLED=false, pip+pytest-asyncio)运行 `python -m pytest tests/ -q`:
 
 > 验收口径:改造后同容器重跑不得新增失败(期望仍 463p/4f, 除非针对失败另行修复)。
 
+## 6. 改造后对比(同机同口径, 2026-09-04)
+| 单批注入 | HTTP 同步(改造前 §2) | HTTP 网关投递(改造后) | 加速 |
+|---|---|---|---|
+| 50 | 973.7 ms | 7.3 ms | ≈133× |
+| 200 | 3464.8 ms | 249.2 ms | ≈14× |
+
+- 改造后 `/api/logs/ingest/batch` 仅认证+sanitize+produce `security-events-ingest` 后返回 `{status:queued,produced:n}`;
+- Python 权威消费者(`group soc-backend-ingestpy`, workers=8)批量并发 → 复跑 `log_ingestor.ingest` 全检测闭环;
+  实测注入 255 条 `python_ingest_consumed=255, errors=0`。
+- 处理浪响应(FastPath 响应编排与 Audit-LLM 均 create_task 派发, 非请求/消费循环内 await SSH/LLM) → 慢端不阻塞 batch 消费推进。
+- 专项回归: `tests/test_arch_unification/test_response_dedup_dual_track/test_audit_pq/test_case_automation/test_trace_otel` → 38 passed(KAFKA=false 原同步路径不变)。
+
+
