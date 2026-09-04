@@ -61,4 +61,22 @@ KAFKA_ENABLED=false, pip+pytest-asyncio)运行 `python -m pytest tests/ -q`:
 - 处理浪响应(FastPath 响应编排与 Audit-LLM 均 create_task 派发, 非请求/消费循环内 await SSH/LLM) → 慢端不阻塞 batch 消费推进。
 - 专项回归: `tests/test_arch_unification/test_response_dedup_dual_track/test_audit_pq/test_case_automation/test_trace_otel` → 38 passed(KAFKA=false 原同步路径不变)。
 
+## 7. 追加目标: ingest_batch 并发化(2026-09-04)
+**改动**: `log_ingestion.py` ingest_batch 由串行 `for await` → `asyncio.gather` + `asyncio.Semaphore`(默认 12, env `BATCH_INGEST_CONCURRENCY`)，
+每条各自 `async with db_session() as own: self.ingest(own, ...)`(独立连接/事务, 防同一请求级 session 多协程交织)。
+sqlite(:memory: 每连接独立空库) 或单条 → 回退串行复用调用方 session(保单测/in-memory 语义)。 commit 31259ff。
+
+**wall 实测(Kafka off 的 HTTP batch → 新并发分支, 同库同口径)**:
+| 注入 | wall(ms) | 吞吐(e/s) |
+|---|---|---|
+| 100 | 2012 | ~50 |
+| 300 | 5428 | ~55 |
+| 600 | 11421 | ~53 |
+
+**结论(真实)**: 在共享单进程部署上并发未带来线性提速(旧串行 200→3464ms≈58/s 与之基本持平)。根因非 DB 串行等待,而是本路径另有共享瓶颈——
+单线程事件循环内的检测(anomaly/sigma CPU)、每事件 `create_task` 派生的后台任务积压、以及 event_bus/Redis 等共同争用；
+`Semaphore` 只能把「DB I/O 等待重叠」的批次加速, 对非 I/O 瓶颈批次收益有限。
+→ 该并发在 asyncpg I/O 为主、或后端 worker 多进程/多副本分片、或 reduce 后台派生负荷后才会显现; 增量正确(返回 count==len、sqlite 回退不破坏单测、回归 38p)且无回归/无稳态开销。
+
+
 
