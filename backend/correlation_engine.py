@@ -33,9 +33,9 @@ logger = logging.getLogger(__name__)
 
 # 中文事件名 → 标准英文类型名映射
 ZH_EVENT_MAP = {
-    # 数据外泄相关
-    "未授权获取密码信息": "DATA_EXFIL",
-    "未授权获取明文密码信息": "DATA_EXFIL",
+    # 认证/凭据攻击（L1: 不再误标为 DATA_EXFIL，避免走「需审批隔离」而不自动短封）
+    "未授权获取密码信息": "UNAUTHORIZED_ACCESS",
+    "未授权获取明文密码信息": "UNAUTHORIZED_ACCESS",
     "请求数据存在明文密码信息": "DATA_EXFIL",
     # 未授权访问
     "非敏感接口未鉴权": "UNAUTHORIZED_ACCESS",
@@ -52,6 +52,7 @@ ZH_EVENT_MAP = {
     # Web攻击
     "SQL注入": "SQL_INJECTION",
     "跨站脚本": "XSS_ATTACK",
+    "命令注入": "COMMAND_INJECTION",
     # 横向移动
     "横向移动": "LATERAL_MOVE",
     # 登录相关
@@ -71,6 +72,9 @@ EVENT_TYPE_ALIASES = {
     "DATA_EXFILTRATE": "DATA_EXFIL",
     "C2_COMM": "C2_BEACON",
     "SSH_BRUTE": "BRUTE_FORCE",
+    # v5 修复(C2):上游常把 "DDoS_TRAFFIC" 写成全大写，归一后才能命中
+    # 策略引擎的 threat_type 与 TYPE_SIGNAL_EVENTS 词表
+    "DDOS_TRAFFIC": "DDoS_TRAFFIC",
 }
 
 
@@ -84,6 +88,94 @@ def normalize_event_type(raw_type: str) -> str:
         return mapped
     upper = raw_type.strip().upper().replace("-", "_").replace(" ", "_")
     return EVENT_TYPE_ALIASES.get(upper, upper if raw_type.isascii() else raw_type)
+
+
+# 关键词 → 威胁类型枚举：上游告警名常为自然语言（如 "C2 通信" 带空格、
+# 审计结论用中文词表 "数据外泄"），精确匹配失败时按子串推断。
+# L3: 「密码」不再单独映射 DATA_EXFIL（避免凭据类误判）；优先走 taxonomy。
+KEYWORD_THREAT_MAP = [
+    ("C2", "C2_BEACON"),
+    ("WebShell", "MALWARE_DETECT"),
+    ("恶意软件", "MALWARE_DETECT"),
+    ("勒索", "RANSOMWARE"),
+    ("外泄", "DATA_EXFIL"),
+    ("暴力破解", "BRUTE_FORCE"),
+    ("弱密码", "BRUTE_FORCE"),
+    ("端口扫描", "PORT_SCAN"),
+    ("SQL注入", "SQL_INJECTION"),
+    ("命令注入", "COMMAND_INJECTION"),
+    ("跨站脚本", "XSS_ATTACK"),
+    ("横向移动", "LATERAL_MOVE"),
+    ("DDoS", "DDoS_TRAFFIC"),
+    ("未授权", "UNAUTHORIZED_ACCESS"),
+    ("未鉴权", "UNAUTHORIZED_ACCESS"),
+    ("凭证枚举", "UNAUTHORIZED_ACCESS"),
+    ("异常凭证", "UNAUTHORIZED_ACCESS"),
+]
+
+# 全部已知威胁枚举值：ASCII 名归一化后仅在其为已知枚举时采纳,
+# 避免短名(如审计词表 "C2")被当成未知名直接透传而跳过关键词匹配
+_KNOWN_THREAT_ENUMS = (
+    set(ZH_EVENT_MAP.values())
+    | set(EVENT_TYPE_ALIASES.values())
+    | {t for _, t in KEYWORD_THREAT_MAP}
+)
+
+
+def infer_threat_classification(name: str) -> tuple[str, str]:
+    """自然语言/枚举 → (leaf, category)。
+
+    优先 taxonomy.yml；失败时回退 ZH_EVENT_MAP / KEYWORD_THREAT_MAP。
+    """
+    if not name or not str(name).strip():
+        return "", ""
+    try:
+        from response_engine.threat_taxonomy import classify, category_for_leaf
+        result = classify(name)
+        if result.leaf or result.category:
+            leaf = result.leaf
+            cat = result.category or (category_for_leaf(leaf) if leaf else "")
+            return leaf, cat
+    except Exception:
+        pass
+
+    # 回退：旧词表
+    name_s = str(name).strip()
+    compact = name_s.replace(" ", "").replace("　", "")
+    mapped = ZH_EVENT_MAP.get(compact) or ZH_EVENT_MAP.get(name_s)
+    if mapped:
+        try:
+            from response_engine.threat_taxonomy import category_for_leaf
+            return mapped, category_for_leaf(mapped)
+        except Exception:
+            return mapped, ""
+    if name_s.isascii():
+        normalized = normalize_event_type(name_s)
+        if normalized in _KNOWN_THREAT_ENUMS:
+            try:
+                from response_engine.threat_taxonomy import category_for_leaf
+                return normalized, category_for_leaf(normalized)
+            except Exception:
+                return normalized, ""
+    lowered = name_s.lower()
+    for keyword, threat_type in KEYWORD_THREAT_MAP:
+        if keyword.lower() in lowered or keyword in compact:
+            try:
+                from response_engine.threat_taxonomy import category_for_leaf
+                return threat_type, category_for_leaf(threat_type)
+            except Exception:
+                return threat_type, ""
+    return "", ""
+
+
+def infer_threat_type(name: str) -> str:
+    """从自然语言事件名/威胁名推断标准威胁类型枚举（leaf）。
+
+    兼容旧调用方；需要 category 时请用 infer_threat_classification()。
+    无法推断时返回 ""（区别于 normalize_event_type 的 "UNKNOWN"）。
+    """
+    leaf, _cat = infer_threat_classification(name)
+    return leaf
 
 # 已知的攻击路径模式：有序的事件类型序列
 ATTACK_CHAIN_PATTERNS = {

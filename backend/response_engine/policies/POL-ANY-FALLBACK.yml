@@ -1,0 +1,19 @@
+id: POL-ANY-FALLBACK
+name: 通用威胁告警
+enabled: true
+description: 兼容兜底（紧急回退）：未知类型默认走 Uncertain 5 分钟遏制
+match:
+  threat_type: ANY
+  min_confidence: 0.3
+  min_severity: info
+actions:
+- name: send_alert
+  params:
+    severity: medium
+- name: block_ip
+  params:
+    duration_minutes: 60
+auto_execute: true
+require_approval: false
+priority: 10
+cooldown_minutes: 30

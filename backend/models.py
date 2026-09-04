@@ -733,6 +733,23 @@ class AuditTrail(Base):
 
 
 # ════════════════════════════════════════════
+# 应用用户（自助注册；内置 admin 仍走环境变量）
+# ════════════════════════════════════════════
+
+class AppUser(Base):
+    """平台登录用户 — bcrypt 哈希，默认 role=viewer"""
+    __tablename__ = "app_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(64), nullable=False, unique=True, index=True)
+    password_hash = Column(String(128), nullable=False)
+    role = Column(String(30), nullable=False, default="viewer")  # viewer|operator|admin
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ════════════════════════════════════════════
 # 安全运营 — 运营 KPI 快照 (P0.B)
 # ════════════════════════════════════════════
 

@@ -128,6 +128,31 @@ def test_soft_demote_keeps_threat_when_sigma_backed():
     assert out.get("demoted_by") == "faithfulness_gate_soft"
 
 
+def test_faithfulness_gate_caps_port_scan_and_strips_mitre():
+    merged = {
+        "threat_detected": True,
+        "verdict": "confirmed",
+        "confidence": 0.73,
+        "severity": "critical",
+        "mitre_techniques": ["T1090.002"],
+        "needs_human": False,
+    }
+    out = apply_faithfulness_gate(
+        merged,
+        answer="确认 T1090.002 隐蔽通信。",
+        contexts=[{"content": "PORT_SCAN src_ip=45.33.32.156 dst_ip=192.168.1.100"}],
+        non_llm_signals={
+            "sigma_detected": True,
+            "event_type": "PORT_SCAN",
+            "event_severity": "medium",
+            "sigma_severity": "medium",
+        },
+    )
+    assert out["severity"] == "high"
+    assert out["mitre_techniques"] == []
+    assert "T1090.002" in (out.get("stripped_mitre") or [])
+
+
 def _benign_events():
     """一组纯业务/良性日志（NTP、健康检查、正常登录）。"""
     return [

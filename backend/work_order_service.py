@@ -26,7 +26,7 @@ ORDER_TYPES = ["disposition", "approval", "review", "rollback"]
 ORDER_STATUSES = ["pending", "assigned", "in_progress", "completed", "cancelled"]
 
 # SLA 时限（小时），按优先级
-SLA_HOURS = {"critical": 2, "high": 8, "medium": 24, "low": 72}
+SLA_HOURS = {"critical": 4, "high": 8, "medium": 24, "low": 72}
 
 
 class WorkOrderService:
@@ -90,6 +90,11 @@ class WorkOrderService:
             if order.order_type != "disposition" or not order.case_id:
                 return
             from case_manager import case_manager
+            case = await session.get(SecurityCase, order.case_id)
+            if case and case.status == "open":
+                await case_manager.update_status(
+                    session, order.case_id, "investigating", by="system"
+                )
             result = await case_manager.update_status(
                 session, order.case_id, "resolved", by="system"
             )

@@ -1,0 +1,21 @@
+id: POL-UNCERTAIN
+name: 未知威胁保守遏制
+enabled: true
+role: uncertain_template
+description: L1 Uncertain：未知类型 5 分钟短封 + 高优先级告警
+match:
+  threat_type: __UNCERTAIN__
+  min_confidence: 0.0
+  min_severity: info
+actions:
+- name: block_ip
+  params:
+    duration_minutes: 5
+- name: send_alert
+  params:
+    severity: high
+    priority: p1
+auto_execute: true
+require_approval: true
+priority: 1
+cooldown_minutes: 5

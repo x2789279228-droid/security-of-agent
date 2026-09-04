@@ -92,14 +92,17 @@ class SecurityGuard:
         """记录已执行的动作，更新所有追踪器。
 
         在安全动作实际执行后调用，用于更新序列历史、频率计数和上下文记录。
+        频率名额已在 inspect()→rate_limiter.check() 通过时同步预留，
+        这里只做结果确认：执行失败时释放预留，不重复计数。
 
         Args:
             action_name: 已执行的安全动作名称
             threat_info: 触发该动作的威胁信息
-            result: 动作执行结果
+            result: 动作执行结果，含 success 字段（缺省按成功处理）
         """
+        success = bool(result.get("success", True)) if isinstance(result, dict) else True
         self.sequence_guard.record(action_name)
-        self.rate_limiter.record(action_name)
+        self.rate_limiter.record(action_name, success=success)
         self.context_manager.record(action_name, threat_info, result)
 
     def reset(self):

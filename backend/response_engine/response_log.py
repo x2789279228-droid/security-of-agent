@@ -43,6 +43,9 @@ class ResponseLogEntry:
     created_at: str = ""
 
     def to_dict(self) -> dict:
+        result = self.action_result or {}
+        params = self.action_params or {}
+        mode = result.get("mode") or params.get("execution_mode") or ""
         return {
             "id": self.id,
             "session_id": self.session_id,
@@ -54,6 +57,10 @@ class ResponseLogEntry:
             "policy_name": self.policy_name,
             "action_name": self.action_name,
             "action_success": self.action_success,
+            "action_params": params,
+            "action_result": result,
+            "execution_mode": mode,
+            "verified": result.get("verified"),
             "rollback_token": self.rollback_token,
             "auto_execute": self.auto_execute,
             "approval_id": self.approval_id,
@@ -80,6 +87,9 @@ class ResponseLogger:
         actions: list[dict],
         auto_execute: bool,
         needs_approval: bool,
+        match_status: str = "",
+        skip_reason: str = "",
+        category: str = "",
     ):
         """记录威胁检测事件到日志"""
         try:
@@ -94,7 +104,19 @@ class ResponseLogger:
                 src_ip=threat_info.get("src_ip", ""),
                 policy_name=policy_name,
                 action_name="policy_match",
-                action_params={"actions": actions, "auto_execute": auto_execute},
+                # v5 修复(C1/A):记录响应触发来源(fastpath_strong/fastpath_severity/
+                # audit_llm)与是否允许封禁，便于追溯"封禁是谁决定的"
+                # L1: match_status / skip_reason / category 可观测，禁止静默放过
+                action_params={
+                    "actions": actions,
+                    "auto_execute": auto_execute,
+                    "needs_approval": needs_approval,
+                    "source": threat_info.get("response_source", ""),
+                    "allow_blocking": bool(threat_info.get("allow_blocking", True)),
+                    "match_status": match_status or threat_info.get("match_status", ""),
+                    "skip_reason": skip_reason or threat_info.get("skip_reason", ""),
+                    "category": category or threat_info.get("category", ""),
+                },
                 action_success=True,
                 auto_execute=auto_execute,
                 approval_status="approved" if auto_execute else "pending",

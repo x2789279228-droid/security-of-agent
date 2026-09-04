@@ -107,7 +107,9 @@ export function CasesTab() {
                     <PriorityChip priority={c.priority} />
                     <SeverityChip severity={c.severity} />
                   </div>
-                  <SlaBadge deadline={c.sla_deadline} breached={c.sla_breached} />
+                  {c.status !== 'resolved' && c.status !== 'closed' && (
+                    <SlaBadge deadline={c.sla_deadline} breached={c.sla_breached} />
+                  )}
                 </div>
               </div>
             </motion.button>

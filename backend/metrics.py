@@ -42,6 +42,36 @@ IOC_MATCHES = Counter("soc_ioc_matches_total", "IOC 匹配命中计数")
 SANDBOX_SUBMISSIONS = Counter("soc_sandbox_submissions_total", "沙箱提交计数(按类型)", ["kind"])
 PHISHING_DETECTIONS = Counter("soc_phishing_detections_total", "反钓鱼检测计数(按类别)", ["category"])
 LLM_TOKENS = Counter("soc_llm_tokens_total", "LLM token 消耗(按组件)", ["component"])
+AUDIT_PQ_ENQUEUE = Counter(
+    "soc_audit_pq_enqueue_total", "审计优先级队列入队", ["tier"]
+)
+AUDIT_PQ_DEQUEUE = Counter(
+    "soc_audit_pq_dequeue_total", "审计优先级队列出队", ["tier"]
+)
+AUDIT_LANE_ADMIT = Counter(
+    "soc_audit_lane_admit_total", "审计车道准入", ["lane", "tier"]
+)
+
+
+def inc_audit_pq_enqueue(tier: str = "?") -> None:
+    try:
+        AUDIT_PQ_ENQUEUE.labels(tier=tier or "?").inc()
+    except Exception:
+        pass
+
+
+def inc_audit_pq_dequeue(tier: str = "?") -> None:
+    try:
+        AUDIT_PQ_DEQUEUE.labels(tier=tier or "?").inc()
+    except Exception:
+        pass
+
+
+def inc_audit_lane_admit(lane: str = "?", tier: str = "?") -> None:
+    try:
+        AUDIT_LANE_ADMIT.labels(lane=lane or "?", tier=tier or "?").inc()
+    except Exception:
+        pass
 
 
 def inc_llm_tokens(component: str = "llm", amount: int = 0) -> None:

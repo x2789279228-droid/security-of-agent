@@ -50,17 +50,17 @@ const TAB_ROW_2: { key: PhishTab; icon: string; label: string }[] = [
 ]
 
 const riskStyle: Record<string, { bg: string; text: string; label: string }> = {
-  safe: { bg: 'bg-[#34c759]/10', text: 'text-[#248a3d]', label: '安全' },
-  suspicious: { bg: 'bg-[#ff9f0a]/12', text: 'text-[#c77700]', label: '可疑' },
-  phishing: { bg: 'bg-[#ff3b30]/10', text: 'text-[#ff3b30]', label: '钓鱼' },
+  safe: { bg: 'bg-qing', text: 'text-ink', label: '安全' },
+  suspicious: { bg: 'bg-nong', text: 'text-white', label: '可疑' },
+  phishing: { bg: 'bg-ink', text: 'text-white', label: '钓鱼' },
 }
 
 const sevDot: Record<string, string> = {
-  info: 'bg-ink-faint',
-  low: 'bg-[#0071e3]',
-  medium: 'bg-[#ff9f0a]',
-  high: 'bg-[#ff9500]',
-  critical: 'bg-[#ff3b30]',
+  info: 'bg-qing',
+  low: 'bg-dan',
+  medium: 'bg-hui',
+  high: 'bg-nong',
+  critical: 'bg-ink',
 }
 
 const typeIcon: Record<string, string> = {
@@ -79,7 +79,7 @@ http://192.168.1.100/paypal/login/verify.php
 
 附件: 账户明细.exe`
 
-const inputCls = "w-full rounded-xl border border-line bg-surface px-4 py-2.5 text-sm text-ink placeholder:text-ink-faint/50 focus:outline-none focus:ring-2 focus:ring-accent/30"
+const inputCls = "mono-input text-sm"
 const monoInputCls = `${inputCls} font-mono py-3`
 const labelCls = "block text-xs font-semibold text-ink-soft mb-2"
 
@@ -224,10 +224,10 @@ export default function PhishingDetect() {
     <button
       key={t.key}
       onClick={() => switchTab(t.key)}
-      className={`px-3.5 py-1.5 rounded-full text-[13px] font-medium transition-all ${
+      className={`px-3.5 py-1.5 text-[13px] tracking-[0.08em] rounded-none transition-colors ${
         tab === t.key
-          ? 'bg-accent text-white shadow-sm'
-          : 'bg-surface text-ink-soft hover:text-ink hover:bg-black/[0.04]'
+          ? 'bg-ink text-white'
+          : 'text-ink border border-ink hover:bg-ink hover:text-white'
       }`}
     >
       {t.icon} {t.label}
@@ -235,7 +235,7 @@ export default function PhishingDetect() {
   )
 
   return (
-    <section className="max-w-[1200px] mx-auto px-6 py-20">
+    <section className="page-shell py-4 border-b border-line">
       <motion.div
         initial={{ opacity: 0, y: 28 }}
         whileInView={{ opacity: 1, y: 0 }}
@@ -243,17 +243,17 @@ export default function PhishingDetect() {
         transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
       >
         {/* 标题 */}
-        <p className="text-sm font-semibold text-accent tracking-wide mb-3">钓鱼检测</p>
-        <h2 className="text-4xl font-semibold tracking-tight text-ink mb-3">
-          钓鱼检测。三秒识破。
+        <p className="text-[13px] text-ink-faint mb-3">检测</p>
+        <h2 className="text-[22px] font-black text-ink mb-3">
+          钓鱼检测，三秒识破。
         </h2>
-        <p className="text-lg text-ink-soft mb-10 max-w-2xl">
+        <p className="text-[13px] font-light text-ink-soft mb-10 max-w-2xl leading-relaxed">
           覆盖八大攻击面，多维度指标聚合评分，即时识别钓鱼威胁。
         </p>
 
         <div className="grid lg:grid-cols-[1fr_380px] gap-6">
           {/* 左侧：输入区 */}
-          <div className="bg-card rounded-[24px] p-8">
+          <div className="mono-card p-8">
             {/* Tab 切换 — 两行 */}
             <div className="space-y-2 mb-6">
               <div className="flex gap-2">{TAB_ROW_1.map(renderTabButton)}</div>
@@ -311,11 +311,11 @@ export default function PhishingDetect() {
                       <input value={attMagic} onChange={(e) => setAttMagic(e.target.value)} placeholder="4d5a9000" className={monoInputCls} />
                       <div className="flex gap-6 mt-3">
                         <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer">
-                          <input type="checkbox" checked={attEncrypted} onChange={(e) => setAttEncrypted(e.target.checked)} className="rounded accent-[#0071e3]" />
+                          <input type="checkbox" checked={attEncrypted} onChange={(e) => setAttEncrypted(e.target.checked)} className="rounded-none accent-[#111111]" />
                           加密/密码保护
                         </label>
                         <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer">
-                          <input type="checkbox" checked={attMacros} onChange={(e) => setAttMacros(e.target.checked)} className="rounded accent-[#0071e3]" />
+                          <input type="checkbox" checked={attMacros} onChange={(e) => setAttMacros(e.target.checked)} className="rounded-none accent-[#111111]" />
                           含宏/脚本
                         </label>
                       </div>
@@ -373,7 +373,7 @@ export default function PhishingDetect() {
                       <label className={`${labelCls} mt-3`}>邮件正文</label>
                       <textarea value={becBody} onChange={(e) => setBecBody(e.target.value)} placeholder={'请立即向以下账户汇款50万元，不要告诉任何人，这是机密操作。'} rows={5} className={`${inputCls} resize-y`} />
                       <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer mt-3">
-                        <input type="checkbox" checked={becHasAtt} onChange={(e) => setBecHasAtt(e.target.checked)} className="rounded accent-[#0071e3]" />
+                        <input type="checkbox" checked={becHasAtt} onChange={(e) => setBecHasAtt(e.target.checked)} className="rounded-none accent-[#111111]" />
                         含附件
                       </label>
                     </motion.div>
@@ -384,7 +384,7 @@ export default function PhishingDetect() {
                 <button
                   onClick={handleDetect}
                   disabled={!canSubmit || loading}
-                  className="mt-6 w-full py-3 rounded-xl text-sm font-semibold text-white bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="mt-6 w-full py-3 rounded-none text-sm tracking-[0.16em] text-white bg-ink hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
                   {loading ? '检测中…' : '开始检测'}
                 </button>
@@ -406,11 +406,11 @@ export default function PhishingDetect() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
                   transition={spring.gentle}
-                  className="bg-card rounded-[24px] p-6"
+                  className="mono-card p-6"
                 >
                   {/* 风险等级 + 分数 */}
                   <div className="flex items-center justify-between mb-4">
-                    <span className={`text-xs font-bold px-3 py-1.5 rounded-full ${riskStyle[verdict.risk_level]?.bg} ${riskStyle[verdict.risk_level]?.text}`}>
+                    <span className={`text-xs font-bold px-3 py-1.5 rounded-none ${riskStyle[verdict.risk_level]?.bg} ${riskStyle[verdict.risk_level]?.text}`}>
                       {riskStyle[verdict.risk_level]?.label ?? verdict.risk_level}
                     </span>
                     <div className="text-right">
@@ -430,9 +430,9 @@ export default function PhishingDetect() {
                       <span>置信度</span>
                       <span>{(verdict.confidence * 100).toFixed(0)}%</span>
                     </div>
-                    <div className="h-1.5 rounded-full bg-surface overflow-hidden">
+                    <div className="h-px bg-line overflow-hidden">
                       <div
-                        className="h-full rounded-full bg-accent transition-all duration-500"
+                        className="h-px bg-ink transition-all duration-500"
                         style={{ width: `${verdict.confidence * 100}%` }}
                       />
                     </div>
@@ -477,9 +477,9 @@ export default function PhishingDetect() {
                   key="empty"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  className="bg-card rounded-[24px] p-8 flex flex-col items-center justify-center min-h-[280px] text-center"
+                  className="mono-card p-8 flex flex-col items-center justify-center min-h-[280px] text-center"
                 >
-                  <div className="w-16 h-16 rounded-2xl bg-accent/8 flex items-center justify-center text-2xl mb-4">
+                  <div className="w-16 h-16 border border-ink flex items-center justify-center text-2xl mb-4">
                     🛡️
                   </div>
                   <p className="text-sm text-ink-soft">输入检测目标，即时获取钓鱼风险评估</p>
@@ -490,15 +490,15 @@ export default function PhishingDetect() {
 
             {/* 最近检测 */}
             {history.length > 0 && (
-              <div className="bg-card rounded-[24px] p-6">
+              <div className="mono-card p-6">
                 <p className="text-xs font-semibold text-ink-soft mb-3">最近检测</p>
                 <div className="space-y-2.5">
                   {history.map((h) => (
                     <div key={h.id} className="flex items-center gap-3 text-xs">
                       <span className={`shrink-0 w-2 h-2 rounded-full ${
-                        h.risk_level === 'phishing' ? 'bg-[#ff3b30]'
-                        : h.risk_level === 'suspicious' ? 'bg-[#ff9f0a]'
-                        : 'bg-[#34c759]'
+                        h.risk_level === 'phishing' ? 'bg-ink'
+                        : h.risk_level === 'suspicious' ? 'bg-nong'
+                        : 'bg-hui'
                       }`} />
                       <span className="text-ink-faint shrink-0">
                         {typeIcon[h.detection_type] || '🔍'}

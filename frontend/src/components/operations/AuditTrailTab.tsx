@@ -127,7 +127,7 @@ export function AuditTrailTab() {
           ) : filtered.length === 0 ? (
             <EmptyState icon="📜" title="没有匹配的审计记录" />
           ) : (
-            <div className="bg-white border border-line rounded-2xl overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-white border border-line rounded-none overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-[10px] uppercase tracking-wide text-ink-faint text-left bg-black/[0.02]">
@@ -191,7 +191,7 @@ export function AuditTrailTab() {
         {/* 详情面板 */}
         <div className="self-start xl:sticky xl:top-16">
           {selected ? (
-            <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
+            <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
               <div>
                 <p className="text-[11px] font-medium text-ink-faint uppercase tracking-wide">操作人</p>
                 <p className="text-sm font-medium text-ink mt-1">
@@ -245,7 +245,7 @@ export function AuditTrailTab() {
               )}
             </div>
           ) : (
-            <div className="bg-white border border-line rounded-2xl p-8 text-center shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-white border border-line rounded-none p-8 text-center shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <p className="text-sm text-ink-faint">📋 点击左侧记录</p>
               <p className="text-xs text-ink-faint mt-1">查看完整 before/after 快照</p>
             </div>

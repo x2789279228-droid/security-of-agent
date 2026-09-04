@@ -1,7 +1,7 @@
 package com.soc.job;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import com.soc.util.KafkaConfig;
 import com.soc.util.TraceIdHeaderProvider;
 import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;

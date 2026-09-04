@@ -26,6 +26,6 @@ export const ROUTES = {
   CAPABILITIES: '/capabilities',
 } as const
 
-/** Apple Intelligence 流动渐变 — 运营中心签名色 */
-export const AI_GRADIENT = 'linear-gradient(120deg, #0A84FF 0%, #5E5CE6 26%, #BF5AF2 52%, #FF375F 76%, #FF9F0A 100%)'
-export const AI_GRADIENT_STOPS = ['#0A84FF', '#5E5CE6', '#BF5AF2', '#FF375F', '#FF9F0A']
+/** 单色极简 — 运营中心签名（灰阶） */
+export const AI_GRADIENT = 'linear-gradient(120deg, #111111 0%, #555555 50%, #c8c8c8 100%)'
+export const AI_GRADIENT_STOPS = ['#111111', '#333333', '#555555', '#888888', '#c8c8c8']

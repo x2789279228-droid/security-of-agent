@@ -71,7 +71,7 @@ async def llm_narrate_correlation(
             {"role": "system", "content": render("security/edr_correlation_system")},
             {"role": "user", "content": prompt},
         ],
-        budget_cost_jpy=0.05,
+        budget_cost_yuan=0.05,
     )
 
     if result:

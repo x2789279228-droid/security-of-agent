@@ -22,6 +22,14 @@ RUN mvn package -DskipTests -B
 # ── 阶段 2: Flink 运行时 ──
 FROM flink:1.20.5-scala_2.12-java11
 
+# 安装守护脚本依赖: curl(JM REST 探测) + jq(JSON 解析)。
+# flink 基础镜像为精简 debian, 默认用户 flink 无 sudo; 需切 root 用 apt-get 安装后切回。
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl jq \
+    && rm -rf /var/lib/apt/lists/*
+USER flink
+
 # 复制构建好的 JAR 到 Flink lib 目录
 COPY --from=builder /build/target/flink-jobs-1.0.0.jar /opt/flink/lib/
 
@@ -32,6 +40,10 @@ COPY --from=builder /build/target/kafka-deps/ /opt/flink/lib/
 # 复制 RocksDB 状态后端 + Prometheus 指标扩展
 COPY --from=builder /build/extra-lib/ /opt/flink/lib/
 
-# 复制作业提交脚本
+# 复制作业提交脚本与守护提交脚本
 COPY submit-jobs.sh /opt/flink/submit-jobs.sh
-RUN chmod +x /opt/flink/submit-jobs.sh
+COPY auto-submit.sh /opt/flink/auto-submit.sh
+# 脚本需可执行(README/守护使用)
+USER root
+RUN chmod +x /opt/flink/submit-jobs.sh /opt/flink/auto-submit.sh
+USER flink

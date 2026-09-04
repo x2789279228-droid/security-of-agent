@@ -1,17 +1,17 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { PageTransition } from '../components/common/PageTransition'
+import { PageFrame } from '../components/common/PageFrame'
 import { api } from '../lib/api'
 import type { SecurityLog, Severity } from '../types'
 
 const SEVERITIES: Severity[] = ['critical', 'high', 'medium', 'low', 'info']
 
 const severityMeta: Record<Severity, { label: string; badge: string; dot: string }> = {
-  critical: { label: '严重', badge: 'bg-[#ff3b30]/10 text-[#ff3b30]', dot: 'bg-[#ff3b30]' },
-  high: { label: '高危', badge: 'bg-[#ff9f0a]/12 text-[#c77700]', dot: 'bg-[#ff9f0a]' },
-  medium: { label: '中危', badge: 'bg-[#0071e3]/10 text-[#0071e3]', dot: 'bg-[#0071e3]' },
-  low: { label: '低危', badge: 'bg-[#34c759]/10 text-[#248a3d]', dot: 'bg-[#34c759]' },
-  info: { label: '提示', badge: 'bg-black/[0.05] text-ink-soft', dot: 'bg-[#86868b]' },
+  critical: { label: '严重', badge: 'bg-ink text-white', dot: 'bg-white' },
+  high: { label: '高危', badge: 'bg-nong text-white', dot: 'bg-white' },
+  medium: { label: '中危', badge: 'bg-hui text-white', dot: 'bg-white' },
+  low: { label: '低危', badge: 'bg-qing text-ink', dot: 'bg-ink' },
+  info: { label: '提示', badge: 'bg-mist text-ink-faint', dot: 'bg-hui' },
 }
 
 const PAGE_SIZE = 100
@@ -118,19 +118,16 @@ export default function Logs() {
   }, [logs])
 
   return (
-    <PageTransition>
-      <div className="max-w-6xl mx-auto px-6 pt-14 pb-16">
-        {/* 页头 */}
-        <div className="flex items-end justify-between mb-10">
-          <div>
-            <h1 className="text-4xl font-semibold tracking-tight text-ink">日志中心</h1>
-            <p className="text-[15px] text-ink-soft mt-2">已接入安全事件 · 按时间倒序 · 实时推送</p>
-          </div>
-          <span className={`flex items-center gap-2 text-[13px] ${connected ? 'text-[#248a3d]' : 'text-alert'}`}>
-            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-[#34c759] animate-pulse' : 'bg-alert'}`} />
-            {connected ? '实时连接' : '已断开'}
-          </span>
-        </div>
+    <PageFrame
+      title="日志中心"
+      subtitle="已接入安全事件 · 按时间倒序 · 实时推送"
+      extra={
+        <span className="flex items-center gap-2 text-[13px] text-ink">
+          <span className={`w-2 h-2 ${connected ? 'bg-ink' : 'bg-hui'}`} />
+          {connected ? '实时连接' : '已断开'}
+        </span>
+      }
+    >
 
         {/* 严重级别统计卡（可点击筛选） */}
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
@@ -143,8 +140,8 @@ export default function Logs() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.4, delay: i * 0.05 }}
                 onClick={() => setSeverity(active ? '' : s)}
-                className={`bg-card rounded-2xl p-5 text-left transition-all hover:shadow-[0_8px_24px_rgba(0,0,0,0.07)] ${
-                  active ? 'ring-2 ring-accent' : ''
+                className={`border p-5 text-left transition-colors ${
+                  active ? 'border-ink bg-ink text-white' : 'border-line bg-white hover:bg-mist'
                 }`}
               >
                 <span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${severityMeta[s].badge}`}>
@@ -169,12 +166,12 @@ export default function Logs() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="搜索事件类型 / 消息 / IP…"
-              className="w-full text-sm pl-10 pr-4 py-2.5 rounded-full border border-line bg-card text-ink outline-none focus:border-accent focus:shadow-[0_0_0_4px_rgba(0,113,227,0.1)] transition-all"
+              className="w-full text-sm pl-10 pr-4 py-2.5 rounded-none border-0 border-b border-line bg-transparent text-ink outline-none focus:border-ink"
             />
           </div>
           <button
             onClick={() => load(true, 0)}
-            className="px-5 py-2.5 text-sm bg-accent text-white rounded-full hover:bg-accent-hover transition-colors"
+            className="px-5 py-2.5 text-sm bg-ink text-white rounded-none hover:bg-accent-hover transition-colors tracking-[0.12em]"
           >
             刷新
           </button>
@@ -189,11 +186,11 @@ export default function Logs() {
         ) : error ? (
           <div className="text-center text-sm text-alert py-20">{error}</div>
         ) : filtered.length === 0 ? (
-          <div className="text-center text-sm text-ink-faint py-20 bg-card rounded-[20px]">
+          <div className="text-center text-sm text-ink-faint py-20 border border-line">
             {search || severity ? '没有符合筛选条件的日志' : '暂无日志，等待事件接入…'}
           </div>
         ) : (
-          <div className="bg-card rounded-[20px] overflow-hidden">
+          <div className="border border-line overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-[13px]">
                 <thead>
@@ -240,9 +237,9 @@ export default function Logs() {
                           </td>
                           <td className="px-5 py-3 whitespace-nowrap">
                             {log.analyzed ? (
-                              <span className="text-[#248a3d] text-[11px] font-semibold">✓ 已审计</span>
+                              <span className="text-ink text-[11px] font-semibold">已审计</span>
                             ) : (
-                              <span className="text-[#c77700] text-[11px] font-semibold">● 审核中</span>
+                              <span className="text-ink-faint text-[11px] font-semibold">审核中</span>
                             )}
                           </td>
                           <td className="px-5 py-3 text-ink-faint whitespace-nowrap tabular-nums text-xs">
@@ -266,7 +263,6 @@ export default function Logs() {
             )}
           </div>
         )}
-      </div>
-    </PageTransition>
+    </PageFrame>
   )
 }

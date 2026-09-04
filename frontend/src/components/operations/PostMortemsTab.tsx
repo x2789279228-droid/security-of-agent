@@ -80,7 +80,7 @@ export function PostMortemsTab() {
   return (
     <div className="space-y-8">
       {/* 生成复盘 */}
-      <section className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <section className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <h3 className="text-sm font-semibold text-ink tracking-tight mb-1">生成复盘报告</h3>
         <p className="text-xs text-ink-faint mb-4">从已解决/已关闭的案例自动生成复盘草稿：时间线 + 误报统计 + LLM 根因分析</p>
         <div className="flex gap-2">
@@ -123,7 +123,7 @@ export function PostMortemsTab() {
                   initial={{ opacity: 0, y: 16 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ ...spring.ui, delay: Math.min(i * 0.04, 0.3) }}
-                  className="bg-white border border-line rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] overflow-hidden"
+                  className="bg-white border border-line rounded-none shadow-[0_1px_3px_rgba(0,0,0,0.04)] overflow-hidden"
                 >
                   <button
                     onClick={() => setExpanded(isOpen ? null : c.id)}

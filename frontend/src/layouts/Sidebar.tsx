@@ -23,7 +23,7 @@ export function Sidebar() {
   const navigate = useNavigate()
 
   return (
-    <aside className="fixed left-0 top-0 bottom-0 z-50 w-48 bg-white border-r border-line flex flex-col">
+    <aside className="fixed left-0 top-0 bottom-0 z-50 w-48 bg-surface border-r border-line flex flex-col">
       <div className="px-4 pt-5 pb-4 border-b border-line">
         <p className="font-bold text-sm tracking-wide">共享记忆</p>
         <p className="text-[10px] text-ink-faint font-sans mt-0.5">Service Layer</p>
@@ -37,8 +37,8 @@ export function Sidebar() {
               onClick={() => navigate(tab.path)}
               className={`relative flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-sans font-medium transition-colors will-change-transform ${
                 active
-                  ? 'bg-accent/10 text-accent'
-                  : 'text-ink-soft hover:bg-gray-50 hover:text-ink'
+                  ? 'bg-ink text-white'
+                  : 'text-ink-soft hover:bg-mist hover:text-ink'
               }`}
             >
               {active && (

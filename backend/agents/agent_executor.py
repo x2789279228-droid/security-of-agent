@@ -48,12 +48,19 @@ class Executor:
     ) -> AuditResult:
         start_time = time.time()
         all_results: list[ToolResult] = []
+        raw_event = raw_event or {}
+        triage = raw_event.get("_audit_triage") or {}
+        skip_llm = bool(triage.get("skip_llm")) or str(triage.get("lane") or "") in (
+            "tools_only", "rule_close",
+        )
 
         # 1. 分离工具调用（data 工具 vs LLM 工具）
         data_calls = [tc for tc in tool_calls
                       if tc.tool not in ("llm.deep_analyze", "llm.recheck")]
         deep_calls = [tc for tc in tool_calls if tc.tool == "llm.deep_analyze"]
         recheck_calls = [tc for tc in tool_calls if tc.tool == "llm.recheck"]
+        if skip_llm:
+            deep_calls, recheck_calls = [], []
 
         # 2. 并行执行 data 工具
         if data_calls:
@@ -67,6 +74,17 @@ class Executor:
         # 4. Chunker 分块
         audit_chunks = chunker.chunk(events, chain_event_ids=chain_ids)
         logger.info(f"Executor: split into {len(audit_chunks)} chunks for audit")
+
+        # tools_only: 跳过 SubAuditor/synthesize,用非 LLM 信号确定性收口
+        # (真正释放 LLM 通道给 P0/P1)
+        if skip_llm:
+            logger.info(
+                f"Executor: tools_only/skip_llm tier={triage.get('tier')} "
+                f"— deterministic verdict, no SubAuditor"
+            )
+            return self._deterministic_from_non_llm(
+                raw_event, all_results, depth=depth,
+            )
 
         # 4b. 提取 RAG 知识片段，下发到 SubAuditor 用于 Layer 4 校验
         knowledge_chunks = self._extract_knowledge_chunks(all_results)
@@ -200,7 +218,54 @@ class Executor:
                     duration_ms=round(duration, 1),
                 )
 
-        return await asyncio.gather(*[execute_one(tc) for tc in tool_calls])
+        # return_exceptions=True：任何意外异常都不拖垮整批工具调用，
+        # 与 _audit_chunks_parallel 的写法保持一致
+        raw_results = await asyncio.gather(
+            *[execute_one(tc) for tc in tool_calls], return_exceptions=True
+        )
+        finalized: list[ToolResult] = []
+        for tc, r in zip(tool_calls, raw_results):
+            if isinstance(r, Exception):
+                logger.warning(f"Tool {tc.tool} ({tc.call_id}) crashed: {r}")
+                finalized.append(ToolResult(
+                    call_id=tc.call_id, task_id=tc.task_id,
+                    tool=tc.tool, success=False, error=str(r),
+                ))
+            else:
+                finalized.append(r)
+        return finalized
+
+    @staticmethod
+    def _normalize_event(item: dict) -> dict | None:
+        """
+        规整单条事件, 确保落入 chunker/SubAuditor 的每条事件都携带可在
+        evidence_ids 中引用的规范 `id`(并补 `event_id` 别名)及分块所需元数据。
+
+        - 优先采用已有 int 主键 `id`; 无可信主键时尝试回填 `event_id`/`_id` 为 int。
+        - 无任何 id 的事件本身不可被 CAD 穿透引用 → 静默喂进审计块会落到 0-0/1.0
+          误判, 故返回 None 交由上层日志暴露。
+        """
+        if not isinstance(item, dict):
+            return None
+        event = dict(item)
+        raw_id = event.get("id", event.get("event_id", event.get("_id")))
+        try:
+            int_id = int(raw_id)
+        except (TypeError, ValueError):
+            int_id = None
+        if int_id is None:
+            logger.warning(
+                "Executor: 跳过无可用 id 的事件(无法被 CAD 穿透验证/引用) type="
+                f"{event.get('type', event.get('event_type', '?'))} raw_id={raw_id!r}"
+            )
+            return None
+        event["id"] = int_id
+        event["event_id"] = event.get("event_id", int_id)
+        # 分块提示与 Grounding 所需的规范字段(缺省补齐)
+        event.setdefault("event_type", event.get("type", "?"))
+        event.setdefault("severity", "info")
+        event.setdefault("created_at", "")
+        return event
 
     def _extract_events(
         self, results: list[ToolResult]
@@ -219,7 +284,9 @@ class Executor:
             if r.tool == "event_store.query" and isinstance(r.data, list):
                 for item in r.data:
                     if isinstance(item, dict):
-                        events.append(item)
+                        norm = self._normalize_event(item)
+                        if norm is not None:
+                            events.append(norm)
 
             # correlation.chains 返回的攻击链
             if r.tool == "correlation.chains" and isinstance(r.data, list):
@@ -382,6 +449,64 @@ class Executor:
         except Exception as e:
             logger.warning(f"Knowledge verification failed: {e}")
             return {"verified": False, "supported": 0, "unsupported": 0, "risk": 0.0}
+
+    def _deterministic_from_non_llm(
+        self,
+        raw_event: dict,
+        tool_results: list,
+        depth: str = "",
+    ) -> AuditResult:
+        """tools_only 车道: 不调 LLM,用 Sigma/异常/类型信号生成确定性结论。"""
+        from veto_gates import extract_non_llm_signals, apply_confirmation_gate
+
+        signals = extract_non_llm_signals(
+            raw_event, tool_results=tool_results,
+            anomaly_score=float(
+                (raw_event.get("_anomaly") or {}).get("score")
+                or raw_event.get("anomaly_score")
+                or 0
+            ),
+        )
+        sigma = raw_event.get("_sigma") or {}
+        threat = bool(signals.has_signal or sigma.get("detected"))
+        conf = 0.0
+        if signals.anomaly_score:
+            conf = max(conf, float(signals.anomaly_score))
+        if sigma.get("detected"):
+            conf = max(conf, 0.55)
+            if str(sigma.get("max_severity") or "").lower() == "critical":
+                conf = max(conf, 0.75)
+        if signals.type_signal:
+            conf = max(conf, 0.5)
+        decision = apply_confirmation_gate(
+            llm_threat_detected=threat,
+            llm_abstain=not threat,
+            signals=signals,
+            has_admitted_claims=threat,
+            extra_human=False,
+        )
+        et = str(
+            raw_event.get("threat_type")
+            or raw_event.get("event")
+            or raw_event.get("type")
+            or ""
+        )
+        return AuditResult(
+            threat_detected=decision.threat_detected,
+            threat_type=et if decision.threat_detected else "",
+            confidence=round(min(1.0, conf), 4),
+            severity=str(raw_event.get("severity") or "info"),
+            summary=(
+                f"tools_only 确定性结论: signals={signals.reasons[:3]} "
+                f"verdict={decision.verdict}"
+            ),
+            needs_human_review=decision.needs_human_review,
+            verdict=decision.verdict,
+            tool_results=list(tool_results or []),
+            non_llm_signals=signals.to_dict(),
+            hop_trace=[{"hop": "tools_only", "skip_llm": True}],
+            schema_valid=True,
+        )
 
     async def _audit_chunks_parallel(
         self,
@@ -607,6 +732,19 @@ class Executor:
             },
             {"role": "user", "content": prompt},
         ])
+
+        from agents.llm_fallback import is_llm_fallback
+        is_fb, fb_reason = is_llm_fallback(result)
+        if is_fb:
+            logger.warning(f"Synthesis LLM fallback (no retry): {fb_reason}")
+            any_threat = any(getattr(v, "threat_detected", False) for v in (verdicts or []))
+            return AuditResult(
+                threat_detected=any_threat,
+                verdict="insufficient_evidence",
+                summary=f"汇总降级: {fb_reason}",
+                needs_human_review=True,
+                confidence=0.2 if any_threat else 0.0,
+            )
 
         # 结构化验证（Pydantic）
         from audit_schemas import validate_synthesis_output

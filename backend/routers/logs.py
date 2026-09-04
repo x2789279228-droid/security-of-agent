@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from models import get_session, SecurityEvent, Memory
 from auth import get_current_user, RequireRole, UserInfo
+from audit_trail import log_from_request
 from log_ingestion import log_ingestor
 from source_registry import source_registry
 from vector_store import vector_store
@@ -183,8 +184,10 @@ async def stuck_events(
 
 @router.post("/logs/reset-stuck")
 async def reset_stuck(
+    request: Request,
     minutes: int = Query(5, description="超过多少分钟未分析视为卡住"),
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(get_current_user),
 ):
     """将所有卡住的事件标记为已分析（含错误标记），释放管道"""
     from datetime import timedelta
@@ -198,11 +201,22 @@ async def reset_stuck(
     count = 0
     for e in rows:
         e.analyzed = True
-        if e.raw_data is None:
-            e.raw_data = {}
-        e.raw_data["_audit_llm_error"] = "reset_by_admin"
+        raw = dict(e.raw_data or {})
+        raw["_audit_llm_error"] = "reset_by_admin"
+        audit = dict(raw.get("_audit_llm") or {})
+        audit["status"] = "failed"
+        audit["error"] = "reset_by_admin"
+        audit["note"] = "stuck event reset by admin/scheduler"
+        raw["_audit_llm"] = audit
+        e.raw_data = raw
         count += 1
     await session.commit()
+    await log_from_request(
+        session, request, user, action="logs.reset_stuck",
+        target_type="security_event", target_id="*",
+        after={"reset_count": count, "minutes": minutes},
+        reason="批量重置卡住事件的分析状态",
+    )
     return {"reset_count": count}
 
 @router.get("/logs/events")
@@ -256,10 +270,15 @@ async def list_memories(
 @router.delete("/memories/{memory_id}")
 async def delete_memory(
     memory_id: int,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: UserInfo = Depends(RequireRole("operator")),
 ):
     ok = await vector_store.delete_memory(session, memory_id)
     if not ok:
         raise HTTPException(404, "Memory not found")
+    await log_from_request(
+        session, request, user, action="memory.delete",
+        target_type="memory", target_id=str(memory_id),
+    )
     return {"deleted": True}

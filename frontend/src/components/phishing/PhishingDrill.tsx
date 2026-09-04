@@ -30,8 +30,8 @@ interface Drill {
 
 const statusStyle: Record<string, { bg: string; text: string; label: string }> = {
   draft: { bg: 'bg-black/[0.05]', text: 'text-ink-soft', label: '草稿' },
-  running: { bg: 'bg-[#0071e3]/10', text: 'text-[#0071e3]', label: '进行中' },
-  completed: { bg: 'bg-[#34c759]/10', text: 'text-[#248a3d]', label: '已完成' },
+  running: { bg: 'bg-nong', text: 'text-white', label: '进行中' },
+  completed: { bg: 'bg-ink', text: 'text-white', label: '已完成' },
 }
 
 export default function PhishingDrill() {

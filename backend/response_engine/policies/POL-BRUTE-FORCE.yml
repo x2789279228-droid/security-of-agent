@@ -1,0 +1,19 @@
+id: POL-BRUTE-FORCE
+name: 暴力破解自动阻断
+enabled: true
+description: 暴力破解：封禁IP30分钟 + 告警
+match:
+  threat_type: BRUTE_FORCE
+  min_confidence: 0.5
+  min_severity: medium
+actions:
+- name: block_ip
+  params:
+    duration_minutes: 30
+- name: send_alert
+  params:
+    severity: high
+auto_execute: true
+require_approval: false
+priority: 80
+cooldown_minutes: 15

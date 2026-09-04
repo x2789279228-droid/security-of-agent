@@ -47,7 +47,7 @@ async def rag_search(
     """检索安全知识库"""
     query_embedding = None
     if req.query:
-        query_embedding = await embedder.embed(req.query)
+        query_embedding = await embedder.embed(req.query, type_="query")  # 不对称检索: 查询查库
     result = await retriever.retrieve(
         session,
         query=req.query,
@@ -264,7 +264,7 @@ async def rag_verify_claim(
 
     query_embedding = None
     if claim:
-        query_embedding = await embedder.embed(claim)
+        query_embedding = await embedder.embed(claim, type_="query")  # 不对称检索
 
     report = await evidence_verifier.verify_claim(
         session, claim, threat_type, severity, query_embedding,
@@ -417,7 +417,7 @@ async def eval_rag_auto(
 
     query_embedding = None
     try:
-        query_embedding = await embedder.embed(req.query)
+        query_embedding = await embedder.embed(req.query, type_="query")  # 不对称检索: 查询查库
     except Exception:
         pass
     result = await retriever.retrieve(

@@ -99,7 +99,11 @@ class AnomalyDetector:
 
             # 加载实体基线
             for entity_type in ("src_ip", "dst_ip", "event_type"):
-                keys = await self.redis.keys(f"{self._redis_prefix}{entity_type}:*")
+                pattern = f"{self._redis_prefix}{entity_type}:*"
+                # SCAN 分批迭代：键空间大时 KEYS 会阻塞 Redis 单线程
+                keys = [
+                    key async for key in self.redis.scan_iter(match=pattern, count=500)
+                ]
                 for key in keys:
                     data = await self.redis.get(key)
                     if data:
@@ -233,13 +237,24 @@ class AnomalyDetector:
 
         return min(sigma, 10.0)  # 限制最大值
 
+    def _event_type_share(self, event_type: str) -> float:
+        """事件类型在全局统计中的占比（分母与 _calc_event_rarity 同口径）。"""
+        total = sum(self.global_hourly_counts)
+        if total <= 0:
+            return 0.0
+        return self.global_event_types.get(event_type, 0) / total
+
     def _calc_event_rarity(self, event_type: str) -> float:
         """
         计算事件类型的罕见程度
-        
-        越罕见 → 分数越高 → 越可能是异常
+
+        越罕见 → 分数越高 → 越可能是异常。
+        分子是 7 天窗口的累计类型计数，分母必须用同口径的全局总数
+        （24 个小时桶合计）。此前误用单个小时桶 global_hourly_counts[0]，
+        分母典型缩小约 24 倍 → ratio 放大 → rarity 几乎恒为 0，
+        且随 UTC 钟点漂移、冷启动后未经历 0 点段时恒为 0。
         """
-        total = self.global_hourly_counts[0]  # 近似的总计数
+        total = sum(self.global_hourly_counts)
         if total < 10:
             return 0.0
 
@@ -320,7 +335,10 @@ class AnomalyDetector:
             dimensions["rarity"] = rarity
             total_score += rarity * 0.20
             if rarity > 0.8:
-                reasons.append(f"罕见事件类型: {event_type} (出现率<1%)")
+                reasons.append(
+                    f"罕见事件类型: {event_type} "
+                    f"(出现率约 {self._event_type_share(event_type):.2%})"
+                )
 
         # 3. 时序异常
         temporal = self._calc_temporal_anomaly(hour)

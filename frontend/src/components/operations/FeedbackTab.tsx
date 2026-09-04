@@ -70,7 +70,7 @@ export function FeedbackTab() {
       {/* 左：提交反馈 */}
       <div>
         <h3 className="text-sm font-semibold text-ink tracking-tight mb-4">提交反馈</h3>
-        <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
+        <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div>
               <FieldLabel>事件 ID（可选）</FieldLabel>
@@ -158,7 +158,7 @@ export function FeedbackTab() {
                 initial={{ opacity: 0, y: 14 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ ...spring.ui, delay: i * 0.05 }}
-                className="bg-white border border-line rounded-2xl px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+                className="bg-white border border-line rounded-none px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
               >
                 <div className="flex items-center gap-2 mb-2">
                   <SeverityChip severity={s.severity} />
@@ -190,18 +190,18 @@ export function FeedbackTab() {
           <div className="space-y-4">
             {/* 总体指标 */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-white border border-line rounded-2xl px-5 py-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="bg-white border border-line rounded-none px-5 py-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <p className="text-[11px] font-medium text-ink-faint mb-2">整体误报率</p>
                 <GradientNumber value={fpPct} suffix="%" />
               </div>
-              <div className="bg-white border border-line rounded-2xl px-5 py-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="bg-white border border-line rounded-none px-5 py-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <p className="text-[11px] font-medium text-ink-faint mb-2">反馈总数</p>
                 <GradientNumber value={stats?.total_feedback ?? 0} />
               </div>
             </div>
 
             {/* 分类计数 */}
-            <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <div className="grid grid-cols-4 gap-3 text-center">
                 <CountStat label="误报" value={stats?.false_positive ?? 0} color="#FF375F" />
                 <CountStat label="确认" value={stats?.true_positive ?? 0} color="#34c759" />
@@ -211,7 +211,7 @@ export function FeedbackTab() {
             </div>
 
             {/* 按规则 FP 率 */}
-            <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <p className="text-[11px] font-semibold text-ink-faint uppercase tracking-wide mb-4">按规则误报率</p>
               {ruleEntries.length === 0 ? (
                 <p className="text-xs text-ink-faint py-4 text-center">暂无按规则的反馈数据</p>

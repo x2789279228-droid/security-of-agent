@@ -1,27 +1,27 @@
 import { motion, type HTMLMotionProps } from 'framer-motion'
-import { spring } from '../../lib/constants'
 
 interface ButtonProps extends HTMLMotionProps<'button'> {
-  variant?: 'primary' | 'ghost' | 'danger'
+  variant?: 'primary' | 'ghost' | 'danger' | 'outline' | 'underline'
 }
 
-/** Apple 风胶囊按钮 */
+/** 对齐参考图四种按钮：实心 / 描边 / 下划线 / 纯文本，全部直角 */
 export function Button({ variant = 'primary', className = '', children, ...props }: ButtonProps) {
   const base =
-    'inline-flex items-center justify-center cursor-pointer font-sans font-normal text-sm rounded-full whitespace-nowrap transition-colors will-change-transform'
+    'inline-flex items-center justify-center cursor-pointer text-[14px] tracking-[0.12em] whitespace-nowrap transition-colors rounded-none box-border'
 
   const variants = {
-    primary: 'bg-accent text-white px-5 py-2 hover:bg-accent-hover',
-    ghost:
-      'bg-transparent text-accent border border-accent px-5 py-2 hover:bg-accent hover:text-white',
-    danger: 'bg-alert text-white px-5 py-2 hover:bg-[#ff453a]',
+    primary: 'h-9 bg-ink text-white px-5 hover:bg-accent-hover',
+    outline: 'h-9 bg-white text-ink border-2 border-ink px-5 hover:bg-ink hover:text-white',
+    underline: 'h-9 bg-transparent text-ink border-b-2 border-ink px-1 hover:opacity-70',
+    ghost: 'h-9 bg-transparent text-ink px-3 hover:opacity-70',
+    danger: 'h-9 bg-ink text-white px-5 hover:bg-accent-hover',
   }
 
   return (
     <motion.button
       className={`${base} ${variants[variant]} ${className}`}
-      whileTap={{ scale: 0.97 }}
-      transition={spring.ui}
+      whileTap={{ opacity: 0.85 }}
+      transition={{ duration: 0.12 }}
       {...props}
     >
       {children as React.ReactNode}
@@ -29,7 +29,6 @@ export function Button({ variant = 'primary', className = '', children, ...props
   )
 }
 
-/** Apple 风文本链接（带 › 箭头） */
 export function TextLink({
   children,
   className = '',
@@ -37,12 +36,11 @@ export function TextLink({
 }: HTMLMotionProps<'button'>) {
   return (
     <motion.button
-      className={`inline-flex items-center gap-0.5 cursor-pointer text-sm text-link hover:underline font-sans ${className}`}
-      whileTap={{ scale: 0.97 }}
+      className={`inline-flex items-center gap-1 cursor-pointer text-[14px] text-ink border-b-2 border-ink pb-0.5 tracking-[0.08em] ${className}`}
+      whileTap={{ opacity: 0.85 }}
       {...props}
     >
       {children as React.ReactNode}
-      <span aria-hidden className="text-base leading-none translate-y-[-0.5px]">›</span>
     </motion.button>
   )
 }

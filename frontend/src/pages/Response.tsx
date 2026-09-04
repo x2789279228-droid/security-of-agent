@@ -21,8 +21,8 @@ function classNames(...classes: (string | false | undefined | null)[]) {
 function Collapse({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="border border-line rounded-lg overflow-hidden">
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 text-sm font-medium text-ink">
+    <div className="border border-line overflow-hidden">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-4 py-2.5 bg-mist text-sm font-medium text-ink">
         {title}
         <span className={`transition-transform ${open ? 'rotate-180' : ''}`}>▼</span>
       </button>
@@ -112,21 +112,20 @@ export default function Response() {
 
   const severityColor = (sev: string) => {
     switch (sev) {
-      case 'critical': return 'text-red-600 bg-red-50 border-red-200'
-      case 'high': return 'text-orange-600 bg-orange-50 border-orange-200'
-      case 'medium': return 'text-yellow-600 bg-yellow-50 border-yellow-200'
-      default: return 'text-gray-600 bg-gray-50 border-gray-200'
+      case 'critical': return 'text-white bg-ink border-ink'
+      case 'high': return 'text-white bg-nong border-nong'
+      case 'medium': return 'text-ink bg-qing border-line'
+      default: return 'text-ink-faint bg-mist border-line'
     }
   }
 
   return (
     <PageTransition>
-      <div className="max-w-5xl mx-auto px-6 pt-14 pb-16">
-        <h1 className="text-4xl font-semibold tracking-tight text-ink">响应引擎</h1>
-        <p className="text-[15px] text-ink-soft mt-2 mb-8">Response Engine — 自动威胁响应 + 策略管理 + 审批流程 + 回滚</p>
+      <div className="page-shell pt-12 pb-20">
+        <h1 className="page-title">响应引擎</h1>
+        <p className="page-sub mb-8">自动威胁响应 · 策略管理 · 审批流程 · 回滚</p>
 
-        {/* Tab Bar — Apple 分段控件 */}
-        <div className="flex gap-1 mb-8 p-1 bg-black/[0.05] rounded-full w-fit">
+        <div className="flex flex-wrap gap-2 mb-8">
           {([
             { id: 'threats', label: '威胁模拟' },
             { id: 'policies', label: '响应策略' },
@@ -134,8 +133,8 @@ export default function Response() {
             { id: 'logs', label: '响应日志' },
           ] as { id: Tab; label: string }[]).map(tab => (
             <button key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.id === 'approvals') loadApprovals(); if (tab.id === 'logs') loadLogs() }}
-              className={classNames('px-5 py-2 text-[13px] font-medium rounded-full transition-all',
-                activeTab === tab.id ? 'bg-card text-ink shadow-[0_1px_4px_rgba(0,0,0,0.1)]' : 'text-ink-soft hover:text-ink')}>
+              className={classNames('px-4 py-2 text-[13px] tracking-[0.08em] border border-ink',
+                activeTab === tab.id ? 'bg-ink text-white' : 'bg-transparent text-ink hover:bg-ink hover:text-white')}>
               {tab.label}
             </button>
           ))}
@@ -149,7 +148,7 @@ export default function Response() {
               <div className="flex flex-wrap gap-2">
                 {THREAT_PRESETS.map(p => (
                   <button key={p.label} onClick={() => simulateThreat(p.value)}
-                    className="px-3 py-1.5 text-xs font-sans rounded-lg border border-line hover:bg-gray-50 transition-colors">
+                    className="px-3 py-1.5 text-xs font-sans rounded-none border border-line hover:bg-gray-50 transition-colors">
                     {p.label}
                   </button>
                 ))}
@@ -160,7 +159,7 @@ export default function Response() {
               <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">自定义威胁参数</label>
               <div className="flex items-center gap-3 mb-3">
                 <select defaultValue="C2_BEACON" id="threat-type-select"
-                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
                   <option value="C2_BEACON">C2回连</option>
                   <option value="DATA_EXFIL">数据外泄</option>
                   <option value="BRUTE_FORCE">暴力破解</option>
@@ -170,23 +169,23 @@ export default function Response() {
                   <option value="LATERAL_MOVE">横向移动</option>
                 </select>
                 <input type="text" placeholder="源IP" defaultValue="192.168.1.100" id="threat-ip-input"
-                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
                 <select id="threat-severity-select" defaultValue="high"
-                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
                   <option value="low">Low</option>
                   <option value="medium">Medium</option>
                   <option value="high">High</option>
                   <option value="critical">Critical</option>
                 </select>
                 <input type="text" placeholder="Session ID (可选)" value={sessionId} onChange={e => setSessionId(e.target.value)}
-                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
                 <button onClick={async () => {
                   const type = (document.getElementById('threat-type-select') as HTMLSelectElement)?.value || 'C2_BEACON'
                   const ip = (document.getElementById('threat-ip-input') as HTMLInputElement)?.value || '192.168.1.100'
                   const sev = (document.getElementById('threat-severity-select') as HTMLSelectElement)?.value || 'high'
                   await simulateThreat({ threat_type: type, confidence: 0.8, severity: sev, src_ip: ip, message: `模拟${type}事件` })
                 }} disabled={loading}
-                  className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                  className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-none hover:opacity-90 disabled:opacity-50">
                   {loading ? '执行中...' : '模拟威胁'}
                 </button>
               </div>
@@ -197,15 +196,15 @@ export default function Response() {
               <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">手动执行响应动作</label>
               <div className="flex items-center gap-3">
                 <select value={execAction} onChange={e => setExecAction(e.target.value)}
-                  className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                  className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
                   {actions.map(a => (
                     <option key={a.name} value={a.name}>{a.name} ({a.description})</option>
                   ))}
                 </select>
                 <input type="text" placeholder="目标IP" value={execTarget} onChange={e => setExecTarget(e.target.value)}
-                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
                 <button onClick={handleExecResponse} disabled={loading}
-                  className="px-4 py-2 text-xs font-sans font-medium bg-red-500 text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                  className="px-4 py-2 text-xs font-sans font-medium bg-red-500 text-white rounded-none hover:opacity-90 disabled:opacity-50">
                   执行
                 </button>
               </div>
@@ -216,15 +215,15 @@ export default function Response() {
               <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">回滚操作</label>
               <div className="flex items-center gap-3">
                 <input type="text" placeholder="回滚令牌" value={rollbackToken} onChange={e => setRollbackToken(e.target.value)}
-                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                  className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
                 <button onClick={handleRollback} disabled={loading || !rollbackToken}
-                  className="px-4 py-2 text-xs font-sans font-medium bg-orange-500 text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                  className="px-4 py-2 text-xs font-sans font-medium bg-orange-500 text-white rounded-none hover:opacity-90 disabled:opacity-50">
                   回滚
                 </button>
               </div>
             </div>
 
-            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-none text-xs text-red-700">{error}</div>}
             {result && <Collapse title="执行结果" defaultOpen>{JSON.stringify(result, null, 2)}</Collapse>}
           </div>
         )}
@@ -233,9 +232,9 @@ export default function Response() {
         {activeTab === 'policies' && (
           <div className="space-y-4">
             <div className="flex gap-2">
-              <button onClick={loadPolicies} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">刷新策略</button>
+              <button onClick={loadPolicies} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-none hover:bg-gray-200">刷新策略</button>
               <button onClick={async () => { try { await api.clearCooldowns(); setResult('冷却已清除') } catch (e: any) { setError(e.message) } }}
-                className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">清除冷却</button>
+                className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-none hover:bg-gray-200">清除冷却</button>
             </div>
             {policies.map((p, i) => (
               <Collapse key={p.name} title={`${p.name} [${p.threat_type}] auto=${p.auto_execute} approval=${p.require_approval}`} defaultOpen={i < 2}>
@@ -274,13 +273,13 @@ export default function Response() {
         {activeTab === 'approvals' && (
           <div className="space-y-4">
             <div className="flex gap-2">
-              <button onClick={loadApprovals} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">刷新审批</button>
+              <button onClick={loadApprovals} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-none hover:bg-gray-200">刷新审批</button>
             </div>
             {approvals.length === 0 ? (
               <div className="text-center text-xs text-ink-faint font-sans py-8">暂无待审批工单</div>
             ) : (
               approvals.map(t => (
-                <div key={t.id} className="border border-line rounded-lg p-4">
+                <div key={t.id} className="border border-line rounded-none p-4">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-sans font-semibold">{t.policy_name}</span>
                     <span className={classNames('px-2 py-0.5 text-[10px] font-sans rounded border', severityColor(t.severity))}>{t.severity}</span>
@@ -293,12 +292,12 @@ export default function Response() {
                   <div className="flex gap-2 mt-3">
                     <button onClick={async () => {
                       try { await api.approveTicket(t.id); await loadApprovals(); setResult(`工单 ${t.id} 已批准`) } catch (e: any) { setError(e.message) }
-                    }} className="px-3 py-1.5 text-[10px] font-sans font-medium bg-green-500 text-white rounded-lg hover:opacity-90">
+                    }} className="px-3 py-1.5 text-[10px] font-sans font-medium bg-green-500 text-white rounded-none hover:opacity-90">
                       批准
                     </button>
                     <button onClick={async () => {
                       try { await api.rejectTicket(t.id, '自动拒绝'); await loadApprovals(); setResult(`工单 ${t.id} 已拒绝`) } catch (e: any) { setError(e.message) }
-                    }} className="px-3 py-1.5 text-[10px] font-sans font-medium bg-red-400 text-white rounded-lg hover:opacity-90">
+                    }} className="px-3 py-1.5 text-[10px] font-sans font-medium bg-red-400 text-white rounded-none hover:opacity-90">
                       拒绝
                     </button>
                   </div>
@@ -313,21 +312,25 @@ export default function Response() {
         {activeTab === 'logs' && (
           <div className="space-y-4">
             <div className="flex gap-2">
-              <button onClick={loadLogs} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">刷新日志</button>
+              <button onClick={loadLogs} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-none hover:bg-gray-200">刷新日志</button>
             </div>
             {logs.length === 0 ? (
               <div className="text-center text-xs text-ink-faint font-sans py-8">暂无响应日志</div>
             ) : (
               <div className="space-y-2">
                 {logs.map(log => (
-                  <div key={log.id} className="flex items-start gap-3 p-3 border border-line rounded-lg">
+                  <div key={log.id} className="flex items-start gap-3 p-3 border border-line rounded-none">
                     <span className={classNames('shrink-0 w-2 h-2 mt-1.5 rounded-full', log.action_success ? 'bg-green-500' : 'bg-red-500')} />
                     <div className="flex-1 min-w-0 text-xs font-sans">
                       <p className="text-ink font-medium">
                         [{log.threat_type}] {log.action_name}
                         <span className={classNames('ml-2 px-1.5 py-0.5 rounded text-[10px]', severityColor(log.threat_severity))}>{log.threat_severity}</span>
                       </p>
-                      <p className="text-ink-faint mt-0.5">IP: {log.src_ip} | 策略: {log.policy_name} | 成功: {log.action_success ? '✅' : '❌'}</p>
+                      <p className="text-ink-faint mt-0.5">
+                        IP: {log.src_ip} | 策略: {log.policy_name} | 成功: {log.action_success ? '✅' : '❌'}
+                        {log.execution_mode ? (' | 模式: ' + log.execution_mode) : ''}
+                        {log.verified === false ? ' | 未校验' : ''}
+                      </p>
                       {log.rollback_token && <p className="text-ink-faint text-[10px]">回滚令牌: {log.rollback_token.slice(0, 24)}...</p>}
                       <p className="text-ink-faint text-[10px] mt-0.5">{log.created_at}</p>
                     </div>
@@ -341,7 +344,7 @@ export default function Response() {
         {/* Stats Button */}
         <div className="mt-8 pt-6 border-t border-line">
           <button onClick={loadPolicies}
-            className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">刷新响应引擎状态</button>
+            className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-none hover:bg-gray-200">刷新响应引擎状态</button>
         </div>
       </div>
     </PageTransition>

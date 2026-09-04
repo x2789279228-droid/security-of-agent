@@ -52,6 +52,15 @@ COMPLETENESS_EARLY_STOP = 0.3
 HIGH_RISK_EVENT_TYPES = {
     "C2_BEACON", "DATA_EXFIL", "MALWARE_DETECT",
     "RANSOMWARE", "LATERAL_MOVE", "PRIV_ESC",
+    "PRIVILEGE_ESCALATION", "COMMAND_INJECTION",
+}
+
+# 单事件审计严重度封顶：LLM 不得把扫描类抬到 critical
+SEVERITY_CEILING_BY_TYPE = {
+    "PORT_SCAN": "high",
+    "XSS_ATTACK": "high",
+    "DNS_QUERY": "medium",
+    "USER_LOGIN": "medium",
 }
 
 
@@ -122,6 +131,19 @@ def has_admitted_threat_claims(admitted: list[dict]) -> bool:
 # P0-3 非 LLM 信号 + confirmed 闸
 # ═══════════════════════════════════════════
 
+# 事件类型本身即可视为检测信号（结论型告警），避免无 Sigma 时 LLM 结论被抹除。
+# 注意: extract_non_llm_signals 会把事件类型 upper() 后比较，
+# 因此此处必须用全大写（历史上混写的 "DDoS_TRAFFIC" 永远无法命中）。
+TYPE_SIGNAL_EVENTS = frozenset({
+    "BRUTE_FORCE", "SSH_BRUTE", "C2_BEACON", "DATA_EXFIL",
+    "LATERAL_MOVE", "LATERAL_MOVEMENT", "PORT_SCAN", "MALWARE_DETECT",
+    "RANSOMWARE", "DDOS_TRAFFIC", "DDOS",
+    # v5 修复(C2):补齐词表缺口（此前「命令注入」/提权类永远拿不到 type_signal）
+    "COMMAND_INJECTION", "SQL_INJECTION", "XSS_ATTACK",
+    "PRIVILEGE_ESCALATION", "PRIV_ESC",
+})
+
+
 @dataclass
 class NonLlmSignals:
     sigma_hit: bool = False
@@ -130,6 +152,7 @@ class NonLlmSignals:
     anomaly_triggered: bool = False
     anomaly_score: float = 0.0
     ioc_hit: bool = False
+    type_signal: bool = False
     reasons: list[str] = field(default_factory=list)
 
     @property
@@ -139,6 +162,7 @@ class NonLlmSignals:
             or self.cep_chain
             or self.anomaly_triggered
             or self.ioc_hit
+            or self.type_signal
         )
 
     def to_dict(self) -> dict:
@@ -149,6 +173,7 @@ class NonLlmSignals:
             "anomaly_triggered": self.anomaly_triggered,
             "anomaly_score": round(self.anomaly_score, 4),
             "ioc_hit": self.ioc_hit,
+            "type_signal": self.type_signal,
             "has_signal": self.has_signal,
             "reasons": self.reasons[:8],
         }
@@ -171,6 +196,25 @@ def extract_non_llm_signals(
         signals.reasons.append(
             f"sigma:{sigma.get('rule_count', 1)}:{','.join(sigma.get('attack_types') or [])}"
         )
+
+    evt_type = str(
+        event.get("event") or event.get("event_type") or event.get("type") or ""
+    ).strip().upper().replace("-", "_").replace(" ", "_")
+    # v5 修复(C2):自然语言事件名(如「命令注入」/「C2 通信」)upper() 后仍是中文，
+    # 无法直接命中 ASCII 词表 — 先经 infer_threat_type 归一为标准枚举再匹配
+    if evt_type not in TYPE_SIGNAL_EVENTS:
+        try:
+            from correlation_engine import infer_threat_type
+            inferred = infer_threat_type(
+                str(event.get("event") or event.get("event_type") or event.get("type") or "")
+            )
+            if inferred:
+                evt_type = str(inferred).strip().upper()
+        except Exception:
+            pass
+    if evt_type in TYPE_SIGNAL_EVENTS:
+        signals.type_signal = True
+        signals.reasons.append(f"type_signal:{evt_type}")
 
     score = anomaly_score
     if score is None:
@@ -314,6 +358,93 @@ def _severity_index(sev: str) -> int:
         return 0
 
 
+def cap_reported_severity(
+    llm_severity: str,
+    *,
+    event_type: str = "",
+    event_severity: str = "",
+    sigma_severity: str = "",
+    has_chain: bool = False,
+) -> str:
+    """限制 LLM 相对原始事件/Sigma 的严重度抬升（最多 +1 级）。
+
+    无事件上下文时不改写（避免单测/缺字段路径误伤）。
+    PORT_SCAN 等扫描类即使有链，单事件审计仍不超过类型天花板。
+    """
+    llm = (llm_severity or "info").lower()
+    if llm not in SEVERITY_ORDER:
+        llm = "info"
+    if not (event_type or event_severity or sigma_severity):
+        return llm
+
+    base_idx = 0
+    for cand in (event_severity, sigma_severity):
+        base_idx = max(base_idx, _severity_index(cand))
+    max_idx = min(base_idx + 1, len(SEVERITY_ORDER) - 1)
+
+    et = (event_type or "").upper().replace("-", "_")
+    if et in HIGH_RISK_EVENT_TYPES:
+        max_idx = len(SEVERITY_ORDER) - 1
+    elif has_chain:
+        max_idx = max(max_idx, _severity_index("high"))
+
+    ceiling = SEVERITY_CEILING_BY_TYPE.get(et)
+    if ceiling:
+        max_idx = min(max_idx, _severity_index(ceiling))
+
+    return SEVERITY_ORDER[min(_severity_index(llm), max_idx)]
+
+
+def strip_phantom_mitre(merged: dict, evidence: str = "") -> dict:
+    """去掉证据中未出现的 ATT&CK 技术编号。"""
+    out = dict(merged or {})
+    evidence_u = (evidence or "").upper()
+
+    def _tid(item) -> str:
+        if isinstance(item, dict):
+            return str(item.get("id") or item.get("technique") or item.get("mitre_id") or "")
+        return str(item or "")
+
+    def _keep(tid: str) -> bool:
+        t = tid.upper().strip()
+        return bool(t) and t in evidence_u
+
+    techs = list(out.get("mitre_techniques") or out.get("techniques") or [])
+    kept = [t for t in techs if _keep(_tid(t))]
+    stripped = [_tid(t) for t in techs if _tid(t) and not _keep(_tid(t))]
+    phantoms = (out.get("faithfulness") or {}).get("phantom_entities") or []
+    mitre_phantoms = [
+        p for p in phantoms
+        if isinstance(p, str) and p.upper().startswith("T")
+    ]
+    out["mitre_techniques"] = kept
+    labeled = list(dict.fromkeys([s for s in stripped + mitre_phantoms if s]))
+    if labeled:
+        out["stripped_mitre"] = labeled
+    return out
+
+
+def sanitize_merged_audit(
+    merged: dict,
+    *,
+    evidence: str = "",
+    event_type: str = "",
+    event_severity: str = "",
+    sigma_severity: str = "",
+    has_chain: bool = False,
+) -> dict:
+    """程序化收口 LLM 合并结果：严重度封顶 + 剥离幻觉 MITRE。"""
+    out = dict(merged or {})
+    out["severity"] = cap_reported_severity(
+        out.get("severity") or "info",
+        event_type=event_type,
+        event_severity=event_severity,
+        sigma_severity=sigma_severity,
+        has_chain=has_chain,
+    )
+    return strip_phantom_mitre(out, evidence)
+
+
 def _median_severity(severities: list[str], cap: str = "medium") -> str:
     """无证据合并时取下中位数，并封顶 cap，禁止抬到 critical。"""
     if not severities:
@@ -359,6 +490,7 @@ def merge_audit_rounds(
             cep_chain=True,
             anomaly_triggered=signals.anomaly_triggered,
             anomaly_score=signals.anomaly_score,
+            type_signal=signals.type_signal,
             ioc_hit=signals.ioc_hit,
             reasons=list(signals.reasons) + ["round_non_llm_signal"],
         )

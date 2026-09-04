@@ -38,10 +38,13 @@ class AuditPipelineWorkflow:
         missed: List[dict] = []
         final_verdict_raw: Dict[str, Any] = {}
 
+        # r6 修复:单轮 900s×3 会把 TEMPORAL_CONCURRENCY 槽占死数十分钟。
+        # 下调到 300s、最多 2 次; short_circuit(预算耗尽)立即收口不再补审。
         retry_round = RetryPolicy(
-            initial_interval=timedelta(seconds=10),
-            maximum_interval=timedelta(seconds=300),
-            maximum_attempts=3,
+            initial_interval=timedelta(seconds=5),
+            maximum_interval=timedelta(seconds=60),
+            maximum_attempts=2,
+            non_retryable_error_types=["BudgetExhaustedError"],
         )
 
         for round_num in range(1, inp.max_rounds + 1):
@@ -59,10 +62,12 @@ class AuditPipelineWorkflow:
             rd = await workflow.execute_activity(
                 "audit_round",
                 args=[round_input],
-                start_to_close_timeout=timedelta(seconds=900),
+                start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=retry_round,
             )
             all_rounds.append(rd)
+            if rd.get("short_circuit"):
+                break
             missed = rd.get("missed_threats") or []
             if rd.get("verdict_full"):
                 final_verdict_raw = rd["verdict_full"]
@@ -89,14 +94,22 @@ class AuditPipelineWorkflow:
         )
 
         # 命中威胁 → 响应引擎
+        # v5 修复(A):触发条件与 async 路径(log_ingestion._audit_pipeline_inner)
+        # 对齐 — confirmed 与 faithfulness 软降级后的 suspicious(+threat=True)
+        # 都允许策略层处置; 此前仅 confirmed, 53 条软降级威胁永远不触发响应
         if (
-            merged.get("verdict") == "confirmed"
-            and merged.get("threat_detected")
+            merged.get("threat_detected")
+            and merged.get("verdict") in ("confirmed", "suspicious")
             and float(merged.get("confidence", 0) or 0) >= 0.4
             and not merged.get("response_blocked")
         ):
             threat_info = {
-                "threat_type": inp.log_data.get("event", inp.log_data.get("type", "UNKNOWN")),
+                "threat_type": (
+                    merged.get("threat_type")
+                    or inp.log_data.get("threat_type")
+                    or inp.log_data.get("event", inp.log_data.get("type", "UNKNOWN"))
+                ),
+                "event": inp.log_data.get("event", inp.log_data.get("type", "UNKNOWN")),
                 "confidence": merged.get("confidence", 0),
                 "severity": merged.get("severity", "info"),
                 "src_ip": inp.log_data.get("src_ip", ""),
@@ -117,10 +130,16 @@ class AuditPipelineWorkflow:
                 ),
             )
 
-        # CAD 独立审计
+        # CAD 独立审计 — save_result 已把完整 `_audit_llm`(含 evidence_trail)
+        # 落库; cad_verify 入参留空并由 activity 从 DB 回源。
+        # 切勿把 merged 嵌进 audit_llm 再回传(易触发 Circular reference)。
         await workflow.execute_activity(
             "cad_verify",
-            args=[{"event_id": event_id, "session_id": session_id, "audit_llm": {}}],
+            args=[{
+                "event_id": event_id,
+                "session_id": session_id,
+                "audit_llm": {},
+            }],
             start_to_close_timeout=timedelta(seconds=180),
             retry_policy=RetryPolicy(
                 initial_interval=timedelta(seconds=5),

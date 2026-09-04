@@ -110,9 +110,9 @@ function SpanRow({ span, maxLatency }: { span: TraceSpan; maxLatency: number }) 
       <div className="w-24 shrink-0 flex justify-end">
         <span
           className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
-            span.status === 'success' ? 'bg-[#34c759]/10 text-[#248a3d]'
-            : span.status === 'error' ? 'bg-[#ff3b30]/10 text-[#ff3b30]'
-            : span.status === 'timeout' ? 'bg-[#ff9f0a]/10 text-[#c77700]'
+            span.status === 'success' ? 'bg-mist text-ink'
+            : span.status === 'error' ? 'bg-ink text-white'
+            : span.status === 'timeout' ? 'bg-nong text-white'
             : 'bg-ink/5 text-ink-soft'
           }`}
         >
@@ -168,13 +168,13 @@ export function TraceTab() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h3 className="text-lg font-bold text-ink">链路追踪 (OpenTelemetry → Tempo)</h3>
-          <span className="text-[11px] px-2 py-0.5 rounded-full bg-[#0071e3]/10 text-[#0071e3] font-medium">标准 trace</span>
+          <span className="text-[11px] px-2 py-0.5 border border-ink font-medium">标准 trace</span>
         </div>
         <a
           href="http://localhost:3002/grafana/explore"
           target="_blank"
           rel="noreferrer"
-          className="text-[12px] font-medium text-[#0071e3] hover:underline"
+          className="text-[12px] font-medium text-ink hover:underline"
         >
           Grafana / Tempo →
         </a>
@@ -182,14 +182,14 @@ export function TraceTab() {
 
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-6">
         {/* 左侧: trace 列表 */}
-        <div className="rounded-2xl border border-ink/[0.06] bg-white/70 backdrop-blur p-3 max-h-[520px] overflow-y-auto">
+        <div className="rounded-none border border-ink/[0.06] bg-white/70 backdrop-blur p-3 max-h-[520px] overflow-y-auto">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint px-2 pb-2">最近 traces</div>
           {traces.map((t) => (
             <button
               key={t.trace_id}
               onClick={() => setSelected(t.trace_id)}
               className={`w-full text-left px-3 py-2 rounded-xl mb-1 transition-colors ${
-                selected === t.trace_id ? 'bg-[#0071e3]/10' : 'hover:bg-ink/[0.04]'
+                selected === t.trace_id ? 'bg-ink text-white' : 'hover:bg-mist'
               }`}
             >
               <div className="flex items-center justify-between gap-2">
@@ -211,8 +211,8 @@ export function TraceTab() {
         </div>
 
         {/* 右侧: 详情瀑布 */}
-        <div className="rounded-2xl border border-ink/[0.06] bg-white/70 backdrop-blur p-5">
-          {error && <div className="text-[13px] text-[#ff3b30] mb-3">⚠ {error}</div>}
+        <div className="rounded-none border border-ink/[0.06] bg-white/70 backdrop-blur p-5">
+          {error && <div className="text-[13px] text-ink mb-3">⚠ {error}</div>}
           {loading && <div className="text-[13px] text-ink-faint">加载中...</div>}
           {!loading && !detail && !error && (
             <EmptyState icon="🔍" title="选择一个 trace" hint="从左侧选择一条链路查看瀑布时间线" />
@@ -226,7 +226,7 @@ export function TraceTab() {
                   href="http://localhost:3002/grafana/explore"
                   target="_blank"
                   rel="noreferrer"
-                  className="text-[12px] text-[#0071e3] hover:underline"
+                  className="text-[12px] text-ink hover:underline"
                 >
                   Grafana 查看完整瀑布 →
                 </a>
@@ -255,10 +255,10 @@ export function TraceTab() {
                         <span className="font-medium text-ink">{e.event_type}</span>
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
                           e.severity === 'critical' || e.severity === 'high'
-                            ? 'bg-[#ff3b30]/10 text-[#ff3b30]'
+                            ? 'bg-ink text-white'
                             : e.severity === 'medium'
                               ? 'bg-[#ff9f0a]/10 text-[#c77700]'
-                              : 'bg-[#34c759]/10 text-[#248a3d]'
+                              : 'bg-mist text-ink'
                         }`}>
                           {e.severity}
                         </span>

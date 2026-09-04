@@ -148,7 +148,7 @@ export function TracePanel() {
               <div className="space-y-1">
                 {Object.entries(stats.by_error_type).map(([k, v]) => (
                   <div key={`e-${k}`} className="flex justify-between text-xs font-sans text-ink-soft">
-                    <span>{k || 'unknown'}</span><span className="tabular-nums text-red-700">{v}</span>
+                    <span>{k || 'unknown'}</span><span className="tabular-nums text-red-700">{String(v)}</span>
                   </div>
                 ))}
               </div>
@@ -160,7 +160,7 @@ export function TracePanel() {
               <div className="space-y-1">
                 {Object.entries(stats.by_degraded_type).map(([k, v]) => (
                   <div key={`d-${k}`} className="flex justify-between text-xs font-sans text-ink-soft">
-                    <span>{k || 'unknown'}</span><span className="tabular-nums text-amber-700">{v}</span>
+                    <span>{k || 'unknown'}</span><span className="tabular-nums text-amber-700">{String(v)}</span>
                   </div>
                 ))}
               </div>

@@ -175,6 +175,20 @@ def apply_faithfulness_gate(
     else:
         out.setdefault("response_blocked", False)
 
+    try:
+        from veto_gates import sanitize_merged_audit
+        signals = non_llm_signals or {}
+        out = sanitize_merged_audit(
+            out,
+            evidence=_evidence_blob(contexts or []),
+            event_type=str(signals.get("event_type") or ""),
+            event_severity=str(signals.get("event_severity") or ""),
+            sigma_severity=str(signals.get("sigma_severity") or ""),
+            has_chain=bool(signals.get("cep_chain") or signals.get("chain")),
+        )
+    except Exception:
+        pass
+
     return out
 
 

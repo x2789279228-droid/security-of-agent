@@ -24,6 +24,9 @@ from veto_gates import (
     clamp_reviewer_conclusion,
     executor_conclusion_floor,
     filter_missed_threats,
+    cap_reported_severity,
+    strip_phantom_mitre,
+    sanitize_merged_audit,
     NonLlmSignals,
     VERDICT_CONFIRMED,
     VERDICT_SUSPICIOUS,
@@ -265,3 +268,51 @@ def test_synthesis_schema_accepts_abstain():
         severity="info", summary="insufficient",
     )
     assert m.abstain is True
+
+
+def test_port_scan_cannot_inflate_to_critical():
+    sev = cap_reported_severity(
+        "critical",
+        event_type="PORT_SCAN",
+        event_severity="medium",
+        sigma_severity="medium",
+    )
+    assert sev == "high"
+
+
+def test_c2_keeps_critical():
+    sev = cap_reported_severity(
+        "critical",
+        event_type="C2_BEACON",
+        event_severity="critical",
+        sigma_severity="critical",
+    )
+    assert sev == "critical"
+
+
+def test_phantom_mitre_stripped():
+    merged = {
+        "severity": "critical",
+        "mitre_techniques": ["T1046", "T1090.002"],
+        "faithfulness": {"phantom_entities": ["T1090.002", "T1132.001"]},
+    }
+    out = strip_phantom_mitre(merged, evidence="PORT_SCAN T1046 src=45.33.32.156")
+    assert "T1046" in [str(x) for x in out["mitre_techniques"]]
+    assert "T1090.002" not in [str(x) for x in out["mitre_techniques"]]
+    assert "T1090.002" in out["stripped_mitre"]
+
+
+def test_sanitize_merged_audit_caps_and_strips():
+    out = sanitize_merged_audit(
+        {
+            "severity": "critical",
+            "mitre_techniques": [{"id": "T1090.002"}],
+            "faithfulness": {"phantom_entities": ["T1090.002"]},
+        },
+        evidence="PORT_SCAN 45.33.32.156",
+        event_type="PORT_SCAN",
+        event_severity="medium",
+    )
+    assert out["severity"] == "high"
+    assert out["mitre_techniques"] == []
+    assert "T1090.002" in out["stripped_mitre"]

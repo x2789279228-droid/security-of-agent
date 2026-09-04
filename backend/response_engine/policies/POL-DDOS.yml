@@ -1,0 +1,22 @@
+id: POL-DDOS
+name: DDoS流量自动防护
+enabled: true
+description: DDoS攻击：限速 + 封禁 + 告警
+match:
+  threat_type: DDoS_TRAFFIC
+  min_confidence: 0.5
+  min_severity: high
+actions:
+- name: rate_limit
+  params:
+    bandwidth_kbps: 100
+- name: block_ip
+  params:
+    duration_minutes: 60
+- name: send_alert
+  params:
+    severity: critical
+auto_execute: true
+require_approval: false
+priority: 85
+cooldown_minutes: 30

@@ -333,6 +333,9 @@ async def llm_enhancer_events_stream(
         # 复用 event_bus 订阅机制：订阅全量队列后按 topic 过滤
         from event_bus import event_bus
         q = event_bus.subscribe()
+        if q is None:
+            # 订阅槽满员：断开流让客户端重试（与 /events/stream 的 503 策略一致）
+            raise RuntimeError("event bus subscriber slots full")
         topics = ("phishing_llm_verdict", "data_security_llm_verdict")
         try:
             while True:

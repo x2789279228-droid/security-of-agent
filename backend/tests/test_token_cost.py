@@ -148,11 +148,15 @@ class TestCostTracker:
         assert tracker.remaining_budget() == 400
         assert tracker.is_over_budget() is False
         # 输入 1000 tokens × 0.1 + 输出 500 tokens × 0.2 = 0.1 + 0.1
+        assert tracker.estimate_cost_yuan(1000, 500) == 0.2
+        # 弃用别名与正名等价
         assert tracker.estimate_cost_jpy(1000, 500) == 0.2
 
         tracker.record(500, event_id=5, prompt_tokens=300, completion_tokens=200)
         assert tracker.is_over_budget() is True
         # 今日: 输入 700 → 0.07, 输出 400 → 0.08, 合计 0.15
+        assert tracker.stats()["estimated_cost_yuan"] == 0.15
+        # 兼容旧键(一个版本后移除)
         assert tracker.stats()["estimated_cost_jpy"] == 0.15
 
     def test_restore_today_usage_overrides(self):

@@ -97,13 +97,17 @@ class CADAgent:
         ) if evidence_trail else []
 
         # ── 2. 计算验证指标 ──
-        total_claims = len(verification_reports)
         verified_claims = sum(1 for r in verification_reports if r.verified)
-        # 合成断言且无 evidence_ids：记为部分完整而非 0/0 空洞
-        if total_claims == 0 and evidence_trail:
-            total_claims = len(evidence_trail)
-            verified_claims = sum(1 for c in evidence_trail if c.get("synthetic"))
-        hallucination_count = max(total_claims - verified_claims, 0)
+        unverifiable_count = sum(1 for r in verification_reports if r.unverifiable)
+        # 幻觉只含“带证据 ID 却查无/失配”的断言(真实幻觉), 排除不可穿透验证的
+        # 单源孤立声证(unverifiable)——后者是缺分解证据而非发明证据。
+        hallucination_count = sum(
+            1 for r in verification_reports
+            if (not r.verified and not r.unverifiable)
+        )
+        verifiable_base = verified_claims + hallucination_count
+        # 是否有任何“可穿透核验”的实质审计内容
+        has_audit_content = bool(verification_reports) or bool(evidence_trail)
 
         # 寻找高危差异
         high_sev_discrepancies = [
@@ -111,15 +115,27 @@ class CADAgent:
             if not r.verified and r.severity in ("high", "critical")
         ]
 
-        hallucination_risk = hallucination_count / max(total_claims, 1) if total_claims else 0.0
-        evidence_completeness = verified_claims / max(total_claims, 1) if total_claims else 0.0
-
-        # ── 3. 更新熔断器 ──
-        circuit_breaker.record_audit_result(
-            hallucination_risk=hallucination_risk,
-            evidence_completeness=evidence_completeness,
-            anomaly_detected=hallucination_count > 0,
+        # 可验证基数归零 → “无证据可穿透验证”(NA)：不写入幻觉/完整度趋势,
+        # 避免把“无口径(被记录为坏)”累积触发熔断; 仅计数(可观测)。
+        if (not has_audit_content) or verifiable_base == 0:
+            circuit_breaker.record_na(
+                notes=("single-source: 无分解证据可穿透验证"
+                       if has_audit_content else "empty audit: 无可验断言")
+            )
+        hallucination_risk = (
+            hallucination_count / verifiable_base if verifiable_base else 0.0
         )
+        evidence_completeness = (
+            verified_claims / verifiable_base if verifiable_base else 0.0
+        )
+
+        # ── 3. 更新熔断器 (真实可验证内容才进入趋势) ──
+        if verifiable_base:
+            circuit_breaker.record_audit_result(
+                hallucination_risk=hallucination_risk,
+                evidence_completeness=evidence_completeness,
+                anomaly_detected=hallucination_count > 0,
+            )
 
         from ops_loop import locate_first_failed_hop
         first_hop = locate_first_failed_hop(audit_llm_data)
@@ -130,8 +146,9 @@ class CADAgent:
             "audit_timestamp": datetime.now(timezone.utc).isoformat(),
             "first_failed_hop": first_hop,
             "penetrating_verification": {
-                "total_claims": total_claims,
+                "total_claims": verifiable_base,      # 可穿透核验的断言数(真幻觉+真通过)
                 "verified": verified_claims,
+                "unverifiable": unverifiable_count,   # 无可分解证据/不可穿透验证(不算幻觉)
                 "hallucination_count": hallucination_count,
                 "hallucination_risk": round(hallucination_risk, 4),
                 "evidence_completeness": round(evidence_completeness, 4),
@@ -161,7 +178,8 @@ class CADAgent:
 
         logger.info(
             f"CAD audit complete for event #{event_id}: "
-            f"{verified_claims}/{total_claims} verified, "
+            f"{verified_claims}/{verifiable_base} verified, "
+            f"unverif={unverifiable_count}, "
             f"risk={hallucination_risk:.2f}, "
             f"tripped={circuit_breaker.state.tripped}"
         )

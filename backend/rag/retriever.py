@@ -213,9 +213,11 @@ class Retriever:
             FROM knowledge_chunks
             WHERE {where_sql}
               AND embedding IS NOT NULL
+              AND vector_dims(embedding) = :vdim_guard
             ORDER BY distance ASC
             LIMIT :limit
         """)
+        bind_params["vdim_guard"] = len(embedding)
 
         try:
             result2 = await session.execute(sql, bind_params)

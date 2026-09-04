@@ -1,0 +1,19 @@
+id: POL-EXFIL
+name: 外泄类通用告警遏制
+enabled: true
+description: EXFIL 父类：无专属策略时短封 + 告警（隔离仍走 DATA_EXFIL 专属审批）
+match:
+  category: EXFIL
+  min_confidence: 0.45
+  min_severity: medium
+actions:
+- name: block_ip
+  params:
+    duration_minutes: 60
+- name: send_alert
+  params:
+    severity: critical
+auto_execute: true
+require_approval: false
+priority: 48
+cooldown_minutes: 30

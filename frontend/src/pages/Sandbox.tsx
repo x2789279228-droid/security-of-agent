@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { PageTransition } from '../components/common/PageTransition'
+import { PageFrame } from '../components/common/PageFrame'
 import { api } from '../lib/api'
 
 interface SandboxTask {
@@ -18,16 +18,16 @@ interface SandboxTask {
 }
 
 const statusBadge: Record<string, string> = {
-  pending: 'bg-ink/5 text-ink-soft',
-  running: 'bg-[#0071e3]/10 text-[#0071e3]',
-  completed: 'bg-[#34c759]/10 text-[#248a3d]',
-  failed: 'bg-[#ff3b30]/10 text-[#ff3b30]',
+  pending: 'bg-mist text-ink-faint',
+  running: 'bg-nong text-white',
+  completed: 'bg-ink text-white',
+  failed: 'bg-hui text-white',
 }
 
 const verdictBadge: Record<string, string> = {
-  clean: 'bg-[#34c759]/10 text-[#248a3d]',
-  suspicious: 'bg-[#ff9f0a]/12 text-[#c77700]',
-  malicious: 'bg-[#ff3b30]/12 text-[#ff3b30]',
+  clean: 'border border-ink text-ink',
+  suspicious: 'bg-nong text-white',
+  malicious: 'bg-ink text-white',
 }
 
 export default function Sandbox() {
@@ -38,57 +38,44 @@ export default function Sandbox() {
   }, [])
 
   return (
-    <PageTransition>
-      <div className="max-w-6xl mx-auto px-6 pt-14 pb-16">
-        <div className="mb-10">
-          <h1 className="text-4xl font-semibold tracking-tight text-ink">沙箱检测</h1>
-          <p className="text-[15px] text-ink-soft mt-2">CAPE 动态分析 · 行为报告 · 变种聚类</p>
-        </div>
-
-        <div className="grid gap-4">
-          {tasks.map((t) => (
-            <div key={t.id} className="p-5 rounded-2xl border border-ink/8 bg-white/70 backdrop-blur">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-3">
-                  <span className="font-medium text-ink">{t.sample_name || t.sample_type}</span>
-                  <span className={`px-2 py-0.5 rounded-md text-xs font-medium ${statusBadge[t.status] || ''}`}>
-                    {t.status}
+    <PageFrame title="沙箱检测" subtitle="CAPE 动态分析 · 行为报告 · 变种聚类">
+      <div className="grid gap-0 border border-line">
+        {tasks.map((t, i) => (
+          <div key={t.id} className={`p-5 bg-white ${i < tasks.length - 1 ? 'border-b border-line' : ''}`}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <span className="font-medium text-ink">{t.sample_name || t.sample_type}</span>
+                <span className={`px-2 py-0.5 text-xs font-medium ${statusBadge[t.status] || ''}`}>
+                  {t.status}
+                </span>
+                {t.verdict && (
+                  <span className={`px-2 py-0.5 text-xs font-medium ${verdictBadge[t.verdict] || ''}`}>
+                    {t.verdict}
                   </span>
-                  {t.verdict && (
-                    <span className={`px-2 py-0.5 rounded-md text-xs font-medium ${verdictBadge[t.verdict] || ''}`}>
-                      {t.verdict}
-                    </span>
-                  )}
-                </div>
-                {t.score > 0 && (
-                  <span className="text-sm font-mono text-ink-soft">{(t.score * 10).toFixed(1)}/10</span>
                 )}
               </div>
-
-              {t.behavior_summary && (
-                <p className="text-sm text-ink-soft mb-3">{t.behavior_summary}</p>
+              {t.score > 0 && (
+                <span className="text-sm font-mono text-ink-soft">{(t.score * 10).toFixed(1)}/10</span>
               )}
-
-              {t.mitre_techniques && t.mitre_techniques.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {t.mitre_techniques.slice(0, 6).map((tech, i) => (
-                    <span key={i} className="px-2 py-0.5 rounded-md bg-[#af52de]/8 text-[#af52de] text-[11px] font-medium">
-                      {tech.id} {tech.name}
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              <div className="mt-3 text-xs text-ink-faint">
-                来源: {t.source} · 提交: {t.submitted_at ? new Date(t.submitted_at).toLocaleString() : '-'}
-              </div>
             </div>
-          ))}
-          {tasks.length === 0 && (
-            <div className="py-20 text-center text-ink-faint">暂无沙箱分析任务</div>
-          )}
-        </div>
+            {t.behavior_summary && (
+              <p className="text-sm font-light text-ink-soft mb-3">{t.behavior_summary}</p>
+            )}
+            {t.mitre_techniques && t.mitre_techniques.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {t.mitre_techniques.slice(0, 6).map((tech, idx) => (
+                  <span key={idx} className="px-2 py-0.5 border border-line text-[11px]">
+                    {tech.id} {tech.name}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        {tasks.length === 0 && (
+          <div className="py-20 text-center text-ink-faint">暂无沙箱任务</div>
+        )}
       </div>
-    </PageTransition>
+    </PageFrame>
   )
 }

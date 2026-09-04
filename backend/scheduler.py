@@ -29,6 +29,9 @@ WATCHDOG_INTERVAL = 600        # 看门狗巡检间隔（10分钟）
 SLA_CHECK_INTERVAL = 300       # SLA 超时扫描间隔（5分钟）
 FP_ANALYTICS_INTERVAL = 3600   # 误报统计间隔（1小时）
 KPI_DAILY_INTERVAL = 86400    # KPI 日快照间隔（24小时,默认凌晨触发）
+EMBED_BACKFILL_INTERVAL = 300  # embedding 回填巡检间隔（5分钟; 漏跑自愈）
+STUCK_AUDIT_REAP_INTERVAL = 120  # r6: 卡住未分析事件收口间隔（2分钟）
+# PQ drain 间隔由 settings.audit_pq_drain_interval_s 控制
 
 
 class Scheduler:
@@ -44,6 +47,7 @@ class Scheduler:
     def __init__(self):
         self._tasks: list[asyncio.Task] = []
         self._running = False
+        self._embed_patrol_task = None
 
     async def start(self, db_session_factory):
         """启动所有后台定时任务"""
@@ -60,10 +64,16 @@ class Scheduler:
             asyncio.create_task(self._fp_analytics_loop(db_session_factory)),
             asyncio.create_task(self._kpi_daily_loop(db_session_factory)),
             asyncio.create_task(self._llm_budget_reset_loop()),
+            asyncio.create_task(self._stuck_audit_reap_loop(db_session_factory)),
+            asyncio.create_task(self._audit_pq_drain_loop()),
         ]
-        logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds, watchdog=%ds, sla=%ds, fp=%ds, kpi=%ds",
+        # embedding 回填巡检(延迟到启动自检之后再进入周期, 避免与启动回填抢占)
+        self._embed_patrol_task = asyncio.create_task(self._embedding_backfill_patrol())
+        self._tasks.append(self._embed_patrol_task)
+        logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds, watchdog=%ds, sla=%ds, fp=%ds, kpi=%ds, embed_backfill=%ds",
                      SNAPSHOT_INTERVAL, LONG_CHAIN_INTERVAL, 3600, WATCHDOG_INTERVAL,
-                     SLA_CHECK_INTERVAL, FP_ANALYTICS_INTERVAL, KPI_DAILY_INTERVAL)
+                     SLA_CHECK_INTERVAL, FP_ANALYTICS_INTERVAL, KPI_DAILY_INTERVAL,
+                     EMBED_BACKFILL_INTERVAL)
 
     async def stop(self):
         """停止所有后台任务"""
@@ -219,12 +229,13 @@ class Scheduler:
         """
         扫描 30 天内未闭合的攻击链
 
-        方法：按天分批查询，每天内独立匹配，跨天合并。
+        每个 session 用一个 30 天滑动窗口做一次关联分析。
+        （旧实现按天切片循环 30 次，但 day_start/day_end 从未传入 analyze，
+        每次 analyze 实际都是"最近 24h"窗口，30 次结果完全相同，纯属重复计算。）
         """
         from correlation_engine import correlation_engine
 
         now = datetime.now(timezone.utc)
-        results = []
 
         # 获取所有有事件的 session_id
         from models import SecurityEvent
@@ -235,40 +246,18 @@ class Scheduler:
         )
         all_session_ids = [row[0] for row in sessions_q.all()]
 
+        results = []
         for sid in all_session_ids:
             try:
-                # 按天分批
-                for day_offset in range(30):
-                    day_start = now - timedelta(days=day_offset + 1)
-                    day_end = now - timedelta(days=day_offset)
-
-                    stmt = (
-                        select(SecurityEvent)
-                        .where(
-                            SecurityEvent.session_id == sid,
-                            SecurityEvent.created_at >= day_start,
-                            SecurityEvent.created_at < day_end,
-                        )
-                        .order_by(SecurityEvent.created_at)
-                    )
-                    result = await session.execute(stmt)
-                    day_events = result.scalars().all()
-
-                    if len(day_events) < 2:
-                        continue
-
-                    # 对每天运行关联引擎（使用当天的数据）
-                    result = await correlation_engine.analyze(
-                        session, sid, time_window_minutes=1440
-                    )
-                    if result.chains:
-                        results.extend(result.chains)
-
-                if results:
+                result = await correlation_engine.analyze(
+                    session, sid, time_window_minutes=30 * 1440
+                )
+                if result.chains:
                     logger.info(
-                        f"Long-chain scan for {sid}: {len(results)} chains found "
+                        f"Long-chain scan for {sid}: {len(result.chains)} chains found "
                         f"in 30-day window"
                     )
+                    results.extend(result.chains)
             except Exception as e:
                 logger.warning(f"Long-chain scan failed for {sid}: {e}")
 
@@ -327,48 +316,61 @@ class Scheduler:
                 logger.warning(f"[SLA] Check failed: {e}")
 
     async def _case_sla_loop(self, db_factory):
-        """定时扫描超期案例: 标记 sla_breached + 自动推进 open→investigating
-
-        与 _sla_check_loop(工单维度) 并行的案例维度 SLA 监测。
-        """
-        from datetime import datetime, timezone
-        from sqlalchemy import select
-        from models import SecurityCase
+        """定时扫描超期案例: 自动收口已处置案、标记 sla_breached、关闭陈旧 resolved。"""
+        first = True
         while self._running:
             try:
-                await asyncio.sleep(SLA_CHECK_INTERVAL)
+                if not first:
+                    await asyncio.sleep(SLA_CHECK_INTERVAL)
+                first = False
                 now = datetime.now(timezone.utc)
                 async with db_factory() as session:
-                    rows = (await session.execute(
-                        select(SecurityCase).where(
-                            SecurityCase.status.in_(["open", "investigating"]),
-                            SecurityCase.sla_deadline.is_not(None),
-                            SecurityCase.sla_deadline < now,
-                            SecurityCase.sla_breached == False,
-                        )
-                    )).scalars().all()
-                    if rows:
-                        from case_manager import case_manager
-                        for case in rows:
-                            case.sla_breached = True
-                            if case.status == "open":
-                                await case_manager.update_status(
-                                    session, case.id, "investigating", by="system"
-                                )
-                        try:
-                            await session.commit()
-                        except Exception:
-                            pass
-                        logger.warning(f"[case-sla] {len(rows)} cases breached SLA")
-
-                    # resolved 超阈值(默认24h)未人工 closed → 自动 closed
-                    await self._close_stale_resolved(session, now)
+                    await self._run_case_sla_once(session, now)
             except ImportError:
-                break  # 环境无 SQLAlchemy/model 依赖(只读工具)则跳过
+                break
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"[case-sla] Check failed: {e}")
+
+    async def _run_case_sla_once(self, session, now) -> None:
+        from sqlalchemy import select
+        from models import SecurityCase
+        from case_manager import case_manager
+
+        try:
+            resolved_n = await case_manager.auto_resolve_idle_cases(session, now=now)
+            if resolved_n:
+                logger.info(f"[case-sla] auto-resolved {resolved_n} responded cases")
+        except Exception as e:
+            logger.warning(f"[case-sla] auto-resolve failed: {e}")
+
+        rows = (await session.execute(
+            select(SecurityCase).where(
+                SecurityCase.status.in_(["open", "investigating", "responding"]),
+                SecurityCase.sla_deadline.is_not(None),
+                SecurityCase.sla_deadline < now,
+                SecurityCase.sla_breached == False,
+            )
+        )).scalars().all()
+        marked = 0
+        for case in rows:
+            if await case_manager.has_pending_approval(session, case):
+                continue
+            case.sla_breached = True
+            marked += 1
+            if case.status == "open":
+                await case_manager.update_status(
+                    session, case.id, "investigating", by="system"
+                )
+        if marked:
+            try:
+                await session.commit()
+            except Exception:
+                pass
+            logger.warning(f"[case-sla] {marked} cases breached SLA")
+
+        await self._close_stale_resolved(session, now)
 
     async def _close_stale_resolved(self, session, now) -> int:
         """resolved 且超 case_auto_close_hours 未人工 closed 的案例 → 自动 closed。
@@ -473,6 +475,196 @@ class Scheduler:
                 break
             except Exception as e:
                 logger.warning(f"[LLM] budget reset failed: {e}")
+
+    async def _embedding_backfill_patrol(self):
+        """周期巡检 embedding 缺失; 有缺失则启动受管回填(自身幂等防重入)。"""
+        # 首轮等一个周期, 让启动时触发的回填优先跑完/跑动, 避免重复触发
+        await asyncio.sleep(EMBED_BACKFILL_INTERVAL)
+        while self._running:
+            try:
+                from rag.seeder import has_missing_embeddings, launch_embedding_backfill
+                if await has_missing_embeddings(scope="chunks"):
+                    launch_embedding_backfill(scope="chunks")
+                if await has_missing_embeddings(scope="memories"):
+                    launch_embedding_backfill(scope="memories")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[EmbedBackfill] patrol failed: {e}")
+            await asyncio.sleep(EMBED_BACKFILL_INTERVAL)
+
+    # ── 9b. 审计优先级队列拉取 (Phase C) ──
+
+    async def _audit_pq_drain_loop(self):
+        """从 Redis ZSET 弹出最高优任务并 start Temporal workflow。
+
+        inflight 仍满则把任务重新入队(短暂退避),避免忙等。
+        """
+        from config import settings as _cfg
+        interval = float(getattr(_cfg, "audit_pq_drain_interval_s", 1.0) or 1.0)
+        while self._running:
+            try:
+                await asyncio.sleep(max(0.2, interval))
+                drained = await self._drain_audit_pq_once()
+                if drained:
+                    logger.info(f"[AuditPQ] drained {drained} job(s)")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[AuditPQ] drain failed: {e}")
+
+    async def _drain_audit_pq_once(self) -> int:
+        from audit_pq import audit_pq
+        from temporal.client import start_audit_workflow, inflight_stats
+        from config import settings as _cfg
+
+        if not audit_pq.available:
+            return 0
+        # 每次最多拉一批,避免一次占满
+        batch = 5
+        n = 0
+        for _ in range(batch):
+            stats = await inflight_stats()
+            limit = int(stats.get("limit") or 0)
+            total = int(stats.get("total") or 0)
+            if limit > 0 and total >= limit:
+                break
+            job = await audit_pq.pop_highest()
+            if not job:
+                break
+            eid = int(job.get("event_id") or 0)
+            if not eid:
+                continue
+            started = await start_audit_workflow(
+                session_id=str(job.get("session_id") or ""),
+                event_id=eid,
+                log_data=job.get("log_data") or {},
+                anomaly_score=float(job.get("anomaly_score") or 0),
+                anomaly_reasons=list(job.get("anomaly_reasons") or []),
+                max_rounds=int(job.get("max_rounds") or 3),
+                tier=str(job.get("tier") or "P1"),
+            )
+            if started is True:
+                n += 1
+                continue
+            if started == "shed":
+                # 槽又满了 — 重新入队
+                ttl = int(getattr(_cfg, "audit_pq_ttl_s", 900) or 900)
+                await audit_pq.enqueue(
+                    event_id=eid,
+                    session_id=str(job.get("session_id") or ""),
+                    log_data=job.get("log_data") or {},
+                    anomaly_score=float(job.get("anomaly_score") or 0),
+                    anomaly_reasons=list(job.get("anomaly_reasons") or []),
+                    max_rounds=int(job.get("max_rounds") or 3),
+                    priority=int(job.get("priority") or 50),
+                    tier=str(job.get("tier") or "P1"),
+                    ttl_s=ttl,
+                )
+                break
+            # Temporal 不可用: 标记 fallback,避免永远挂在 PQ
+            try:
+                from log_ingestion import log_ingestor
+                _score = float(job.get("anomaly_score") or 0)
+
+                class _AR:
+                    anomaly_score = _score
+                    reasons = list(job.get("anomaly_reasons") or [])
+                    is_anomaly = _score >= 0.6
+                    deviation_sigma = 0.0
+
+                await log_ingestor._fallback_analysis(
+                    eid, job.get("log_data") or {}, _AR(), "pq_temporal_unavailable"
+                )
+                await log_ingestor._mark_analyzed(
+                    eid, error="pq_temporal_unavailable", status="fallback"
+                )
+            except Exception as fe:
+                logger.warning(f"[AuditPQ] fallback for #{eid} failed: {fe}")
+        # 偶尔清理幽灵成员
+        if n == 0:
+            await audit_pq.purge_stale()
+        return n
+
+    # ── 9. 卡住未分析事件运行时收口 (r6) ──
+
+    async def _stuck_audit_reap_loop(self, db_factory):
+        """analyzed=false 超过阈值 → fallback 落库 + 尝试取消 Temporal workflow。
+
+        启动时清理不够: r6 测试窗口内 1100 事件长期 pending,需运行中收口。
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(STUCK_AUDIT_REAP_INTERVAL)
+                async with db_factory() as session:
+                    n = await self._reap_stuck_audits(session)
+                    if n:
+                        logger.warning(f"[StuckAudit] reaped {n} stuck unanalyzed events")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[StuckAudit] reap failed: {e}")
+
+    async def _reap_stuck_audits(self, session: AsyncSession) -> int:
+        from config import settings
+        from models import SecurityEvent
+
+        minutes = int(getattr(settings, "stuck_audit_reap_minutes", 0) or 0)
+        if minutes <= 0:
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        rows = (await session.execute(
+            select(SecurityEvent).where(
+                SecurityEvent.analyzed == False,
+                SecurityEvent.created_at < cutoff,
+            ).limit(200)
+        )).scalars().all()
+        if not rows:
+            return 0
+
+        # 尝试取消仍在跑的 Temporal workflow(忽略不存在)
+        try:
+            from temporal.client import get_client
+            client = await get_client()
+        except Exception:
+            client = None
+
+        n = 0
+        for e in rows:
+            if client is not None:
+                try:
+                    handle = client.get_workflow_handle(f"audit-{e.id}")
+                    await handle.terminate(reason="stuck_audit_reap")
+                except Exception:
+                    pass
+            e.analyzed = True
+            raw = dict(e.raw_data or {})
+            raw["_audit_llm_error"] = "stuck_audit_reap"
+            audit = dict(raw.get("_audit_llm") or {})
+            audit.update({
+                "status": "failed",
+                "fallback": True,
+                "fallback_reason": "stuck_audit_reap",
+                "error": "stuck_audit_reap",
+                "note": f"reaped after {minutes}m unanalyzed",
+            })
+            raw["_audit_llm"] = audit
+            e.raw_data = raw
+            n += 1
+            try:
+                event_store.invalidate(e.id, broadcast=True)
+            except Exception:
+                pass
+        if n:
+            await session.commit()
+            # 归还可能泄漏的 in-flight 计数(粗略校正)
+            try:
+                from temporal.client import inflight_release
+                for _ in range(min(n, 30)):
+                    await inflight_release()
+            except Exception:
+                pass
+        return n
 
 
 scheduler = Scheduler()

@@ -8,11 +8,11 @@ import { api } from '../lib/api'
 type Tab = 'search' | 'docs' | 'verify' | 'manage' | 'quality' | 'traces'
 
 const SEVERITY_COLORS: Record<string, string> = {
-  critical: 'text-red-600 bg-red-50 border-red-200',
-  high: 'text-orange-600 bg-orange-50 border-orange-200',
-  medium: 'text-yellow-600 bg-yellow-50 border-yellow-200',
-  low: 'text-gray-600 bg-gray-50 border-gray-200',
-  info: 'text-blue-600 bg-blue-50 border-blue-200',
+  critical: 'text-white bg-ink border-ink',
+  high: 'text-white bg-nong border-nong',
+  medium: 'text-ink bg-qing border-line',
+  low: 'text-ink bg-mist border-line',
+  info: 'text-ink-faint bg-mist border-line',
 }
 
 const THREAT_OPTIONS = [
@@ -39,8 +39,8 @@ function classNames(...classes: (string | false | undefined | null)[]) {
 function Collapse({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="border border-line rounded-lg overflow-hidden">
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 text-sm font-medium text-ink">
+    <div className="border border-line overflow-hidden">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-4 py-2.5 bg-mist text-sm font-medium text-ink">
         {title}
         <span className={`transition-transform ${open ? 'rotate-180' : ''}`}>▼</span>
       </button>
@@ -160,21 +160,21 @@ export default function RAG() {
 
   return (
     <PageTransition>
-      <div className="max-w-5xl mx-auto px-6 pt-14 pb-16">
-        <div className="flex items-end justify-between mb-2">
+      <div className="page-shell pt-12 pb-20">
+        <div className="flex items-end justify-between mb-2 pb-6 border-b border-line">
           <div>
-            <h1 className="text-4xl font-semibold tracking-tight text-ink">安全知识库</h1>
-            <p className="text-[15px] text-ink-soft mt-2">
+            <h1 className="page-title">安全知识库</h1>
+            <p className="page-sub">
               检索增强生成（RAG）— 用预置安全知识减少 LLM 幻觉
             </p>
           </div>
           <div className="flex items-center gap-2 text-[13px]">
             {stats && (
-              <span className="px-3.5 py-1.5 rounded-full bg-[#0071e3]/10 text-[#0071e3] font-medium">
+              <span className="px-3.5 py-1.5 border border-ink text-ink font-medium">
                 文档 {stats.documents} · 分块 {stats.chunks}
               </span>
             )}
-            <button onClick={loadStats} className="px-3.5 py-1.5 rounded-full bg-black/[0.05] hover:bg-black/[0.08] text-ink-soft transition-colors">刷新</button>
+            <button onClick={loadStats} className="px-3.5 py-1.5 border border-ink hover:bg-ink hover:text-white transition-colors">刷新</button>
           </div>
         </div>
         <div className="mb-8" />
@@ -182,9 +182,9 @@ export default function RAG() {
         {/* ═══ 知识库为空提示 ═══ */}
         {isEmpty && (
           <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
-            className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl">
-            <p className="text-sm font-semibold text-amber-800 mb-1">知识库为空 — 立即载入安全知识</p>
-            <p className="text-xs text-amber-600 mb-3">从 MITRE 官方源获取完整攻击知识库，或使用预置知识快速填充</p>
+            className="mb-6 p-4 bg-mist border border-ink">
+            <p className="text-sm font-semibold text-ink mb-1">知识库为空 — 立即载入安全知识</p>
+            <p className="text-xs text-ink-faint mb-3">从 MITRE 官方源获取完整攻击知识库，或使用预置知识快速填充</p>
             <div className="flex gap-2 flex-wrap">
               <button onClick={async () => {
                 setLoading(true); setError(''); setResult(null)
@@ -195,7 +195,7 @@ export default function RAG() {
                 } catch (e: any) { setError(e.message) }
                 finally { setLoading(false) }
               }} disabled={loading}
-                className="px-4 py-2 text-xs font-sans font-medium bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50">
+                className="px-4 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:bg-accent-hover disabled:opacity-50">
                 {loading ? '导入中...' : '导入 ATT&CK 完整库'}
               </button>
               <button onClick={async () => {
@@ -207,11 +207,11 @@ export default function RAG() {
                 } catch (e: any) { setError(e.message) }
                 finally { setLoading(false) }
               }} disabled={loading}
-                className="px-4 py-2 text-xs font-sans font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50">
+                className="px-4 py-2 text-xs font-sans font-medium bg-indigo-600 text-white rounded-none hover:bg-indigo-700 disabled:opacity-50">
                 {loading ? '导入中...' : '导入 CAPEC 完整库'}
               </button>
               <button onClick={doSeed} disabled={loading}
-                className="px-4 py-2 text-xs font-sans font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50">
+                className="px-4 py-2 text-xs font-sans font-medium bg-amber-600 text-white rounded-none hover:bg-amber-700 disabled:opacity-50">
                 {loading ? '播种中...' : '填充预置知识 (31篇)'}
               </button>
             </div>
@@ -220,17 +220,17 @@ export default function RAG() {
 
         {/* ═══ 已填充但文档较少时也显示补充按钮 ═══ */}
         {!isEmpty && stats?.documents < 5 && (
-          <div className="mb-6 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-between">
+          <div className="mb-6 p-3 bg-mist border border-ink rounded-none flex items-center justify-between">
             <p className="text-xs text-blue-700">知识库文档较少，建议填充更全面的预置安全知识</p>
             <button onClick={doSeed} disabled={loading}
-              className="px-4 py-1.5 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+              className="px-4 py-1.5 text-xs font-medium bg-ink text-white rounded-none hover:bg-accent-hover disabled:opacity-50">
               补充预置知识
             </button>
           </div>
         )}
 
         {/* ═══ Tab 导航 — Apple 分段控件 ═══ */}
-        <div className="flex gap-1 mb-8 p-1 bg-black/[0.05] rounded-full w-fit">
+        <div className="flex flex-wrap gap-2 mb-8">
           {[
             { id: 'search', label: '知识检索' },
             { id: 'docs', label: '文档管理' },
@@ -240,8 +240,8 @@ export default function RAG() {
             { id: 'traces', label: 'Agent 轨迹' },
           ].map(tab => (
             <button key={tab.id} onClick={() => { setActiveTab(tab.id as Tab); if (tab.id === 'docs') loadStats() }}
-              className={classNames('px-5 py-2 text-[13px] font-medium rounded-full transition-all',
-                activeTab === tab.id ? 'bg-card text-ink shadow-[0_1px_4px_rgba(0,0,0,0.1)]' : 'text-ink-soft hover:text-ink')}>
+              className={classNames('px-4 py-2 text-[13px] tracking-[0.08em] border border-ink',
+                activeTab === tab.id ? 'bg-ink text-white' : 'bg-transparent text-ink hover:bg-ink hover:text-white')}>
               {tab.label}
             </button>
           ))}
@@ -253,28 +253,28 @@ export default function RAG() {
             <div className="flex items-center gap-3">
               <input type="text" placeholder="搜索查询（如 C2通信、暴力破解）" value={query}
                 onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && doSearch()}
-                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
               <select value={threatType} onChange={e => setThreatType(e.target.value)}
-                className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
                 <option value="">所有类型</option>
                 {THREAT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
               <select value={topK} onChange={e => setTopK(Number(e.target.value))}
-                className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
                 <option value={3}>Top 3</option>
                 <option value={5}>Top 5</option>
                 <option value={10}>Top 10</option>
               </select>
               <button onClick={doSearch} disabled={loading}
-                className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-none hover:opacity-90 disabled:opacity-50">
                 {loading ? '搜索中...' : '搜索'}
               </button>
             </div>
 
-            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-none text-xs text-red-700">{error}</div>}
 
             {result && result.total === 0 && (
-              <div className="p-4 text-center text-xs text-ink-faint font-sans bg-gray-50 rounded-lg">未找到匹配的知识文档</div>
+              <div className="p-4 text-center text-xs text-ink-faint font-sans bg-gray-50 rounded-none">未找到匹配的知识文档</div>
             )}
 
             {result && result.total > 0 && (
@@ -283,7 +283,7 @@ export default function RAG() {
                   检索策略: {result.strategy} · 共 {result.total} 条结果
                 </p>
                 {(result.chunks || []).map((chunk: any, i: number) => (
-                  <div key={i} className="border border-line rounded-lg p-4">
+                  <div key={i} className="border border-line rounded-none p-4">
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-sans font-semibold">{chunk.title}</span>
@@ -311,30 +311,30 @@ export default function RAG() {
         {activeTab === 'docs' && (
           <div className="space-y-4">
             <div className="flex gap-2 flex-wrap">
-              <button onClick={loadStats} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">刷新列表</button>
+              <button onClick={loadStats} className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-none hover:bg-gray-200">刷新列表</button>
               <button onClick={doSeed} disabled={loading}
-                className="px-3 py-1.5 text-xs font-sans font-medium bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 disabled:opacity-50">
+                className="px-3 py-1.5 text-xs font-sans font-medium bg-mist text-ink rounded-none hover:bg-qing disabled:opacity-50">
                 {loading ? '播种中...' : '重新播种预置知识'}
               </button>
             </div>
             {stats && (
               <div className="flex gap-3 text-xs font-sans">
-                <span className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg">文档: {stats.documents}</span>
-                <span className="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg">分块: {stats.chunks}</span>
+                <span className="px-3 py-1.5 bg-mist text-ink rounded-none">文档: {stats.documents}</span>
+                <span className="px-3 py-1.5 bg-green-50 text-green-700 rounded-none">分块: {stats.chunks}</span>
               </div>
             )}
             {isEmpty ? (
               <div className="text-center text-xs text-ink-faint font-sans py-8">
                 <p className="mb-3">知识库为空</p>
                 <button onClick={doSeed} disabled={loading}
-                  className="px-5 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                  className="px-5 py-2 text-xs font-medium bg-accent text-white rounded-none hover:opacity-90 disabled:opacity-50">
                   一键填充预置安全知识（25+ 篇）
                 </button>
               </div>
             ) : (
               <div className="space-y-2">
                 {docs.map((doc: any) => (
-                  <div key={doc.id} className="flex items-start gap-3 p-3 border border-line rounded-lg">
+                  <div key={doc.id} className="flex items-start gap-3 p-3 border border-line rounded-none">
                     <div className="flex-1 min-w-0 text-xs font-sans">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-ink">{doc.title}</span>
@@ -363,25 +363,25 @@ export default function RAG() {
             <div>
               <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">输入要验证的断言</label>
               <textarea id="verify-claim" rows={4} placeholder='例如: "C2通信应立即封禁源IP"'
-                className="w-full px-3 py-2 text-xs font-mono border border-line rounded-lg resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
+                className="w-full px-3 py-2 text-xs font-mono border border-line rounded-none resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
             </div>
             <div className="flex items-center gap-3">
               <select id="verify-type" defaultValue=""
-                className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
                 <option value="">所有类型</option>
                 {THREAT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
               <button onClick={doVerify} disabled={loading}
-                className="px-5 py-2 text-xs font-sans font-medium bg-purple-600 text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                className="px-5 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:opacity-90 disabled:opacity-50">
                 {loading ? '验证中...' : '验证断言'}
               </button>
             </div>
 
-            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-none text-xs text-red-700">{error}</div>}
 
             {result && result.claim && (
               <div className="space-y-3">
-                <div className={classNames('p-3 rounded-lg border text-xs font-sans',
+                <div className={classNames('p-3 rounded-none border text-xs font-sans',
                   result.verdict === 'supported' ? 'bg-green-50 border-green-200 text-green-700' :
                   result.verdict === 'contradicted' ? 'bg-red-50 border-red-200 text-red-700' :
                   'bg-yellow-50 border-yellow-200 text-yellow-700')}>
@@ -418,7 +418,7 @@ export default function RAG() {
                   } catch (e: any) { setError(e.message) }
                   finally { setLoading(false) }
                 }} disabled={loading}
-                  className="px-4 py-2 text-xs font-sans font-medium bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50">
+                  className="px-4 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:bg-accent-hover disabled:opacity-50">
                   {loading ? '导入中...' : '导入 ATT&CK 完整库'}
                 </button>
                 <button onClick={async () => {
@@ -430,7 +430,7 @@ export default function RAG() {
                   } catch (e: any) { setError(e.message) }
                   finally { setLoading(false) }
                 }} disabled={loading}
-                  className="px-4 py-2 text-xs font-sans font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50">
+                  className="px-4 py-2 text-xs font-sans font-medium bg-indigo-600 text-white rounded-none hover:bg-indigo-700 disabled:opacity-50">
                   {loading ? '导入中...' : '导入 CAPEC 完整库'}
                 </button>
                 <button onClick={async () => {
@@ -442,7 +442,7 @@ export default function RAG() {
                   } catch (e: any) { setError(e.message) }
                   finally { setLoading(false) }
                 }} disabled={loading}
-                  className="px-4 py-2 text-xs font-sans font-medium bg-pink-600 text-white rounded-lg hover:bg-pink-700 disabled:opacity-50">
+                  className="px-4 py-2 text-xs font-sans font-medium bg-pink-600 text-white rounded-none hover:bg-pink-700 disabled:opacity-50">
                   {loading ? '导入中...' : '导入全部 (ATT&CK+CAPEC)'}
                 </button>
               </div>
@@ -458,27 +458,27 @@ export default function RAG() {
                   </p>
                 </div>
                 <button onClick={doSeed} disabled={loading}
-                  className="px-5 py-2 text-xs font-sans font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 shrink-0">
+                  className="px-5 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:bg-accent-hover disabled:opacity-50 shrink-0">
                   {loading ? '播种中...' : '一键填充'}
                 </button>
               </div>
             </div>
 
             {/* ── 文件批量导入 ── */}
-            <div className="border border-line rounded-lg p-4">
+            <div className="border border-line rounded-none p-4">
               <p className="text-xs font-sans font-medium text-ink-faint mb-3">批量导入知识文档（JSON）</p>
               <div className="space-y-3">
                 <div className="flex gap-2">
                   <input ref={fileInputRef} type="file" accept=".json,.txt" onChange={handleFileUpload}
-                    className="block text-xs text-ink-faint file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-sans file:font-medium file:bg-gray-100 file:text-ink hover:file:bg-gray-200" />
+                    className="block text-xs text-ink-faint file:mr-3 file:py-1.5 file:px-3 file:rounded-none file:border-0 file:text-xs file:font-sans file:font-medium file:bg-gray-100 file:text-ink hover:file:bg-gray-200" />
                   <span className="text-xs text-ink-faint self-center">或粘贴 JSON: </span>
                 </div>
                 <textarea value={bulkInput} onChange={e => setBulkInput(e.target.value)} rows={6}
                   placeholder='[{"title":"示例知识","content":"知识正文...","source":"internal","severity":"medium","threat_types":["C2_BEACON"]}]'
-                  className="w-full px-3 py-2 text-xs font-mono border border-line rounded-lg resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
+                  className="w-full px-3 py-2 text-xs font-mono border border-line rounded-none resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
                 <div className="flex items-center gap-2">
                   <button onClick={doBulkImport} disabled={loading || !bulkInput.trim()}
-                    className="px-4 py-1.5 text-xs font-sans font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50">
+                    className="px-4 py-1.5 text-xs font-sans font-medium bg-green-600 text-white rounded-none hover:bg-green-700 disabled:opacity-50">
                     批量导入
                   </button>
                   {bulkStatus && <span className="text-xs text-green-600">{bulkStatus}</span>}
@@ -487,23 +487,23 @@ export default function RAG() {
             </div>
 
             {/* ── 手动添加 ── */}
-            <div className="border border-line rounded-lg p-4">
+            <div className="border border-line rounded-none p-4">
               <p className="text-xs font-sans font-medium text-ink-faint mb-3">手动添加知识文档（自动分块+向量化）</p>
               <div className="space-y-3">
                 <input id="doc-title" type="text" placeholder="文档标题"
-                  className="w-full px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                  className="w-full px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
                 <textarea id="doc-content" rows={6} placeholder="文档内容..."
-                  className="w-full px-3 py-2 text-xs font-mono border border-line rounded-lg resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
+                  className="w-full px-3 py-2 text-xs font-mono border border-line rounded-none resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
                 <div className="flex items-center gap-3 flex-wrap">
                   <select id="doc-source" defaultValue="internal"
-                    className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                    className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
                     <option value="mitre-attack">MITRE ATT&CK</option>
                     <option value="playbook">Playbook</option>
                     <option value="internal">内部文档</option>
                     <option value="cve">CVE</option>
                   </select>
                   <select id="doc-severity" defaultValue="medium"
-                    className="px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent">
+                    className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
                     <option value="info">Info</option>
                     <option value="low">Low</option>
                     <option value="medium">Medium</option>
@@ -511,7 +511,7 @@ export default function RAG() {
                     <option value="critical">Critical</option>
                   </select>
                   <input id="doc-threats" type="text" placeholder="威胁类型(逗号分隔)"
-                    className="flex-1 min-w-[120px] px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                    className="flex-1 min-w-[120px] px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
                   <button onClick={async () => {
                     const title = (document.getElementById('doc-title') as HTMLInputElement)?.value
                     const content = (document.getElementById('doc-content') as HTMLTextAreaElement)?.value
@@ -532,16 +532,16 @@ export default function RAG() {
                     } catch (e: any) { setError(e.message) }
                     finally { setLoading(false) }
                   }} disabled={loading}
-                    className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                    className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-none hover:opacity-90 disabled:opacity-50">
                     添加文档
                   </button>
                 </div>
               </div>
             </div>
 
-            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-none text-xs text-red-700">{error}</div>}
             {result && typeof result === 'string' && (
-              <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-xs text-green-700">{result}</div>
+              <div className="p-3 bg-green-50 border border-green-200 rounded-none text-xs text-green-700">{result}</div>
             )}
             {result && typeof result === 'object' && result.doc_id !== undefined && (
               <Collapse title="添加成功" defaultOpen>

@@ -1,0 +1,18 @@
+id: POL-LATERAL-MOVEMENT
+name: 横向移动主机隔离(别名)
+enabled: true
+description: 横向移动(LATERAL_MOVEMENT)：隔离主机（需审批）
+match:
+  threat_type: LATERAL_MOVEMENT
+  min_confidence: 0.55
+  min_severity: high
+actions:
+- name: isolate_host
+  params: {}
+- name: send_alert
+  params:
+    severity: critical
+auto_execute: false
+require_approval: true
+priority: 85
+cooldown_minutes: 60

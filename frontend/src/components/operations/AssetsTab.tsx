@@ -162,7 +162,7 @@ export function AssetsTab() {
           ) : filtered.length === 0 ? (
             <EmptyState icon="🖥️" title="暂无已注册资产" hint="在右侧表单注册首个资产" />
           ) : (
-            <div className="bg-white border border-line rounded-2xl overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-white border border-line rounded-none overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-[10px] uppercase tracking-wide text-ink-faint text-left bg-black/[0.02]">
@@ -228,7 +228,7 @@ export function AssetsTab() {
         <div className="space-y-6">
           <div>
             <h3 className="text-sm font-semibold text-ink tracking-tight mb-4">注册资产</h3>
-            <div className="bg-white border border-line rounded-2xl p-5 space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-white border border-line rounded-none p-5 space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <p className="text-[11px] font-medium text-ink-faint mb-1">IP</p>
@@ -311,7 +311,7 @@ export function AssetsTab() {
           {/* 资产发现 */}
           <div>
             <h3 className="text-sm font-semibold text-ink tracking-tight mb-4">资产发现</h3>
-            <div className="bg-white border border-line rounded-2xl p-5 space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-white border border-line rounded-none p-5 space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <p className="text-[11px] font-medium text-ink-faint mb-1">扫描范围</p>
@@ -381,7 +381,7 @@ export function AssetsTab() {
 
 function MetricCard({ label, value, color }: { label: string; value: number; color: string }) {
   return (
-    <div className="bg-white border border-line rounded-2xl px-4 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+    <div className="bg-white border border-line rounded-none px-4 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
       <div className="flex items-center gap-1.5 mb-2">
         <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
         <span className="text-[11px] font-medium text-ink-faint">{label}</span>

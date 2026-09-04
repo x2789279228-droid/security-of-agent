@@ -1,9 +1,13 @@
 """Kafka 消息总线与 CEP 攻击链管理路由"""
 import logging
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from models import get_session
+from auth import UserInfo, get_current_user
+from audit_trail import log_from_request
 from kafka_consumer import kafka_consumer_manager
 from kafka_producer import kafka_producer
 from schema_registry import schema_registry
@@ -164,26 +168,50 @@ async def cep_patterns_list():
 
 
 @router.post("/cep/patterns/{pattern_id}/toggle")
-async def cep_pattern_toggle(pattern_id: str):
+async def cep_pattern_toggle(
+    pattern_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(get_current_user),
+):
     """启用/禁用 CEP 模式（通过 Kafka Broadcast 热更新到 Flink）"""
     if pattern_id not in _CEP_PATTERNS_CACHE:
         return {"success": False, "error": f"模式 {pattern_id} 不存在"}
     p = _CEP_PATTERNS_CACHE[pattern_id]
+    before_enabled = p["enabled"]
     p["enabled"] = not p["enabled"]
     p["version"] += 1
     await _broadcast_pattern(p)
+    await log_from_request(
+        session, request, user, action="cep.pattern_toggle",
+        target_type="cep_pattern", target_id=pattern_id,
+        before={"enabled": before_enabled},
+        after={"enabled": p["enabled"], "version": p["version"]},
+    )
     return {"success": True, "pattern": p}
 
 
 @router.post("/cep/patterns/{pattern_id}/shadow")
-async def cep_pattern_shadow(pattern_id: str):
+async def cep_pattern_shadow(
+    pattern_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(get_current_user),
+):
     """切换灰度模式（shadow mode: 仅记录不告警）"""
     if pattern_id not in _CEP_PATTERNS_CACHE:
         return {"success": False, "error": f"模式 {pattern_id} 不存在"}
     p = _CEP_PATTERNS_CACHE[pattern_id]
+    before_shadow = p["shadowMode"]
     p["shadowMode"] = not p["shadowMode"]
     p["version"] += 1
     await _broadcast_pattern(p)
+    await log_from_request(
+        session, request, user, action="cep.pattern_toggle",
+        target_type="cep_pattern", target_id=pattern_id,
+        before={"shadowMode": before_shadow},
+        after={"shadowMode": p["shadowMode"], "version": p["version"]},
+    )
     return {"success": True, "pattern": p}
 
 

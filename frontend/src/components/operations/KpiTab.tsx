@@ -114,7 +114,7 @@ export function KpiTab() {
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {cards.map((c) => (
-              <div key={c.key} className="bg-white border border-line rounded-2xl px-4 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div key={c.key} className="bg-white border border-line rounded-none px-4 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <div className="flex items-center gap-1.5 mb-2">
                   <span className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} />
                   <span className="text-[11px] font-medium text-ink-faint">{c.label}</span>
@@ -149,7 +149,7 @@ export function KpiTab() {
 
           {/* 案例数优先级切分 */}
           {dashboard.case_count_priority && (
-            <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <h3 className="text-[13px] font-semibold text-ink mb-4">按优先级的案例数（{period} 天）</h3>
               <div className="space-y-3">
                 {(['critical', 'high', 'medium', 'low'] as const).map((prio) => {
@@ -181,7 +181,7 @@ export function KpiTab() {
           {/* SLA breach 实时率 + 最近 breach */}
           {sla && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <h3 className="text-[13px] font-semibold text-ink mb-3">SLA 违约率（近 24h）</h3>
                 <GradientNumber value={Math.round(sla.rate.rate * 100)} suffix="%" />
                 <p className="text-[11px] text-ink-faint mt-2">
@@ -201,7 +201,7 @@ export function KpiTab() {
                 </div>
               </div>
 
-              <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <h3 className="text-[13px] font-semibold text-ink mb-3">最近 SLA 超时（{sla.recent.length}）</h3>
                 {sla.recent.length === 0 ? (
                   <p className="text-xs text-ink-faint py-4 text-center">最近 24h 无超时</p>

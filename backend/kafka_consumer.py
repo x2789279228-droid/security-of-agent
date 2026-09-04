@@ -9,6 +9,7 @@ Kafka 消费者 — 从 Flink 处理后的 topic 消费事件
 数据流:
   Kafka(security-audit-queue) → LogIngestor.ingest() → Audit-LLM
   Kafka(security-alerts)      → ResponseOrchestrator.on_threat_detected()
+  Kafka(security-behavior-alerts) → ResponseOrchestrator (BEHAVIOR_ANOMALY / L4)
   Kafka(security-events-enriched) → EventStore.store() + MemoryTree
 
 可靠性保障:
@@ -79,6 +80,7 @@ class KafkaConsumerManager:
             "enriched_consumed": 0,
             "audit_consumed": 0,
             "alerts_consumed": 0,
+            "behavior_alerts_consumed": 0,
             "rejected_consumed": 0,
             "errors": 0,
             "idempotent_skipped": 0,
@@ -114,6 +116,7 @@ class KafkaConsumerManager:
             asyncio.create_task(self._consume_enriched()),
             asyncio.create_task(self._consume_audit_queue()),
             asyncio.create_task(self._consume_alerts()),
+            asyncio.create_task(self._consume_behavior_alerts()),
             asyncio.create_task(self._consume_rejected()),
             asyncio.create_task(self._consume_cep_partial()),
             asyncio.create_task(self._lag_monitor()),
@@ -413,6 +416,15 @@ class KafkaConsumerManager:
             stat_key="alerts_consumed",
         )
 
+    async def _consume_behavior_alerts(self):
+        """消费 security-behavior-alerts → L4 行为基线响应"""
+        await self._consume_loop(
+            topic=settings.kafka_topic_behavior_alerts,
+            group_suffix="behavior-alerts",
+            handler=self._handle_behavior_alert,
+            stat_key="behavior_alerts_consumed",
+        )
+
     async def _consume_rejected(self):
         """消费 security-logs-rejected → 拒绝原因可观测"""
         await self._consume_loop(
@@ -671,6 +683,8 @@ class KafkaConsumerManager:
                     "event_id": 0,
                     "policy_name": f"flink_{alert_type.lower()}",
                     "trace_id": trace_id,
+                    "response_source": "flink_alert",
+                    "allow_blocking": True,
                 }
                 async with db_session() as session:
                     await resp_orch.on_threat_detected(
@@ -678,9 +692,89 @@ class KafkaConsumerManager:
                         threat_info=threat_info,
                         event_id=None,
                         session_id="flink-alert",
+                        allow_blocking=True,
                     )
             except Exception as e:
                 logger.warning(f"[Kafka-Alert] Response trigger failed: {e}")
+
+    async def _handle_behavior_alert(self, alert: dict, trace_id: str):
+        """L4: Flink 行为基线告警 → 固定 BEHAVIOR_ANOMALY，强信号可封禁。"""
+        from models import async_session as db_session
+        from response_engine import get_orchestrator
+        from event_bus import event_bus
+
+        src_ip = alert.get("srcIp") or alert.get("src_ip") or ""
+        severity = str(alert.get("severity") or "high").lower()
+        try:
+            anomaly_score = float(alert.get("anomalyScore") or alert.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            anomaly_score = 0.0
+        reasons = alert.get("reasons") or []
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        category = (
+            alert.get("category")
+            or ("EXFIL" if any("bytes_out" in str(r) for r in reasons) else "SCAN")
+        )
+
+        logger.warning(
+            f"[Kafka-Behavior] BEHAVIOR_ANOMALY from {src_ip} "
+            f"score={anomaly_score:.2f} cat={category} reasons={reasons} "
+            f"trace={trace_id[:8] if trace_id else 'none'}"
+        )
+
+        event_bus.publish("alert", {
+            "alert_type": "BEHAVIOR_ANOMALY",
+            "event_type": "BEHAVIOR_ANOMALY",
+            "severity": severity,
+            "src_ip": src_ip,
+            "anomaly_score": anomaly_score,
+            "reasons": reasons,
+            "source": "flink_baseline",
+            "trace_id": trace_id,
+        })
+
+        if not src_ip:
+            return
+        if anomaly_score < 0.5 and severity not in ("critical", "high"):
+            return
+
+        try:
+            resp_orch = get_orchestrator()
+            threat_info = {
+                "threat_type": "BEHAVIOR_ANOMALY",
+                "category": category,
+                "confidence": min(1.0, max(anomaly_score, 0.6)),
+                "severity": severity if severity in (
+                    "info", "low", "medium", "high", "critical"
+                ) else "high",
+                "src_ip": src_ip,
+                "dst_ip": alert.get("dstIp") or alert.get("dst_ip") or "",
+                "message": alert.get("message") or (
+                    "Flink behavior baseline: " + "; ".join(str(r) for r in reasons)
+                ),
+                "reason": (
+                    f"flink_baseline score={anomaly_score:.2f} "
+                    f"reasons={','.join(str(r) for r in reasons)}"
+                ),
+                "session_id": "flink-behavior",
+                "event_id": 0,
+                "policy_name": "flink_behavior_anomaly",
+                "trace_id": trace_id,
+                "response_source": "flink_baseline",
+                "allow_blocking": True,
+                "anomaly_reasons": list(reasons),
+            }
+            async with db_session() as session:
+                await resp_orch.on_threat_detected(
+                    session=session,
+                    threat_info=threat_info,
+                    event_id=None,
+                    session_id="flink-behavior",
+                    allow_blocking=True,
+                )
+        except Exception as e:
+            logger.warning(f"[Kafka-Behavior] Response trigger failed: {e}")
 
     async def _handle_rejected(self, record: dict, trace_id: str):
         """处理被拒绝的事件 — 聚合统计 + 环形日志"""

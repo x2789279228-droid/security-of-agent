@@ -1,0 +1,19 @@
+id: POL-BEHAVIOR-ANOMALY
+name: 行为基线异常遏制
+enabled: true
+description: L4 Flink 行为基线：15 分钟封禁 + 告警（不依赖厂商 threat_type）
+match:
+  threat_type: BEHAVIOR_ANOMALY
+  min_confidence: 0.5
+  min_severity: high
+actions:
+- name: block_ip
+  params:
+    duration_minutes: 15
+- name: send_alert
+  params:
+    severity: high
+auto_execute: true
+require_approval: false
+priority: 95
+cooldown_minutes: 15

@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -123,9 +124,13 @@ class PySigmaDetector:
                 continue
             sql = (sql_list[0] if isinstance(sql_list, list) and sql_list else str(sql_list))
             sql = sql.replace("<TABLE_NAME>", self.TABLE)
-            # 收集 SQL 引用的字段名(反引号标注), 供 detect 建表补齐列, 避免列不存在报错。
+            # 收集 SQL 引用的字段名（反引号 / 裸标识符），供 detect 建表补齐列
             for m in re.finditer(r"`([^`]+)`", sql):
                 self._field_index.add(m.group(1))
+            for m in re.finditer(r"(?i)(?:\bWHERE\b|\bAND\b|\bOR\b|\()\s*([A-Za-z_][\w.\-]*)\s*(?:=|LIKE|IN|!=|<>)", sql):
+                col = m.group(1)
+                if col.upper() not in {"SELECT", "FROM", "WHERE", "AND", "OR", "LIKE", "IN", "NOT", "NULL"}:
+                    self._field_index.add(col)
             self._compiled.append((meta, sql))
             self._rules.append(meta)
         self._conn = sqlite3.connect(":memory:")
@@ -206,9 +211,15 @@ class PySigmaDetector:
                         act = meta["action_recommend"]
                     results.append(self._mk_result(meta, ev, sev, act, desc))
                     # 命中聚合类规则(SIG-001/007 等带 x-soc-aggregation): 发布聚合候选 → Flink 阈值窗口
+                    # 发布失败不得影响本条检测命中结果
                     agg = meta.get("aggregation")
                     if agg and isinstance(agg, dict):
-                        self._schedule_publish_agg(meta, ev, agg)
+                        try:
+                            self._schedule_publish_agg(meta, ev, agg)
+                        except Exception as pub_err:
+                            logger.warning(
+                                f"[Sigma/agg] publish skipped for {meta.get('rule_id')}: {pub_err}"
+                            )
         finally:
             try:
                 cur.close()
@@ -222,9 +233,13 @@ class PySigmaDetector:
         补齐所有已编译 SQL 引用的字段列(self._field_index), 事件缺省时值为空串,
         避免 SQL 引用不存在的列报错(空列不影响命中, 且 keywords 全文搜索需要这些列)。
         """
-        # 补所有 SQL 引用的字段列
-        extra = sorted(self._field_index - set(cols))
-        cols = list(cols) + extra
+        # 平台常用字段：即使 SQL 解析未抽到，也预建列，避免 OR 条件因缺列整句失败
+        standard = {
+            "event", "message", "src_ip", "dst_ip", "dst_port", "src_port", "port",
+            "protocol", "url", "severity", "host", "user", "username",
+        }
+        needed = set(cols) | set(self._field_index) | standard
+        cols = sorted(needed)
         cur = self._conn.cursor()
         try:
             cur.execute(f"DROP TABLE IF EXISTS {self.TABLE}")
@@ -234,8 +249,16 @@ class PySigmaDetector:
         cur.execute(f'CREATE TABLE {self.TABLE} ({coldef})')
         ph = ", ".join("?" for _ in cols)
         quoted = ", ".join(f'"{c}"' for c in cols)
-        cur.execute(f'INSERT INTO {self.TABLE} ({quoted}) VALUES ({ph})',
-                    [str(ev.get(c, "")) if ev.get(c, "") is not None else "" for c in cols])
+        # protocol=ssh 时补默认 dst_port=22，便于端口类规则在缺字段时仍可 OR 到 event 条件
+        values = []
+        for c in cols:
+            v = ev.get(c, "")
+            if (c == "dst_port" or c == "port") and (v is None or v == ""):
+                proto = str(ev.get("protocol") or "").lower()
+                if proto in ("ssh", "tcp/22"):
+                    v = "22"
+            values.append(str(v) if v is not None else "")
+        cur.execute(f'INSERT INTO {self.TABLE} ({quoted}) VALUES ({ph})', values)
         self._conn.commit()
 
     def _schedule_publish_agg(self, meta, ev, agg: dict):

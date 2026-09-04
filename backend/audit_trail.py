@@ -113,6 +113,45 @@ def _enqueue_fallback(entry: dict) -> None:
         del _fallback_buffer[: len(_fallback_buffer) - _FALLBACK_MAX]
 
 
+async def log_from_request(
+    session: Optional[AsyncSession],
+    request,
+    user,
+    action: str,
+    target_type: str = "",
+    target_id: str = "",
+    before: Optional[dict] = None,
+    after: Optional[dict] = None,
+    reason: str = "",
+) -> None:
+    """端点便捷接入：actor 强制取 JWT 身份（auth.UserInfo），不信任请求体参数。
+
+    request/user 只要求具备 client/headers/username/role 属性，
+    便于测试直接调用端点函数时传入 stub 对象。
+    """
+    try:
+        ip = request.client.host if (request is not None and request.client) else ""
+    except Exception:
+        ip = ""
+    try:
+        ua = request.headers.get("user-agent", "") if request is not None else ""
+    except Exception:
+        ua = ""
+    await log_action(
+        session,
+        actor=getattr(user, "username", "") or "anonymous",
+        actor_role=getattr(user, "role", ""),
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        before=before,
+        after=after,
+        reason=reason,
+        ip=ip,
+        user_agent=ua,
+    )
+
+
 async def flush_fallback(session: AsyncSession) -> int:
     """冲刷离线缓冲到 DB（由 scheduler 周期调用 / watchdog 触发）"""
     if not _fallback_buffer:

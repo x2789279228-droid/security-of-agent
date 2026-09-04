@@ -17,7 +17,7 @@ interface BudgetInfo {
   usage_pct: number
   price_input_per_1k: number
   price_output_per_1k: number
-  estimated_cost_jpy: number
+  estimated_cost_yuan: number
   tracked_events: number
 }
 
@@ -39,6 +39,10 @@ interface EventCost {
 }
 
 interface DailyPoint { day: string; total_tokens: number; prompt_tokens?: number; completion_tokens?: number; calls: number }
+
+interface CacheChannelStats { calls: number; hits: number; rate: number }
+
+interface CacheStats { llm: CacheChannelStats; embedding: CacheChannelStats }
 
 interface ModelBreakdown {
   caller: string
@@ -116,6 +120,7 @@ const OPERATION_LABELS: Record<string, string> = {
 
 const CALLER_LABELS: Record<string, string> = {
   audit_pipeline: '审计流水线',
+  embedding: '嵌入模型',
   evidence_verifier: '证据验证器',
   post_mortem_service: '复盘服务',
   watchdog: '看门狗',
@@ -136,6 +141,7 @@ export function CostTab() {
   const [totalEvents, setTotalEvents] = useState(0)
   const [grand, setGrand] = useState<{ calls: number; prompt_tokens: number; completion_tokens: number; total_tokens: number; errors: number } | null>(null)
   const [budget, setBudget] = useState<BudgetInfo | null>(null)
+  const [cache, setCache] = useState<CacheStats | null>(null)
   const [daily, setDaily] = useState<DailyPoint[]>([])
   const [byCallers, setByCallers] = useState<ModelBreakdown[]>([])
   const [loading, setLoading] = useState(true)
@@ -168,6 +174,7 @@ export function CostTab() {
       setTotalEvents(d.total_events ?? 0)
       setGrand(d.grand ?? null)
       setBudget(d.budget ?? null)
+      setCache(d.cache ?? null)
       setDaily(trend.points ?? [])
       setByCallers(trend.by_caller ?? [])
     } catch (e: any) {
@@ -233,6 +240,14 @@ export function CostTab() {
       sub: priceIn > 0 || priceOut > 0 ? `输入 ¥${priceIn}/1K · 输出 ¥${priceOut}/1K` : '未配置单价（.env）',
       color: '#BF5AF2',
     },
+    {
+      label: 'LLM 缓存命中',
+      value: cache ? `${Math.round(cache.llm.rate * 100)}%` : '—',
+      sub: cache
+        ? `${fmtNum(cache.llm.hits)} 次命中 · 嵌入命中 ${Math.round(cache.embedding.rate * 100)}%`
+        : '',
+      color: '#64D2FF',
+    },
   ]
 
   const maxDaily = Math.max(...daily.map((d) => d.total_tokens), 1)
@@ -280,7 +295,7 @@ export function CostTab() {
 
       {/* 超限告警 */}
       {budget?.over_budget && (
-        <div className="flex items-center gap-2 px-4 py-3 rounded-xl text-xs font-medium text-alert bg-red-50 border border-red-200">
+        <div className="flex items-center gap-2 px-4 py-3 rounded-none text-xs font-medium text-ink bg-mist border border-ink">
           <span className="relative flex h-2 w-2">
             <motion.span className="absolute inline-flex h-full w-full rounded-full bg-alert opacity-60"
               animate={{ scale: [1, 1.8], opacity: [0.6, 0] }} transition={{ duration: 1.4, repeat: Infinity }} />
@@ -293,7 +308,7 @@ export function CostTab() {
       {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
 
       {/* 统计卡片 */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-px bg-line border border-line rounded-2xl overflow-hidden">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-line border border-line rounded-none overflow-hidden">
         {cards.map((c) => (
           <div key={c.label} className="bg-white p-4">
             <div className="flex items-center gap-1.5 mb-2">
@@ -307,7 +322,7 @@ export function CostTab() {
       </div>
 
       {/* 每日趋势 */}
-      <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-[13px] font-semibold text-ink">每日 Token 用量（近 {days} 天）</h3>
           <span className="text-[10px] text-ink-faint font-sans">总量 {fmtTokens(daily.reduce((s, d) => s + d.total_tokens, 0))}</span>
@@ -338,7 +353,7 @@ export function CostTab() {
       </div>
 
       {/* 按模块(调用方)分账 */}
-      <div className="bg-white border border-line rounded-2xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-[13px] font-semibold text-ink">按模块分账（近 {days} 天）</h3>
           <span className="text-[10px] text-ink-faint font-sans">
@@ -383,7 +398,7 @@ export function CostTab() {
       </div>
 
       {/* 按事件消耗表 */}
-      <div className="bg-white border border-line rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <div className="bg-white border border-line rounded-none shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <div className="flex items-center justify-between px-5 py-4">
           <h3 className="text-[13px] font-semibold text-ink">按事件 Token 消耗</h3>
           <span className="text-[11px] text-ink-faint font-sans">
@@ -488,7 +503,7 @@ export function CostTab() {
               animate={{ scale: 1, y: 0, opacity: 1 }}
               exit={{ scale: 0.96, y: 12, opacity: 0 }}
               transition={spring.ui}
-              className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden"
+              className="bg-white rounded-none shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between px-5 py-4 border-b border-line">
@@ -523,6 +538,7 @@ export function CostTab() {
                         <th className="px-4 py-2.5 font-medium text-right">输入</th>
                         <th className="px-4 py-2.5 font-medium text-right">输出</th>
                         <th className="px-4 py-2.5 font-medium text-right">延迟</th>
+                        <th className="px-4 py-2.5 font-medium">缓存</th>
                         <th className="px-4 py-2.5 font-medium">状态</th>
                       </tr>
                     </thead>
@@ -539,6 +555,13 @@ export function CostTab() {
                           <td className="px-4 py-2.5 text-right tabular-nums">{fmtTokens(t.prompt_tokens)}</td>
                           <td className="px-4 py-2.5 text-right tabular-nums">{fmtTokens(t.completion_tokens)}</td>
                           <td className="px-4 py-2.5 text-right tabular-nums text-ink-soft">{fmtMs(t.latency_ms)}</td>
+                          <td className="px-4 py-2.5 whitespace-nowrap">
+                            {t.cache_hit ? (
+                              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">命中</span>
+                            ) : (
+                              <span className="text-[10px] text-ink-faint">—</span>
+                            )}
+                          </td>
                           <td className="px-4 py-2.5 whitespace-nowrap">
                             <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${t.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                               {t.status === 'success' ? '成功' : `失败${t.error_type ? `(${t.error_type})` : ''}`}

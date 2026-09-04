@@ -1,0 +1,19 @@
+id: POL-AUTH-ATTACK
+name: 认证类攻击通用遏制
+enabled: true
+description: AUTH_ATTACK 父类：无专属 leaf 策略时 30 分钟封禁 + 告警
+match:
+  category: AUTH_ATTACK
+  min_confidence: 0.4
+  min_severity: medium
+actions:
+- name: block_ip
+  params:
+    duration_minutes: 30
+- name: send_alert
+  params:
+    severity: high
+auto_execute: true
+require_approval: false
+priority: 50
+cooldown_minutes: 15

@@ -1,0 +1,21 @@
+id: POL-DATA-EXFIL-ISOLATE
+name: 数据外泄紧急隔离
+enabled: true
+description: 数据外泄：封禁IP + 隔离主机（需审批）
+match:
+  threat_type: DATA_EXFIL
+  min_confidence: 0.55
+  min_severity: high
+actions:
+- name: block_ip
+  params:
+    duration_minutes: 1440
+- name: isolate_host
+  params: {}
+- name: send_alert
+  params:
+    severity: critical
+auto_execute: false
+require_approval: true
+priority: 90
+cooldown_minutes: 120

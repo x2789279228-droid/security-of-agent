@@ -10,11 +10,11 @@ import * as THREE from 'three'
 
 const NODE_COUNT = 56
 const PULSE_POOL = 64
-const COLOR_NODE = new THREE.Color('#8fb4e8')
-const COLOR_NODE_DIM = new THREE.Color('#c3c9d4')
-const COLOR_PULSE = new THREE.Color('#0071e3')
-const COLOR_ATTACK = new THREE.Color('#ff3b30')
-const COLOR_FLASH = new THREE.Color('#ff3b30')
+const COLOR_NODE = new THREE.Color('#111111')
+const COLOR_NODE_DIM = new THREE.Color('#c8c8c8')
+const COLOR_PULSE = new THREE.Color('#555555')
+const COLOR_ATTACK = new THREE.Color('#111111')
+const COLOR_FLASH = new THREE.Color('#111111')
 
 interface Pulse {
   edge: number
@@ -79,7 +79,7 @@ function NetworkGraph({ attackCount }: { attackCount: number }) {
     if (!nodeMeshRef.current) return
     nodes.forEach((n, i) => {
       dummy.position.copy(n)
-      dummy.scale.setScalar(0.055 + Math.random() * 0.03)
+      dummy.scale.setScalar(0.07 + Math.random() * 0.04)
       dummy.updateMatrix()
       nodeMeshRef.current!.setMatrixAt(i, dummy.matrix)
       nodeMeshRef.current!.setColorAt(i, tmpColor.copy(COLOR_NODE_DIM).lerp(COLOR_NODE, Math.random()))
@@ -197,7 +197,7 @@ function NetworkGraph({ attackCount }: { attackCount: number }) {
   return (
     <group ref={groupRef}>
       <lineSegments geometry={edgeGeometry}>
-        <lineBasicMaterial color="#0071e3" transparent opacity={0.1} />
+        <lineBasicMaterial color="#111111" transparent opacity={0.22} />
       </lineSegments>
       <instancedMesh ref={nodeMeshRef} args={[undefined, undefined, NODE_COUNT]}>
         <sphereGeometry args={[1, 12, 12]} />
@@ -213,14 +213,7 @@ function NetworkGraph({ attackCount }: { attackCount: number }) {
 
 export default function ThreatNetwork({ attackCount }: { attackCount: number }) {
   return (
-    <div className="relative w-full h-[420px] overflow-hidden">
-      {/* 柔和径向背景，突出中心网络 */}
-      <div
-        className="absolute inset-0"
-        style={{
-          background: 'radial-gradient(ellipse 70% 60% at 50% 45%, rgba(0,113,227,0.06) 0%, rgba(245,245,247,0) 70%)',
-        }}
-      />
+    <div className="relative w-full h-[280px] overflow-hidden bg-white">
       <Canvas
         camera={{ position: [0, 0.6, 11], fov: 50 }}
         dpr={[1, 2]}
@@ -228,8 +221,6 @@ export default function ThreatNetwork({ attackCount }: { attackCount: number }) 
       >
         <NetworkGraph attackCount={attackCount} />
       </Canvas>
-      {/* 底部渐隐，融入页面 */}
-      <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-surface to-transparent pointer-events-none" />
     </div>
   )
 }

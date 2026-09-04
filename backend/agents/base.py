@@ -152,8 +152,14 @@ class BaseAgent(ABC):
         return result
 
     async def llm_chat(self, messages: list[dict]) -> str:
-        from trace_hook import set_trace_context
-        set_trace_context(operation="agent_chat", caller=self.agent_id)
+        from trace_hook import set_trace_context, get_trace_context
+        # 保留父级 audit_pipeline caller,便于吞吐/完成率指标统计;
+        # 组件名写入 operation,避免覆盖后 metrics 显示 audit_pipeline=0
+        ctx = get_trace_context()
+        if ctx.get("caller") == "audit_pipeline":
+            set_trace_context(operation=self.agent_id)
+        else:
+            set_trace_context(operation="agent_chat", caller=self.agent_id)
         return await summary.llm.chat(messages)
 
 
@@ -185,8 +191,14 @@ class BaseAuditComponent:
 
     async def llm_chat(self, messages: list[dict]) -> str:
         """统一 LLM 调用入口，自动注入 caller 标识到 trace + 轻量 CoT 思考链"""
-        from trace_hook import set_trace_context
-        set_trace_context(operation="audit_component", caller=self.agent_id)
+        from trace_hook import set_trace_context, get_trace_context
+        # 流水线入口已设 caller=audit_pipeline; 子组件勿覆盖,否则观测上
+        # audit_pipeline 永远 0 calls(实际 decomposer/sub_auditor 在跑)
+        ctx = get_trace_context()
+        if ctx.get("caller") == "audit_pipeline":
+            set_trace_context(operation=self.agent_id)
+        else:
+            set_trace_context(operation="audit_component", caller=self.agent_id)
         # 轻量 chain-of-thought：最后追加"先逐步推理，再给出结论"工作流引导
         cot_hint = (f"请先依据上下文逐步推理（列出关键证据链、排除干扰、给出置信度），"
                     f"再输出最终结论。推理过程简明扼要，结论必须可追溯到事件证据。")

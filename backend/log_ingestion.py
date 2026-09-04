@@ -57,6 +57,45 @@ class LogIngestor:
         self._audit_status_cache: dict[int, dict] = {}
         # 上限:cache 不超过 10000 条,防止内存爆
         self._audit_status_cache_max = 10000
+        # FastPath 冷却去重:同 src_ip+threat_type 在冷却窗口内只编排一次响应链路,
+        # 防止大量高分事件涌入时同源事件重复挂起 N 条响应编排(策略+DB+webhook/SSH)
+        self._fastpath_cooldown: dict[str, float] = {}
+        self._fastpath_cooldown_ttl = float(os.environ.get("FASTPATH_COOLDOWN_S", "60"))
+        self._fastpath_cooldown_max = 1000
+
+    def _fastpath_allow(self, key: str) -> bool:
+        """冷却窗口内首次调用返回 True 并记录时刻；窗口内重复调用返回 False。"""
+        now = time.time()
+        if now - self._fastpath_cooldown.get(key, 0.0) < self._fastpath_cooldown_ttl:
+            return False
+        if len(self._fastpath_cooldown) >= self._fastpath_cooldown_max:
+            # 简化清理:淘汰最早的一半
+            for k in list(self._fastpath_cooldown.keys())[: self._fastpath_cooldown_max // 2]:
+                self._fastpath_cooldown.pop(k, None)
+        self._fastpath_cooldown[key] = now
+        return True
+
+    async def _index_background(
+        self, session_id: str, log_data: dict, event_text: str, is_anomaly: bool,
+    ) -> None:
+        """记忆树索引 + 滑动窗口写入（后台执行，独立 session）。
+
+        与紧随其后的 Audit-LLM 流水线并行：流水线首轮有多次 LLM 调用，
+        索引写入（毫秒级）几乎总是先于工具查询完成，竞态窗口可忽略。
+        """
+        from models import async_session as db_session
+        try:
+            async with db_session() as s:
+                await memory_tree.add_leaf(
+                    s, session_id, log_data, event_text,
+                    correlation_group="anomaly" if is_anomaly else "",
+                )
+        except Exception as leaf_err:
+            logger.warning(f"[Index] memory_tree.add_leaf failed: {leaf_err}")
+        try:
+            await sliding_window.add_message(session_id, "ingestor", "log", event_text)
+        except Exception as win_err:
+            logger.warning(f"[Index] sliding_window.add_message failed: {win_err}")
 
     def _merge_rounds(self, all_rounds: list[dict], log_data: dict = None) -> dict:
         """
@@ -187,24 +226,14 @@ class LogIngestor:
             anomaly_score=anomaly_report.anomaly_score,
         )
 
-        # 2b. 案例自动聚合
-        try:
-            from case_manager import case_manager
-            await case_manager.auto_create_case(session, stored)
-        except Exception as case_err:
-            logger.warning(f"[Case] Auto-aggregation failed: {case_err}")
-
-        # 3. 记忆树索引
+        # 2b. 记忆树索引 + 滑动窗口 → 后台执行（此前在 ingest 关键路径同步串行，
+        #     是单事件多 DB/Redis 往返的一部分；案例聚合已由 _audit_pipeline 覆盖）
         event_text = json.dumps(log_data, ensure_ascii=False)
-        await memory_tree.add_leaf(
-            session, session_id, log_data, event_text,
-            correlation_group="anomaly" if anomaly_report.is_anomaly else "",
-        )
+        asyncio.create_task(self._index_background(
+            session_id, log_data, event_text, anomaly_report.is_anomaly,
+        ))
 
-        # 4. 滑动窗口
-        await sliding_window.add_message(session_id, "ingestor", "log", event_text)
-
-        # 5. 快速响应：异常分数极高 或 严重度为 critical 或 Sigma 命中 critical 时立即触发
+        # 3. 快速响应：异常分数极高 或 严重度为 critical 或 Sigma 命中 critical 时立即触发
         _sigma_critical = (
             log_data.get("_sigma", {}).get("detected", False)
             and log_data.get("_sigma", {}).get("max_severity") == "critical"
@@ -215,6 +244,11 @@ class LogIngestor:
             or severity == "critical"
             or _sigma_critical
         )
+        # 冷却去重：同源(源IP+威胁类型)事件在窗口内不重复编排响应链路
+        _fp_key = f"{log_data.get('src_ip', '')}|{log_data.get('threat_type') or event_type}"
+        if _fp_trigger and not self._fastpath_allow(_fp_key):
+            logger.debug(f"[FastPath] cooldown skip: {_fp_key}")
+            _fp_trigger = False
         if _fp_trigger:
             try:
                 from response_engine import get_orchestrator
@@ -241,7 +275,19 @@ class LogIngestor:
                     _sigma_conf,
                     _evt_conf_f,
                 ))
-                _fp_sev = severity if severity in ("critical", "high", "medium") else "high"
+                # v5 修复(A):双轨封禁门槛
+                #   强信号(Sigma critical 命中 或 融合置信度>=0.7) → FastPath 可封禁
+                #   仅 severity=critical(无检测器佐证) → 仅告警，封禁等 Audit-LLM confirmed
+                # 此前 severity=critical 直接触发完整响应，152/152 事件绕过
+                # 审计与 veto 门控由 ANY 兜底策略封禁假事件。
+                _strong_signal = bool(
+                    (sigma_info.get("detected") and sigma_info.get("max_severity") == "critical")
+                    or _fused_conf >= 0.7
+                )
+                # v5 修复:不再把 low/info 抬成 high(此前良性低危事件被抬级后
+                # 通过护栏拿到封禁资格,误封正常用户)。未知级别下限取 medium
+                # (护栏下 medium 仍只允许告警/限速,不会封禁)。
+                _fp_sev = severity if severity in ("critical", "high", "medium") else "medium"
                 _fp_msg = log_data.get(
                     "message",
                     f"异常检测快速响应: {', '.join(anomaly_report.reasons)}",
@@ -264,6 +310,11 @@ class LogIngestor:
                     "session_id": session_id,
                     "event_id": stored.id,
                     "anomaly_reasons": anomaly_report.reasons,
+                    # v5 修复(A):响应来源与双轨门槛标记（写入 policy_match 日志可追溯）
+                    "response_source": (
+                        "fastpath_strong" if _strong_signal else "fastpath_severity"
+                    ),
+                    "allow_blocking": _strong_signal,
                 }
                 # 独立 session 后台执行，避免与请求 session 并发冲突
                 async def _fast_response(threat_info: dict, evt_id: int, sid: str):
@@ -273,16 +324,21 @@ class LogIngestor:
                             await _resp_orch.on_threat_detected(
                                 session=s, threat_info=threat_info,
                                 event_id=evt_id, session_id=sid,
+                                allow_blocking=bool(threat_info.get("allow_blocking", True)),
                             )
                         except Exception as fp_err:
                             logger.warning(f"[FastPath] Quick response failed: {fp_err}")
 
                 asyncio.create_task(_fast_response(fast_threat, stored.id, session_id))
-                logger.warning(f"[FastPath] Quick response triggered for event #{stored.id}: score={anomaly_report.anomaly_score:.2f}")
+                logger.warning(
+                    f"[FastPath] Quick response triggered for event #{stored.id}: "
+                    f"score={anomaly_report.anomaly_score:.2f} "
+                    f"mode={'strong(block-capable)' if _strong_signal else 'severity(alert-only)'}"
+                )
             except Exception as fp_err:
                 logger.warning(f"[FastPath] Quick response setup failed: {fp_err}")
 
-        # 6. Audit-LLM 流水线（异步后台审核）
+        # 4. Audit-LLM 流水线（异步后台审核）
         # v4 修复(2026-09-01):先标记 pending,避免事件在 Semaphore 队列里 analyzed=False 黑洞
         self._track_audit_status(stored.id, "pending", event_type=event_type)
         task = asyncio.create_task(self._audit_pipeline(
@@ -397,6 +453,55 @@ class LogIngestor:
         except Exception as e:
             logger.debug(f"[Case] audit-pipeline case aggregation skipped: {e}")
 
+        # ── 审计分流 (LLM 通道分层) ──
+        # 废除全局 budget 一刀切: P0 始终可走最小 LLM; 低优降级 tools_only/rule_close
+        from audit_triage import (
+            score_event, admit, needs_llm,
+            LANE_RULE_CLOSE, LANE_TOOLS_ONLY,
+        )
+        from agents.llm_fallback import budget_usage_pct, budget_exhausted
+        from config import settings as _cfg
+
+        _fp_strong = bool(
+            (log_data.get("_sigma") or {}).get("detected")
+            and str((log_data.get("_sigma") or {}).get("max_severity") or "").lower() == "critical"
+        ) or float(getattr(anomaly_report, "anomaly_score", 0) or 0) >= 0.7
+        triage = score_event(
+            log_data,
+            float(getattr(anomaly_report, "anomaly_score", 0) or 0),
+            fastpath_strong=_fp_strong and bool(getattr(_cfg, "audit_fastpath_demote", True)),
+        )
+        triage = admit(
+            triage,
+            usage_pct=budget_usage_pct(),
+            over_budget=budget_exhausted(),
+            soft_pct=float(getattr(_cfg, "audit_soft_budget_pct", 70.0) or 70.0),
+            hard_pct=float(getattr(_cfg, "audit_hard_budget_pct", 95.0) or 95.0),
+            inflight_full=False,  # 真正满载在 start 返回 shed 时再处理
+        )
+        log_data = {**log_data, "_audit_triage": triage.to_dict()}
+        try:
+            from metrics import inc_audit_lane_admit
+            inc_audit_lane_admit(triage.lane, triage.tier)
+        except Exception:
+            pass
+        logger.info(
+            f"[Audit-Triage] event #{event_id} tier={triage.tier} "
+            f"lane={triage.lane} pri={triage.priority} "
+            f"reasons={triage.reasons[:4]}"
+        )
+
+        if not needs_llm(triage.lane):
+            # tools_only / rule_close: 规则+统计收口,不占 LLM 槽
+            await self._fallback_analysis(
+                event_id, log_data, anomaly_report,
+                f"triage:{triage.lane}:{triage.tier}",
+            )
+            await self._mark_analyzed(
+                event_id, error=f"triage_{triage.lane}", status="fallback"
+            )
+            return
+
         # ── Temporal 优先: 启动 4 层 Agent 编排 Workflow ──
         # 标志:本次调用是否走降级路径(决定 _audit_pipeline_inner 用哪个 Semaphore)
         # v4 复现:Temporal 容器持续 Restarting 时所有调用都走降级,降级路径仍用主 Semaphore=5
@@ -412,10 +517,59 @@ class LogIngestor:
                     anomaly_score=(getattr(anomaly_report, "anomaly_score", 0.0) or 0.0),
                     anomaly_reasons=getattr(anomaly_report, "reasons", []) or [],
                     max_rounds=max_rounds,
+                    tier=triage.tier,
                 )
-                if started:
-                    logger.info(f"[Audit-LLM] routed event #{event_id} to Temporal workflow")
+                if started == "shed":
+                    # Phase C: P0/P1 → 优先级队列等待槽位; P2/P3 → 立即降级收口
+                    if triage.tier in ("P0", "P1"):
+                        from audit_pq import audit_pq
+                        ttl = int(getattr(_cfg, "audit_pq_ttl_s", 900) or 900)
+                        ok = await audit_pq.enqueue(
+                            event_id=event_id,
+                            session_id=session_id,
+                            log_data=log_data,
+                            anomaly_score=(getattr(anomaly_report, "anomaly_score", 0.0) or 0.0),
+                            anomaly_reasons=getattr(anomaly_report, "reasons", []) or [],
+                            max_rounds=max_rounds,
+                            priority=triage.priority,
+                            tier=triage.tier,
+                            ttl_s=ttl,
+                        )
+                        if ok:
+                            self._track_audit_status(
+                                event_id, "pending",
+                                queued="audit_pq", tier=triage.tier,
+                            )
+                            logger.warning(
+                                f"[Audit-LLM] shed→PQ event #{event_id} "
+                                f"tier={triage.tier} pri={triage.priority}"
+                            )
+                            return
+                    logger.warning(
+                        f"[Audit-LLM] shed event #{event_id} tier={triage.tier} "
+                        f"→ triage close (inflight full, no PQ)"
+                    )
+                    await self._fallback_analysis(
+                        event_id, log_data, anomaly_report,
+                        f"shed_load:{triage.tier}",
+                    )
+                    await self._mark_analyzed(
+                        event_id, error="shed_load", status="fallback"
+                    )
                     return
+                if started:
+                    logger.info(
+                        f"[Audit-LLM] routed event #{event_id} to Temporal "
+                        f"(tier={triage.tier} lane={triage.lane})"
+                    )
+                    return
+                # started is False: Temporal 不可用/start 失败(非异常路径)
+                # 必须走 fallback Semaphore,否则与主槽争抢 → 降级时再次卡死
+                _fallback_routed = True
+                logger.info(
+                    f"[Audit-LLM] Temporal unavailable for #{event_id}, "
+                    f"async fallback with fallback-semaphore"
+                )
             except Exception as e:
                 logger.warning(f"[Audit-LLM] Temporal route failed, fallback async: {e}")
                 _fallback_routed = True  # ← 标记走降级,后续用 fallback Semaphore
@@ -425,7 +579,7 @@ class LogIngestor:
             await asyncio.wait_for(
                 self._audit_pipeline_inner(
                     session_id, event_id, log_data, anomaly_report, max_rounds,
-                    use_fallback_semaphore=_fallback_routed,  # ← 新增参数
+                    use_fallback_semaphore=_fallback_routed,
                 ),
                 timeout=900,
             )
@@ -670,6 +824,18 @@ class LogIngestor:
                         all_rounds.append(round_data)
                         from veto_gates import filter_missed_threats
                         missed_threats = filter_missed_threats(verdict.missed_threats)
+                        # hop-budget early-stop: 禁止补审轮 — 证据已差时再开
+                        # supplement 只会继续占槽空转(r6 根因之一)
+                        hop_trace = getattr(audit_result, "hop_trace", None) or []
+                        if any(
+                            isinstance(h, dict) and h.get("skip_reasoning")
+                            for h in hop_trace
+                        ):
+                            logger.info(
+                                f"[Audit-LLM] hop-budget early-stop → finalize "
+                                f"(cleared {len(missed_threats)} missed)"
+                            )
+                            missed_threats = []
                         final_verdict = verdict
                         final_audit = audit_result
 
@@ -853,6 +1019,9 @@ class LogIngestor:
                                 "session_id": session_id,
                                 "event_id": event_id,
                                 "policy_name": f"audit_llm_rounds_{len(all_rounds)}",
+                                # v5 修复(A):响应来源标记
+                                "response_source": "audit_llm",
+                                "allow_blocking": True,
                             }
                             async def _audit_response(threat_info: dict, evt_id: int, sid: str):
                                 from models import async_session as db_session

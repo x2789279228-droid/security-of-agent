@@ -138,7 +138,9 @@ export function CaseDrawer({
                 <StatusBadge status={caseItem.status} />
                 <PriorityChip priority={caseItem.priority} />
                 <SeverityChip severity={caseItem.severity} />
-                <SlaBadge deadline={caseItem.sla_deadline} breached={caseItem.sla_breached} />
+                {caseItem.status !== 'resolved' && caseItem.status !== 'closed' && (
+                  <SlaBadge deadline={caseItem.sla_deadline} breached={caseItem.sla_breached} />
+                )}
               </div>
             </div>
             <button onClick={onClose} className="shrink-0 w-8 h-8 flex items-center justify-center rounded-full hover:bg-black/[0.05] text-ink-soft text-lg">×</button>

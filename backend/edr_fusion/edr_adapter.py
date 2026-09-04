@@ -272,7 +272,8 @@ class EdrAdapter:
         """将关联结果推送为告警（写入 event_bus / Kafka）"""
         try:
             from event_bus import event_bus
-            await event_bus.publish("edr_correlation", result.to_dict())
+            # event_bus.publish 是同步方法（返回 None），不能 await
+            event_bus.publish("edr_correlation", result.to_dict())
         except Exception as e:
             logger.debug("关联告警推送失败: %s", e)
 

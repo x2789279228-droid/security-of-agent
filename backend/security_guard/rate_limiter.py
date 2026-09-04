@@ -76,24 +76,50 @@ class RateLimiter:
                 },
             )
 
-        return CheckResult(
-            check_name="频率控制",
-            passed=True,
-            message=f"频率正常（动作: {action_name}）",
-            details={"action": action_name, "global_count": global_count},
-        )
-
-    def record(self, action_name: str):
-        """记录一次已执行的动作（用于频率统计）。
-
-        Args:
-            action_name: 已执行的安全动作名称
-        """
-        now = time.time()
+        # 通过检查：立即同步预留名额（占坑），而不是等动作执行后再 record。
+        # 本方法全程无 await，在单事件循环内执行是原子的：即使多个协程并发
+        # 通过 inspect，也不会同时看到同一个计数快照，窗口内实际放行数
+        # 不会超过上限，消除了 check 与执行动作（跨越 await）之间的
+        # check-then-act 竞态。
+        # 注：该方案适用于单实例进程；多实例部署需改用 Redis INCR+EXPIRE。
         self._global_calls.append(now)
         self._action_calls[action_name].append(now)
         # 清理过期记录，避免内存无限增长
         self._cleanup(now)
+
+        return CheckResult(
+            check_name="频率控制",
+            passed=True,
+            message=f"频率正常（动作: {action_name}）",
+            details={"action": action_name, "global_count": global_count + 1},
+        )
+
+    def record(self, action_name: str, success: bool = True):
+        """确认或补偿 check() 预留的频率名额。
+
+        check() 通过时已同步占坑，本方法不再重复计数：
+          - success=True：动作执行成功（或无法区分结果），保留占坑；
+          - success=False：动作执行失败，释放占坑，
+            避免失败动作挤占窗口内的频率额度。
+
+        Args:
+            action_name: 已执行的安全动作名称
+            success: 动作是否执行成功
+        """
+        if success:
+            return
+        self.release(action_name)
+
+    def release(self, action_name: str):
+        """释放最近一次预留（动作执行失败时的补偿）。
+
+        从全局与该动作的窗口列表各移除一个时间戳，保证计数精确减一。
+        """
+        if self._global_calls:
+            self._global_calls.pop()
+        action_window = self._action_calls.get(action_name)
+        if action_window:
+            action_window.pop()
 
     def reset(self):
         """清空所有频率记录（用于测试）。"""

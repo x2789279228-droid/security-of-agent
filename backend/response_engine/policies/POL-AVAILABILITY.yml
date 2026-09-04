@@ -1,0 +1,22 @@
+id: POL-AVAILABILITY
+name: 可用性攻击通用防护
+enabled: true
+description: AVAILABILITY 父类：DDoS 等未知变种
+match:
+  category: AVAILABILITY
+  min_confidence: 0.4
+  min_severity: high
+actions:
+- name: rate_limit
+  params:
+    bandwidth_kbps: 100
+- name: block_ip
+  params:
+    duration_minutes: 60
+- name: send_alert
+  params:
+    severity: critical
+auto_execute: true
+require_approval: false
+priority: 45
+cooldown_minutes: 20

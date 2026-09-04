@@ -16,9 +16,12 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
     },
   })
   if (res.status === 401) {
+    const hadToken = !!localStorage.getItem('sm_token')
     localStorage.removeItem('sm_token')
     localStorage.removeItem('sm_user')
-    window.location.href = '/login'
+    if (hadToken && !window.location.pathname.startsWith('/login')) {
+      window.location.href = '/login'
+    }
     throw new Error('认证已过期，请重新登录')
   }
   if (!res.ok) {
@@ -38,8 +41,14 @@ export const api = {
   get: <T = any>(path: string) => fetchJSON<T>(path),
 
   login: (username: string, password: string) =>
-    fetchJSON<{ access_token: string; token_type: string }>(
+    fetchJSON<{ access_token: string; token_type: string; role?: string }>(
       '/auth/login',
+      { method: 'POST', body: JSON.stringify({ username, password }) },
+    ),
+
+  register: (username: string, password: string) =>
+    fetchJSON<{ access_token: string; token_type: string; role?: string; username?: string }>(
+      '/auth/register',
       { method: 'POST', body: JSON.stringify({ username, password }) },
     ),
 
@@ -142,12 +151,29 @@ export const api = {
   getResponsePolicies: () =>
     fetchJSON<any[]>('/response/policies'),
 
+  /** 新建响应策略（YAML 热加载） */
+  createResponsePolicy: (policy: Record<string, any>) =>
+    fetchJSON<any>('/response/policies', {
+      method: 'POST',
+      body: JSON.stringify(policy),
+    }),
+
   /** 更新响应策略 */
   updateResponsePolicy: (policy: Record<string, any>) =>
     fetchJSON<any>('/response/policies', {
       method: 'PUT',
       body: JSON.stringify(policy),
     }),
+
+  /** 禁用响应策略 */
+  deleteResponsePolicy: (name: string) =>
+    fetchJSON<any>(`/response/policies/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
+
+  /** 热加载响应策略 YAML */
+  reloadResponsePolicies: () =>
+    fetchJSON<any>('/response/policies/reload', { method: 'POST' }),
 
   /** 获取所有可用响应动作 */
   getResponseActions: () =>
@@ -311,15 +337,28 @@ export const api = {
   llmCost: () =>
     fetchJSON<any>('/llm/cost'),
 
-  /** 获取最近实时事件 */
-  eventsRecent: (limit = 50) =>
-    fetchJSON<any[]>(`/events/recent?limit=${limit}`),
+  /** 正在运行的 Agent 接力（Monitor 首屏 hydration） */
+  activePipelines: () =>
+    fetchJSON<{ pipelines: any[]; count: number }>('/observability/active-pipelines'),
 
-  /** 创建 SSE 事件流连接 */
-  eventsStream: () => {
+  /** 获取最近实时事件（页面刷新恢复/断线回放），按 seq 升序 */
+  eventsRecent: (params: { limit?: number; since_seq?: number } = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(params).map(([k, v]) => [k, String(v)]),
+    ).toString()
+    return fetchJSON<any[]>(`/events/recent${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 创建 SSE 事件流连接；lastEventSeq 用于手动重建连接时通过查询参数补传断点（浏览器仅自动重连时才携带头） */
+  eventsStream: (lastEventSeq?: number) => {
     const token = localStorage.getItem('sm_token')
-    const url = `${BASE}/events/stream${token ? `?token=${token}` : ''}`
-    return new EventSource(url)
+    const params = new URLSearchParams()
+    if (token) params.set('token', token)
+    if (typeof lastEventSeq === 'number' && lastEventSeq > 0) {
+      params.set('last_event_id', String(lastEventSeq))
+    }
+    const qs = params.toString()
+    return new EventSource(`${BASE}/events/stream${qs ? `?${qs}` : ''}`)
   },
 
   // ── 钓鱼检测端点 ──
@@ -521,6 +560,12 @@ export const api = {
     fetchJSON<any>(`/rules/${ruleType}/${encodeURIComponent(ruleId)}`, {
       method: 'PUT',
       body: JSON.stringify({ content, change_summary: changeSummary, changed_by: changedBy }),
+    }),
+
+  /** 禁用/删除规则 */
+  opsDeleteRule: (ruleType: string, ruleId: string) =>
+    fetchJSON<any>(`/rules/${ruleType}/${encodeURIComponent(ruleId)}`, {
+      method: 'DELETE',
     }),
 
   /** 规则版本历史 */

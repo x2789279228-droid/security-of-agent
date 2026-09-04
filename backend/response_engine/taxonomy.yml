@@ -1,0 +1,177 @@
+# 威胁分类树（两级：category → leaves）
+# 运营可追加 aliases / keywords，热加载后生效，无需发版。
+# 解析顺序：精确 alias → leaf 枚举/别名 → 关键词 → 仅 category
+
+categories:
+  AUTH_ATTACK:
+    leaves:
+      - BRUTE_FORCE
+      - UNAUTHORIZED_ACCESS
+      - SUSPICIOUS_LOGIN
+    aliases:
+      - 登录弱密码
+      - 暴力破解
+      - 未授权获取密码信息
+      - 未授权获取明文密码信息
+      - 非敏感接口未鉴权
+      - 日志接口未授权访问
+      - 异常凭证枚举
+      - 凭证枚举
+      - 未授权
+      - 未鉴权
+    keywords:
+      - 凭证枚举
+      - 异常凭证
+      - 弱密码
+      - 暴力破解
+      - 未授权
+      - 未鉴权
+      - credential
+      - brute
+    # alias → 具体 leaf（未列出的 alias 只落到 category）
+    alias_leaves:
+      登录弱密码: BRUTE_FORCE
+      暴力破解: BRUTE_FORCE
+      未授权获取密码信息: UNAUTHORIZED_ACCESS
+      未授权获取明文密码信息: UNAUTHORIZED_ACCESS
+      非敏感接口未鉴权: UNAUTHORIZED_ACCESS
+      日志接口未授权访问: UNAUTHORIZED_ACCESS
+      登录失败: SUSPICIOUS_LOGIN
+
+  EXFIL:
+    leaves:
+      - DATA_EXFIL
+    aliases:
+      - 数据外泄
+      - 请求数据存在明文密码信息
+    keywords:
+      - 外泄
+      - 数据泄露
+      - exfil
+    alias_leaves:
+      数据外泄: DATA_EXFIL
+      请求数据存在明文密码信息: DATA_EXFIL
+
+  C2:
+    leaves:
+      - C2_BEACON
+    aliases:
+      - C2通信
+      - C2
+    keywords:
+      - c2
+      - beacon
+      - 回连
+    alias_leaves:
+      C2通信: C2_BEACON
+      C2: C2_BEACON
+
+  SCAN:
+    leaves:
+      - PORT_SCAN
+    aliases:
+      - 端口扫描
+    keywords:
+      - 端口扫描
+      - port scan
+      - 扫描
+    alias_leaves:
+      端口扫描: PORT_SCAN
+
+  MALWARE:
+    leaves:
+      - MALWARE_DETECT
+      - RANSOMWARE
+    aliases:
+      - 恶意软件
+      - 勒索软件
+      - WebShell攻击
+    keywords:
+      - 恶意软件
+      - webshell
+      - 勒索
+      - malware
+      - ransom
+    alias_leaves:
+      恶意软件: MALWARE_DETECT
+      勒索软件: RANSOMWARE
+      WebShell攻击: MALWARE_DETECT
+
+  INTRUSION:
+    leaves:
+      - SQL_INJECTION
+      - XSS_ATTACK
+      - COMMAND_INJECTION
+    aliases:
+      - SQL注入
+      - 跨站脚本
+      - 命令注入
+    keywords:
+      - sql注入
+      - 命令注入
+      - 跨站
+      - xss
+      - injection
+    alias_leaves:
+      SQL注入: SQL_INJECTION
+      跨站脚本: XSS_ATTACK
+      命令注入: COMMAND_INJECTION
+
+  LATERAL:
+    leaves:
+      - LATERAL_MOVE
+      - LATERAL_MOVEMENT
+    aliases:
+      - 横向移动
+    keywords:
+      - 横向移动
+      - lateral
+    alias_leaves:
+      横向移动: LATERAL_MOVE
+
+  AVAILABILITY:
+    leaves:
+      - DDoS_TRAFFIC
+    aliases:
+      - DDoS
+    keywords:
+      - ddos
+      - 洪水
+    alias_leaves:
+      DDoS: DDoS_TRAFFIC
+
+  # L4: Flink 行为基线合成类型（无厂商字符串）
+  BEHAVIOR:
+    leaves:
+      - BEHAVIOR_ANOMALY
+    aliases:
+      - BEHAVIOR_ANOMALY
+    keywords:
+      - behavior_anomaly
+      - 行为基线
+    alias_leaves:
+      BEHAVIOR_ANOMALY: BEHAVIOR_ANOMALY
+
+  BENIGN:
+    leaves:
+      - USER_LOGIN
+      - FILE_ACCESS
+      - DNS_QUERY
+    aliases:
+      - 登录成功
+      - 文件访问
+      - DNS查询
+    keywords: []
+    alias_leaves:
+      登录成功: USER_LOGIN
+      文件访问: FILE_ACCESS
+      DNS查询: DNS_QUERY
+
+# 英文枚举别名归一
+leaf_aliases:
+  LATERAL_MOVEMENT: LATERAL_MOVE
+  DATA_EXFILTRATION: DATA_EXFIL
+  DATA_EXFILTRATE: DATA_EXFIL
+  C2_COMM: C2_BEACON
+  SSH_BRUTE: BRUTE_FORCE
+  DDOS_TRAFFIC: DDoS_TRAFFIC

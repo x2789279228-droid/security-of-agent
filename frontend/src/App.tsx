@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { RootLayout } from './layouts/RootLayout'
 import { ROUTES } from './lib/constants'
@@ -6,6 +6,7 @@ import { PageTransition } from './components/common/PageTransition'
 import { useAuthStore } from './stores/authStore'
 
 const Login = lazy(() => import('./pages/Login'))
+const Register = lazy(() => import('./pages/Register'))
 const Home = lazy(() => import('./pages/Home'))
 const Logs = lazy(() => import('./pages/Logs'))
 const Monitor = lazy(() => import('./pages/Monitor'))
@@ -13,7 +14,6 @@ const SecurityAudit = lazy(() => import('./pages/SecurityAudit'))
 const Response = lazy(() => import('./pages/Response'))
 const RAG = lazy(() => import('./pages/RAG'))
 const Operations = lazy(() => import('./pages/Operations'))
-// NDR 扩展
 const Traffic = lazy(() => import('./pages/Traffic'))
 const Encrypted = lazy(() => import('./pages/Encrypted'))
 const Intel = lazy(() => import('./pages/Intel'))
@@ -24,17 +24,22 @@ const CapabilitiesDashboard = lazy(() => import('./pages/CapabilitiesDashboard')
 function PageLoader() {
   return (
     <PageTransition>
-      <div className="flex items-center justify-center h-[60vh] text-sm text-ink-faint font-sans">
+      <div className="flex items-center justify-center h-[60vh] text-sm text-ink-faint tracking-[0.2em]">
         加载中…
       </div>
     </PageTransition>
   )
 }
 
-function RequireAuth({ children }: { children: React.ReactNode }) {
+function Guard({ children }: { children: ReactNode }) {
   const token = useAuthStore((s) => s.token)
   if (!token) return <Navigate to="/login" replace />
   return <>{children}</>
+}
+
+function page(el: ReactNode, auth = true) {
+  const inner = <Suspense fallback={<PageLoader />}>{el}</Suspense>
+  return auth ? <Guard>{inner}</Guard> : inner
 }
 
 export default function App() {
@@ -42,24 +47,25 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Suspense fallback={<PageLoader />}><Login /></Suspense>} />
-        <Route element={<RequireAuth><RootLayout /></RequireAuth>}>
-          <Route index element={<Suspense fallback={<PageLoader />}><Home /></Suspense>} />
-          <Route path={ROUTES.LOGS} element={<Suspense fallback={<PageLoader />}><Logs /></Suspense>} />
-          <Route path={ROUTES.MONITOR} element={<Suspense fallback={<PageLoader />}><Monitor /></Suspense>} />
-          <Route path={ROUTES.SECURITY_AUDIT} element={<Suspense fallback={<PageLoader />}><SecurityAudit /></Suspense>} />
-          <Route path={ROUTES.RESPONSE} element={<Suspense fallback={<PageLoader />}><Response /></Suspense>} />
-          <Route path={ROUTES.OPERATIONS} element={<Suspense fallback={<PageLoader />}><Operations /></Suspense>} />
-          <Route path={ROUTES.RAG} element={<Suspense fallback={<PageLoader />}><RAG /></Suspense>} />
-          {/* NDR 扩展 */}
-          <Route path={ROUTES.TRAFFIC} element={<Suspense fallback={<PageLoader />}><Traffic /></Suspense>} />
-          <Route path={ROUTES.ENCRYPTED} element={<Suspense fallback={<PageLoader />}><Encrypted /></Suspense>} />
-          <Route path={ROUTES.INTEL} element={<Suspense fallback={<PageLoader />}><Intel /></Suspense>} />
-          <Route path={ROUTES.SANDBOX} element={<Suspense fallback={<PageLoader />}><Sandbox /></Suspense>} />
-          <Route path={ROUTES.EDR} element={<Suspense fallback={<PageLoader />}><EDR /></Suspense>} />
-          <Route path={ROUTES.CAPABILITIES} element={<Suspense fallback={<PageLoader />}><CapabilitiesDashboard /></Suspense>} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="/register" element={<Suspense fallback={<PageLoader />}><Register /></Suspense>} />
+        <Route element={<RootLayout />}>
+          <Route index element={page(<Home />, false)} />
+          <Route path={ROUTES.LOGS} element={page(<Logs />, false)} />
+          <Route path={ROUTES.MONITOR} element={page(<Monitor />, false)} />
+          <Route path={ROUTES.SECURITY_AUDIT} element={page(<SecurityAudit />, false)} />
+          <Route path={ROUTES.RESPONSE} element={page(<Response />, false)} />
+          <Route path={ROUTES.OPERATIONS} element={page(<Operations />, false)} />
+          <Route path={ROUTES.RAG} element={page(<RAG />, false)} />
+          <Route path={ROUTES.TRAFFIC} element={page(<Traffic />, false)} />
+          <Route path={ROUTES.ENCRYPTED} element={page(<Encrypted />, false)} />
+          <Route path={ROUTES.INTEL} element={page(<Intel />, false)} />
+          <Route path={ROUTES.SANDBOX} element={page(<Sandbox />, false)} />
+          <Route path={ROUTES.EDR} element={page(<EDR />, false)} />
+          <Route path={ROUTES.CAPABILITIES} element={page(<CapabilitiesDashboard />, false)} />
         </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
   )
 }
+

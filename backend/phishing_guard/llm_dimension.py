@@ -170,7 +170,7 @@ async def enrich_with_llm(
     result = await enhance_phishing(
         cache_key=cache_key,
         prompt_messages=prompt_messages,
-        budget_cost_jpy=0.1,
+        budget_cost_yuan=0.1,
     )
 
     if result is None:

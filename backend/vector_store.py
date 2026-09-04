@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from pgvector.sqlalchemy import Vector
 
@@ -103,6 +103,17 @@ class VectorStore:
             content = sanitize_untrusted_text(content, max_len=500)
         else:
             content = sanitize_untrusted_text(content, max_len=2000)
+
+        # 维度护栏：拒绝写入与配置不一致的向量，避免 768/1536 混存
+        if embedding is not None:
+            dim = len(embedding)
+            expect = settings.embedding_dim
+            if dim != expect:
+                logger.error(
+                    f"[Memory] embedding dim mismatch: got={dim} expect={expect}; "
+                    "refusing write (set embedding=None)"
+                )
+                embedding = None
 
         meta = dict(metadata or {})
         digest = content_hash(content)
@@ -242,7 +253,14 @@ class VectorStore:
         agent_id: Optional[str], top_k: int, min_score: float,
     ) -> list[Memory]:
         vec = np.array(query_embedding, dtype=np.float32)
-        stmt = select(Memory).order_by(Memory.embedding.cosine_distance(vec)).limit(top_k)
+        vec_str_dims = len(vec)
+        # 维度防御: 仅检索与查询同维的记忆(混合维度会让 <=> 抛维度错误)
+        stmt = (
+            select(Memory)
+            .where(text(f"vector_dims(embedding) = {vec_str_dims}"))
+            .order_by(Memory.embedding.cosine_distance(vec))
+            .limit(top_k)
+        )
         if agent_id:
             stmt = stmt.where(Memory.agent_id == agent_id)
         result = await session.execute(stmt)

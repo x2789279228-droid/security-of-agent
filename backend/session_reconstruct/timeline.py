@@ -295,7 +295,7 @@ class TimelineBuilder:
                     {"role": "system", "content": render("analysis/timeline_narrative_system")},
                     {"role": "user", "content": prompt},
                 ],
-                budget_cost_jpy=0.05,
+                budget_cost_yuan=0.05,
             )
 
             if result and isinstance(result, dict):

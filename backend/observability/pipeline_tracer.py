@@ -170,6 +170,12 @@ class PipelineTracer:
         )
         self._active[span.span_id] = span
         logger.debug(f"[Span] START {stage} event=#{event_id} span={span.span_id} trace={trace_id[:8] or '-'}")
+        # 实时推送 Agent 阶段，供 Monitor 多 Agent 接力可视化
+        try:
+            from observability.stage_events import publish_agent_stage
+            publish_agent_stage(span, "start")
+        except Exception:
+            pass
         return span
 
     def end_span(self, span: Span, error: str = "", metadata: Optional[dict] = None):
@@ -192,6 +198,12 @@ class PipelineTracer:
             f"{' error=' + error[:100] if error else ''}"
         )
 
+        try:
+            from observability.stage_events import publish_agent_stage
+            publish_agent_stage(span, "end")
+        except Exception:
+            pass
+
         # 异步落库
         if self._persist_enabled:
             self._persist_span(span)
@@ -209,6 +221,11 @@ class PipelineTracer:
             f"[Span] TIMEOUT {span.stage} event=#{span.event_id} "
             f"latency={span.latency_ms:.0f}ms"
         )
+        try:
+            from observability.stage_events import publish_agent_stage
+            publish_agent_stage(span, "end")
+        except Exception:
+            pass
 
     def _finalize_otel(self, span: Span, error: str = ""):
         """结束 OTel span 并写状态/属性"""

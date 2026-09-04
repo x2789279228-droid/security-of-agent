@@ -27,6 +27,7 @@
 import json
 import logging
 import os
+from collections import OrderedDict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -91,14 +92,54 @@ class EventStore:
             os.path.dirname(__file__), "event_archive"
         )
         os.makedirs(self.data_dir, exist_ok=True)
-        self._hot_cache: dict[int, dict] = {}
+        # 热缓存 LRU：此前是无上限 dict，持续写入永不淘汰，长跑内存持续膨胀。
+        # 容量可由 EVENT_STORE_HOT_CACHE_MAX 调整；超容时按最久未访问淘汰。
+        self._hot_cache: "OrderedDict[int, dict]" = OrderedDict()
+        self._hot_cache_max = int(os.environ.get("EVENT_STORE_HOT_CACHE_MAX", "2000"))
         self._initialized = False
+        # Redis 跨进程失效通道: Temporal worker 写回后通知 backend 丢弃热缓存
+        self._redis = None
+        self._invalidate_channel = "soc:event_store:invalidate"
+        self._invalidate_listener_task = None
 
-    def invalidate(self, event_id: int) -> None:
-        """审计/响应写回后丢弃热缓存，避免 get_by_id 读到入库时的陈旧快照。"""
+    def _cache_put(self, event_id: int, data: dict) -> None:
+        """写入热缓存并执行 LRU 淘汰。"""
+        self._hot_cache[event_id] = data
+        self._hot_cache.move_to_end(event_id)
+        while len(self._hot_cache) > self._hot_cache_max:
+            self._hot_cache.popitem(last=False)
+
+    def set_redis(self, redis_client) -> None:
+        """接入 Redis，启用跨进程热缓存失效广播。"""
+        self._redis = redis_client
+        logger.info("EventStore: Redis invalidate channel enabled")
+
+    def invalidate(self, event_id: int, *, broadcast: bool = True) -> None:
+        """审计/响应写回后丢弃热缓存，避免 get_by_id 读到入库时的陈旧快照。
+
+        broadcast=True 时同步通过 Redis pub/sub 通知其他进程(backend API)丢弃同 ID。
+        Temporal worker 与 FastAPI 不共享内存，缺广播会导致流水线报告 API 永远 pending。
+        """
         if event_id is None:
             return
-        self._hot_cache.pop(int(event_id), None)
+        eid = int(event_id)
+        self._hot_cache.pop(eid, None)
+        if broadcast and self._redis is not None:
+            try:
+                # redis.asyncio: fire-and-forget create_task; sync redis: publish 直接调
+                import asyncio
+                pub = getattr(self._redis, "publish", None)
+                if pub is None:
+                    return
+                result = pub(self._invalidate_channel, str(eid))
+                if asyncio.iscoroutine(result):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(result)
+                    except RuntimeError:
+                        pass
+            except Exception as e:
+                logger.debug(f"EventStore invalidate broadcast failed: {e}")
 
     def update_hot_cache(self, event_id: int, **fields) -> None:
         """就地更新热缓存字段；不存在则忽略（下次 get_by_id 走 DB）。"""
@@ -108,6 +149,40 @@ class EventStore:
         if not cached:
             return
         cached.update(fields)
+
+    async def start_invalidate_listener(self) -> None:
+        """订阅 Redis 失效通道，丢弃本进程热缓存。backend / worker 均可调用。"""
+        if self._redis is None or self._invalidate_listener_task is not None:
+            return
+        try:
+            pubsub = self._redis.pubsub()
+            await pubsub.subscribe(self._invalidate_channel)
+        except Exception as e:
+            logger.warning(f"EventStore invalidate listener subscribe failed: {e}")
+            return
+
+        async def _listen():
+            try:
+                async for msg in pubsub.listen():
+                    if not msg or msg.get("type") != "message":
+                        continue
+                    data = msg.get("data")
+                    try:
+                        if isinstance(data, bytes):
+                            data = data.decode()
+                        eid = int(data)
+                    except (TypeError, ValueError):
+                        continue
+                    # 本进程收到广播时不再二次广播
+                    self._hot_cache.pop(eid, None)
+            except Exception as e:
+                logger.warning(f"EventStore invalidate listener stopped: {e}")
+
+        import asyncio
+        self._invalidate_listener_task = asyncio.create_task(
+            _listen(), name="event-store-invalidate"
+        )
+        logger.info("EventStore: invalidate listener started")
 
     async def store(
         self,
@@ -190,8 +265,8 @@ class EventStore:
             created_at=evt.created_at.isoformat(),
         )
 
-        # 缓存到 hot cache
-        self._hot_cache[evt.id] = asdict(stored)
+        # 缓存到 hot cache (LRU)
+        self._cache_put(evt.id, asdict(stored))
 
         logger.info(f"Stored event #{evt.id}: {event_type}/{severity} "
                     f"anomaly={anomaly_score:.3f} "
@@ -288,23 +363,8 @@ class EventStore:
                     f"src_ip={filters.src_ip})")
         return events
 
-    async def get_by_id(
-        self,
-        session: AsyncSession,
-        event_id: int,
-    ) -> Optional[StoredEvent]:
-        """按 ID 获取单条完整事件"""
-        # 先查 hot cache
-        if event_id in self._hot_cache:
-            return StoredEvent(**self._hot_cache[event_id])
-
-        # 查 DB
-        evt = await session.get(SecurityEvent, event_id)
-        if not evt:
-            return None
-
+    def _to_stored(self, evt: SecurityEvent) -> StoredEvent:
         raw = evt.raw_data or {}
-        # anomaly_score 优先读取独立列
         anomaly_score = (
             evt.anomaly_score if evt.anomaly_score is not None
             else raw.get("_anomaly_score", 0.0)
@@ -320,9 +380,42 @@ class EventStore:
             raw_data=raw,
             anomaly_score=anomaly_score,
             correlation_id=raw.get("_correlation_id", ""),
-            created_at=evt.created_at.isoformat(),
+            created_at=evt.created_at.isoformat() if evt.created_at else "",
             analyzed=bool(evt.analyzed),
         )
+
+    async def get_by_id(
+        self,
+        session: AsyncSession,
+        event_id: int,
+        *,
+        prefer_db: bool = False,
+    ) -> Optional[StoredEvent]:
+        """按 ID 获取单条完整事件。
+
+        Temporal worker 与 FastAPI 分进程: ingest 时写入的热缓存不含后续
+        `_audit_llm` 写回。若缓存标记 analyzed=False(或强制 prefer_db),
+        必须回源 DB,否则 /audit-llm/pipeline 会永远返回空报告。
+        """
+        cached = self._hot_cache.get(event_id)
+        if cached is not None and not prefer_db:
+            # 已完成审计的缓存可信; 未完成的可能是跨进程写回前的陈旧快照 → 回源
+            if cached.get("analyzed") and (cached.get("raw_data") or {}).get("_audit_llm"):
+                self._hot_cache.move_to_end(event_id)
+                return StoredEvent(**cached)
+            # fall through to DB revalidation
+
+        evt = await session.get(SecurityEvent, event_id)
+        if not evt:
+            return None
+
+        stored = self._to_stored(evt)
+        # 回填/刷新热缓存(带 LRU 淘汰),避免持续穿透
+        try:
+            self._cache_put(event_id, asdict(stored))
+        except Exception:
+            pass
+        return stored
 
     async def get_unreviewed_anomalies(
         self,

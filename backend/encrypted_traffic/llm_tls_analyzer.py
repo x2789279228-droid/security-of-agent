@@ -84,7 +84,7 @@ async def llm_analyze_tls_session(
             {"role": "system", "content": render("security/tls_analyzer_system")},
             {"role": "user", "content": prompt},
         ],
-        budget_cost_jpy=0.05,
+        budget_cost_yuan=0.05,
     )
 
     if result:

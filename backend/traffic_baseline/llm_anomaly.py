@@ -100,7 +100,7 @@ async def llm_analyze_anomaly(
     result = await enhance_traffic(
         cache_key=cache_key,
         prompt_messages=prompt_messages,
-        budget_cost_jpy=0.05,
+        budget_cost_yuan=0.05,
     )
 
     if result is None:

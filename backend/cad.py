@@ -43,9 +43,13 @@ class VerificationReport:
     claim_source: str                    # 哪个 Agent 输出的
     claimed_evidence_ids: list[int]      # Agent 声称的证据 ID
     actual_evidence_ids: list[int]       # 实际查询到的证据 ID
-    verified: bool                       # 是否验证通过
+    verified: bool                       # 是否验证通过（真实存在/一致）
     discrepancy: str = ""                # 差异描述
     severity: str = "info"               # 差异严重度
+    # 不可穿透验证标记: 断言未附带任何可查证据 ID，本身无法穿透核验。
+    # 这不是"查无此 ID 的幻觉"，而是"数据源无可拆分证据(如单源告警)"，
+    # 不应计入 hallucination/证据缺失而累积熔断。
+    unverifiable: bool = False
 
 
 class PenetratingVerifier:
@@ -79,14 +83,17 @@ class PenetratingVerifier:
             claim_source = item.get("source", "executor")
 
             if not claimed_ids:
+                # 无可查证据 ID: 视为“不可穿透验证 (unverifiable)”而非幻觉。
+                # 差异类型（单源告警/孤立日志没有可分解子证据）并非 Agent 发明证据。
                 reports.append(VerificationReport(
                     claim=claim_text,
                     claim_source=claim_source,
                     claimed_evidence_ids=[],
                     actual_evidence_ids=[],
                     verified=False,
-                    discrepancy="断言未附带任何证据 ID",
-                    severity="high",
+                    unverifiable=True,
+                    discrepancy="断言未附带任何证据 ID — 无证据可穿透验证(unverifiable)，不计幻觉",
+                    severity="low",
                 ))
                 continue
 
@@ -333,6 +340,7 @@ class CircuitBreakerState:
     evidence_completeness_trend: list[float] = field(default_factory=list)
     audit_count: int = 0
     anomaly_rate: float = 0.0
+    last_na_note: str = ""          # 最近一条“无可验断言”的说明(可观测性)
 
     # 阈值（环境变量 SHARED_MEMORY_CAD_* 覆盖）
     MAX_HALLUCINATION_RISK: float = field(default_factory=lambda: float(
@@ -362,6 +370,7 @@ class CircuitBreaker:
     def __init__(self):
         self.state = CircuitBreakerState()
         self._bad_count = 0
+        self._na_count = 0          # 无可验(单源/孤立无分解证据)审计次数——不计入幻觉趋势
         # CAD 自身准确率追踪
         self._cad_decisions: list[dict] = []  # {event_id, tripped, overridden, timestamp}
         self._override_count = 0
@@ -390,6 +399,22 @@ class CircuitBreaker:
 
         # 检查熔断条件
         self._check_trip()
+
+    def record_na(self, notes: str = ""):
+        """记录一次“无可验断言”审计(孤立单源/暂无分解证据)。
+
+        这类事件没有可穿透验证的 claims，不等于证据质量低(D的完整度不是 0)，
+        也不等于幻觉——因此不写入 hallucination/evidence trend,避免累积 0 触发熔断。
+        仅做计数与可观测性暴露；真实坏趋势(查无此 ID / 断言失实)仍照常走
+        record_audit_result 触发熔断。
+        """
+        self.state.audit_count += 1
+        self._na_count += 1
+        self.state.last_na_note = notes
+        logger.info(
+            f"[CAD] 无可验断言审计 #{self._na_count}: {notes or '无分解证据'} "
+            f"(不计入幻觉趋势, 不触发熔断)"
+        )
 
     def _check_trip(self):
         """检查是否需要熔断"""
@@ -530,6 +555,8 @@ class CircuitBreaker:
                 if len(self.state.evidence_completeness_trend) >= 10 else 1.0
             ),
             "anomaly_rate": self.state.anomaly_rate,
+            "unverifiable_count": self._na_count,   # 无可验断言审计(不计入幻觉趋势)
+            "last_na_note": self.state.last_na_note,
             "thresholds": {
                 "max_hallucination_risk": self.state.MAX_HALLUCINATION_RISK,
                 "min_evidence_completeness": self.state.MIN_EVIDENCE_COMPLETENESS,

@@ -71,21 +71,62 @@ class SshFirewallAdapter:
 
     def configure(self, host: str, port: int = 22, username: str = "",
                   password: str = "", use_sudo: bool = True):
-        """配置 SSH 连接参数"""
+        """配置 SSH 连接参数
+
+        v5 修复:configure 时即解析主机名并缓存 IP。burst 高并发期间
+        Docker 内嵌 DNS (127.0.0.11) 偶发丢包导致 paramiko 连接报
+        "Name or service not known"(2026-09-01 复现:block_ip 连续 error)。
+        缓存后连接直接用 IP, 不再依赖每次 DNS; 连接异常时清缓存重新解析。
+        """
         self._config.update({
             "host": host,
             "port": port,
             "username": username,
             "password": password,
             "use_sudo": use_sudo,
+            "resolved_ip": "",
         })
+        self._resolve_host()
+
+    def _resolve_host(self) -> None:
+        host = self._config.get("host") or ""
+        if not host:
+            return
+        try:
+            import socket as _socket
+            infos = _socket.getaddrinfo(host, int(self._config.get("port") or 22))
+            ip = infos[0][4][0] if infos else ""
+            if ip and ip != host:
+                self._config["resolved_ip"] = ip
+                logger.info(f"SSH firewall: resolved {host} -> {ip} (cached)")
+        except Exception as e:
+            logger.warning(f"SSH firewall: pre-resolve {host} failed: {e}")
 
     @property
     def enabled(self) -> bool:
         return HAS_PARAMIKO and bool(self._config["host"] and self._config["username"])
 
     def connect(self) -> str:
-        """建立 SSH 连接"""
+        """建立 SSH 连接
+
+        v5 修复:瞬时 DNS/网络抖动重试 (burst 高并发下 Docker 内嵌 DNS
+        偶发 "Name or service not known", 导致 block_ip 误报 error)。
+        重试节奏 1s/3s, 共 3 次尝试; 第 2 次起清空 DNS 缓存重新解析
+        (容器重建后 IP 可能变化)。
+        """
+        last_err: Exception | None = None
+        for attempt, wait in enumerate((0.0, 1.0, 3.0), start=1):
+            try:
+                return self._connect_once()
+            except Exception as e:
+                last_err = e
+                self._config["resolved_ip"] = ""
+                if wait:
+                    time.sleep(wait)
+                self._resolve_host()
+        raise last_err  # type: ignore[misc]
+
+    def _connect_once(self) -> str:
         if not HAS_PARAMIKO:
             raise RuntimeError("paramiko 未安装")
         cfg = self._config
@@ -118,9 +159,12 @@ class SshFirewallAdapter:
             except Exception as e:
                 logger.warning(f"SSH firewall: failed to load key {key_path}: {e}")
 
+        # v5 修复:优先用 configure 时缓存的 IP, 绕开每次连接的 DNS 依赖
+        connect_host = cfg.get("resolved_ip") or cfg["host"]
+
         if pkey is not None:
             client.connect(
-                hostname=cfg["host"],
+                hostname=connect_host,
                 port=cfg["port"],
                 username=cfg["username"],
                 pkey=pkey,
@@ -131,7 +175,7 @@ class SshFirewallAdapter:
         else:
             # 回退到密码登录
             client.connect(
-                hostname=cfg["host"],
+                hostname=connect_host,
                 port=cfg["port"],
                 username=cfg["username"],
                 password=cfg["password"],

@@ -96,9 +96,9 @@ IMAGE_TAG=1.2.3 docker compose -f docker-compose.yml -f docker-compose.prod.yml 
 **故障恢复演练**:
 
 ```bash
-# 1. Flink 重启恢复 (checkpoint 兜底, 不重不漏)
-docker compose restart flink-jobmanager flink-taskmanager
-docker compose exec flink-jobmanager /opt/flink/submit-jobs.sh   # 重新提交作业
+# 1. Flink 重启恢复 (守护自动重提: JM 就绪并 15 槽补齐全 → 自动重新提交)
+docker compose restart flink-jobmanager flink-taskmanager-1 flink-taskmanager-2 flink-taskmanager-3
+docker compose logs -f flink-job-submitter   # 观察守护自动补交 (可另开终端执行步骤 2)
 
 # 2. 后端重启 (PG 幂等兜底, 重放不重复落库)
 docker compose restart backend
@@ -151,8 +151,15 @@ curl -s localhost:8001/api/pipeline/status
 - Kafka 单 broker 需 `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1` 和
   `KAFKA_TRANSACTION_MAX_TIMEOUT_MS=3600000` (Flink EXACTLY_ONCE sink 的
   transaction.timeout.ms 默认 1h), 否则 InitProducerId 失败。
-- Flink TaskManager slots 需 ≥ 作业并行度之和 (2 作业 × 3 并行 → 6 slots),
-  否则槽位饥饿导致恰好一次 sink 超时。
+- **Flink 集群并发槽**: 3×TaskManager 每副本 5 slots = 集群 15 并发槽,`parallelism.default=5`
+  (3 核心作业 × 5 = 15 槽, 精确匹配);作业由常驻守护 `flink-job-submitter` 在
+  JM 就绪且槽位补全后自动提交, JobManager/TM 重启或作业失败后自动补交 (name 级幂等,
+  不产生双实例)。手动重提兜底: `docker compose exec flink-jobmanager /opt/flink/submit-jobs.sh`
+- **槽位与分区提醒**: 上游 Kafka `security-logs-raw` 等 topic 建为 3 分区,
+  并行度 5 下 source 侧有 2 个空转 subtask (sink/聚合仍满 5 并行)。若需 source 侧同等并发,
+  用 `tools/init-kafka-topics.sh` 重建/扩容 topic 至 ≥5 分区 (详见 `docs/study-guide`)。
+- **NDR 槽位上限**: 全量 5 作业 (默认3 + NDR Flow/TLS) × 并行 5 = 25 槽 > 15。
+  需先调低 `FLINK_PARALLELISM` 或扩充 TaskManager 后才 `SUBMIT_NDR_JOBS=1` 提交, 否则槽位饥饿。
 - `flink_state` 卷所有权须为 flink 用户 (uid 9999), 否则 checkpoint 目录创建失败:
   `docker run --rm -v shared-memory-platform_flink_state:/var/flink-state alpine chown -R 9999:9999 /var/flink-state`
 

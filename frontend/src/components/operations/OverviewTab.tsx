@@ -1,9 +1,14 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import { api } from '../../lib/api'
 import { spring } from '../../lib/constants'
 import { LifecycleLoop } from './LifecycleLoop'
 import { GradientNumber, EmptyState } from './badges'
+import {
+  useEventStreamLifecycle,
+  useEventStreamStore,
+  severityOf,
+} from '../../lib/eventStream'
 import type { SecurityCase, WorkOrder, FpStats } from '../../types/operations'
 
 interface ActivityItem {
@@ -14,13 +19,72 @@ interface ActivityItem {
   time: number
 }
 
+// 实时活动关注的业务事件类型 — 覆盖接入/告警/审计/响应/管道全链路，
+// 经共享 SSE 单例(useEventStreamLifecycle)获得服务端回放与断线重连
+const ACTIVITY_TYPES = new Set([
+  'security_event', 'alert', 'audit_complete', 'response_action', 'pipeline_health',
+])
+
+function describeActivity(e: { type: string; data: any }): { text: string; severity?: string } {
+  const d = e.data ?? {}
+  switch (e.type) {
+    case 'security_event':
+      return {
+        text: `事件接入 [${d.event_type || '未知'}] ${d.src_ip || ''}`,
+        severity: String(d.severity ?? ''),
+      }
+    case 'alert':
+      return {
+        text: `告警 ⚠ ${d.alert_type || ''} · ${d.src_ip || ''}`,
+        severity: String(d.severity ?? 'high'),
+      }
+    case 'audit_complete':
+      return d.threat_detected
+        ? { text: `事件 #${d.event_id} 审计确认威胁 [${d.threat_type}]`, severity: String(d.severity ?? 'high') }
+        : { text: `事件 #${d.event_id} 审计完成 — 判定安全` }
+    case 'response_action':
+      return {
+        text: `响应处置 ${d.threat_type || ''} · ${d.status || 'triggered'}`,
+        severity: 'high',
+      }
+    case 'pipeline_health':
+      if (d.type === 'diagnostic') return { text: `自动诊断: ${d.root_cause || d.trigger || ''}`, severity: d.severity }
+      if (d.type === 'sla_breach') return { text: `工单 ${d.order_number} SLA 超时`, severity: 'high' }
+      return { text: `管道告警 [${d.stage}]: ${(d.reasons || []).join('; ')}`, severity: d.severity ?? 'medium' }
+    default:
+      return { text: e.type }
+  }
+}
+
 export function OverviewTab({ onNavigate }: { onNavigate: (tab: string) => void }) {
   const [cases, setCases] = useState<SecurityCase[]>([])
   const [orders, setOrders] = useState<WorkOrder[]>([])
   const [fpStats, setFpStats] = useState<FpStats | null>(null)
-  const [activity, setActivity] = useState<ActivityItem[]>([])
   const [loaded, setLoaded] = useState(false)
-  const esRef = useRef<EventSource | null>(null)
+
+  // 实时活动: 复用平台共享 SSE 单例（带 token/断点续传/看门狗重连），
+  // 从事件缓冲派生活动流 — 连接死时状态指示如实显示，不再是假"监听中"
+  useEventStreamLifecycle()
+  const streamStatus = useEventStreamStore((s) => s.status)
+  const attempts = useEventStreamStore((s) => s.attempts)
+  const buffer = useEventStreamStore((s) => s.buffer)
+
+  const activity = useMemo<ActivityItem[]>(() => {
+    const items: ActivityItem[] = []
+    for (const e of buffer) {
+      if (e.kind !== 'event' || !ACTIVITY_TYPES.has(e.type)) continue
+      const { text, severity } = describeActivity(e)
+      items.push({
+        id: `evt-${e.id}`,
+        type: e.type,
+        text,
+        severity: severity ?? severityOf(e.type, e.data),
+        time: e.ts,
+      })
+      if (items.length >= 12) break
+    }
+    return items
+  }, [buffer])
 
   const load = useCallback(async () => {
     try {
@@ -39,45 +103,15 @@ export function OverviewTab({ onNavigate }: { onNavigate: (tab: string) => void 
 
   useEffect(() => {
     load()
-    // SSE 实时活动
-    const es = api.eventsStream()
-    esRef.current = es
-    const push = (item: Omit<ActivityItem, 'id' | 'time'>) =>
-      setActivity((prev) => [
-        { ...item, id: `${Date.now()}-${Math.random()}`, time: Date.now() },
-        ...prev,
-      ].slice(0, 12))
-
-    const onHealth = (e: MessageEvent) => {
-      try {
-        const d = JSON.parse(e.data)
-        if (d.type === 'alert') push({ type: 'health', text: `流水线告警 [${d.stage}]: ${(d.reasons || []).join('; ')}`, severity: 'critical' })
-        else if (d.type === 'diagnostic') push({ type: 'diagnostic', text: `自动诊断: ${d.root_cause}`, severity: d.severity })
-        else if (d.type === 'sla_breach') push({ type: 'sla', text: `工单 ${d.order_number} SLA 超时`, severity: 'high' })
-        else if (d.type === 'tuning_suggestions') push({ type: 'tuning', text: `生成 ${d.count} 条规则调优建议` })
-      } catch { /* noop */ }
-    }
-    const onAudit = (e: MessageEvent) => {
-      try {
-        const d = JSON.parse(e.data)
-        if (d.threat_detected) push({ type: 'threat', text: `事件 #${d.event_id} 确认威胁 [${d.threat_type}]`, severity: d.severity })
-      } catch { /* noop */ }
-    }
-    es.addEventListener('pipeline_health', onHealth)
-    es.addEventListener('audit_complete', onAudit)
-    return () => {
-      es.removeEventListener('pipeline_health', onHealth)
-      es.removeEventListener('audit_complete', onAudit)
-      es.close()
-      esRef.current = null
-    }
   }, [load])
 
   // 指标计算
   const activeCases = cases.filter((c) => !['closed', 'false_positive'].includes(c.status))
   const openCases = cases.filter((c) => c.status === 'open')
-  const now = Date.now()
-  const slaBreached = cases.filter((c) => (c.sla_breached || (c.sla_deadline && new Date(c.sla_deadline).getTime() < now)) && !['closed', 'false_positive'].includes(c.status))
+  // SLA 门槛取页面挂载时刻: 避免渲染期 Date.now() 造成的纯度问题, 重挂即刷新
+  const [now] = useState(() => Date.now())
+  const slaTerminal = ['closed', 'false_positive', 'resolved']
+  const slaBreached = cases.filter((c) => (c.sla_breached || (c.sla_deadline && new Date(c.sla_deadline).getTime() < now)) && !slaTerminal.includes(c.status))
   const activeOrders = orders.filter((o) => ['pending', 'assigned', 'in_progress'].includes(o.status))
   const pendingApprovals = orders.filter((o) => o.order_type === 'approval' && o.approval_status === 'pending')
   const fpRate = fpStats ? Math.round(fpStats.overall_fp_rate * 100) : 0
@@ -147,12 +181,24 @@ export function OverviewTab({ onNavigate }: { onNavigate: (tab: string) => void 
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-ink tracking-tight">实时活动</h3>
           <span className="flex items-center gap-1.5 text-[10px] text-ink-faint">
-            <motion.span
-              className="w-1.5 h-1.5 rounded-full bg-ok"
-              animate={{ scale: [1, 1.4, 1], opacity: [1, 0.4, 1] }}
-              transition={{ duration: 1.6, repeat: Infinity }}
-            />
-            监听中
+            {streamStatus === 'online' ? (
+              <>
+                <motion.span
+                  className="w-1.5 h-1.5 rounded-full bg-ok"
+                  animate={{ scale: [1, 1.4, 1], opacity: [1, 0.4, 1] }}
+                  transition={{ duration: 1.6, repeat: Infinity }}
+                />
+                监听中
+              </>
+            ) : (
+              <>
+                <span className={`w-1.5 h-1.5 rounded-full ${streamStatus === 'connecting' || streamStatus === 'reconnecting' ? 'bg-nong' : 'bg-dan'}`} />
+                {streamStatus === 'connecting' ? '连接中…'
+                  : streamStatus === 'reconnecting' ? `重连中 (第 ${attempts} 次)`
+                  : streamStatus === 'offline' ? '连接断开'
+                  : '未连接'}
+              </>
+            )}
           </span>
         </div>
 

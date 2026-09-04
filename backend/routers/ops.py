@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import get_session, async_session, SecurityEvent
 from auth import get_current_user, RequireRole, UserInfo
+from audit_trail import log_from_request
 from event_store import event_store, EventFilter
 from correlation_engine import correlation_engine
 
@@ -60,7 +61,7 @@ async def agent_traces_by_event(
     user: UserInfo = Depends(RequireRole("admin")),
 ):
     """按事件聚合 token 消耗 — 运营中心成本面板主数据"""
-    from eval_repository import get_event_token_aggregation
+    from eval_repository import get_event_token_aggregation, get_cache_channel_stats
     from summary_compression import cost_tracker
 
     data = await get_event_token_aggregation(
@@ -69,6 +70,8 @@ async def agent_traces_by_event(
         event_type=event_type, severity=severity,
     )
     data["budget"] = cost_tracker.stats()
+    # 缓存命中率(LLM/嵌入分通道) — 成本面板统计卡直接消费
+    data["cache"] = await get_cache_channel_stats()
     data["estimated_cost_yuan"] = round(cost_tracker.estimate_cost_yuan(
         data["grand"]["prompt_tokens"], data["grand"]["completion_tokens"]
     ), 4)
@@ -130,6 +133,56 @@ async def observability_spans(
         stage=stage or None,
         limit=limit,
     )
+
+
+@router.get("/observability/active-pipelines")
+async def observability_active_pipelines(
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """按 event_id 聚合正在运行的 Agent 接力（Monitor 首屏 hydration）"""
+    from observability.pipeline_tracer import pipeline_tracer, STAGES
+    from observability.stage_events import DEFAULT_SSE_STAGES, STAGE_LABELS
+
+    active = pipeline_tracer.get_active_spans()
+    by_event: dict[int, list[dict]] = {}
+    for s in active:
+        eid = int(s.get("event_id") or 0)
+        if not eid:
+            continue
+        by_event.setdefault(eid, []).append(s)
+
+    # 近期已完成 span，用于补全 completed_stages
+    recent = pipeline_tracer.get_recent_spans(limit=200)
+    completed_by_event: dict[int, list[str]] = {}
+    for s in recent:
+        eid = int(s.get("event_id") or 0)
+        if not eid or eid not in by_event:
+            continue
+        stage = s.get("stage") or ""
+        if stage in DEFAULT_SSE_STAGES and s.get("status") == "success":
+            completed_by_event.setdefault(eid, [])
+            if stage not in completed_by_event[eid]:
+                completed_by_event[eid].append(stage)
+
+    stage_order = {st: i for i, st in enumerate(STAGES)}
+    pipelines = []
+    for eid, spans in by_event.items():
+        spans_sorted = sorted(spans, key=lambda x: stage_order.get(x.get("stage", ""), 99))
+        current = spans_sorted[-1]
+        cur_stage = current.get("stage", "")
+        pipelines.append({
+            "event_id": eid,
+            "session_id": current.get("session_id", ""),
+            "trace_id": current.get("trace_id", ""),
+            "current_stage": cur_stage,
+            "agent_label": STAGE_LABELS.get(cur_stage, cur_stage),
+            "completed_stages": completed_by_event.get(eid, []),
+            "started_at": current.get("start_time"),
+            "running_seconds": current.get("running_seconds", 0),
+            "active_spans": spans_sorted,
+        })
+    pipelines.sort(key=lambda p: p.get("started_at") or 0, reverse=True)
+    return {"pipelines": pipelines, "count": len(pipelines)}
 
 
 @router.get("/observability/traces")
@@ -678,17 +731,31 @@ async def list_rules(
     return rule_manager.list_rules(rule_type)
 
 @router.post("/rules")
-async def create_rule(body: dict, user: UserInfo = Depends(RequireRole("admin"))):
+async def create_rule(
+    body: dict, request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
     from rule_manager import rule_manager
     result = rule_manager.create_rule(body.get("rule_type", "sigma"), body.get("content", {}), body.get("changed_by", "admin"))
     if result.get("success") and result.get("version_data"):
         async with async_session() as session:
             await rule_manager.save_version(session, result["version_data"])
+    async with async_session() as audit_session:
+        await log_from_request(
+            audit_session, request, user, action="rule.create",
+            target_type="rule",
+            target_id=str(result.get("rule_id") or result.get("version_data", {}).get("rule_id") or ""),
+            after={"rule_type": body.get("rule_type", "sigma"),
+                   "success": result.get("success")},
+        )
     return result
 
 @router.put("/rules/{rule_type}/{rule_id}")
 async def update_rule(
     rule_type: str, rule_id: str, body: dict,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
     user: UserInfo = Depends(RequireRole("admin")),
 ):
     from rule_manager import rule_manager
@@ -699,6 +766,32 @@ async def update_rule(
     if result.get("success") and result.get("version_data"):
         async with async_session() as session:
             await rule_manager.save_version(session, result["version_data"])
+    async with async_session() as audit_session:
+        await log_from_request(
+            audit_session, request, user, action="rule.update",
+            target_type="rule", target_id=f"{rule_type}:{rule_id}",
+            after={"success": result.get("success"),
+                   "change_summary": body.get("change_summary", "")},
+        )
+    return result
+
+
+@router.delete("/rules/{rule_type}/{rule_id}")
+async def delete_rule(
+    rule_type: str, rule_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """禁用/删除规则（response_policy 为软禁用）。"""
+    from rule_manager import rule_manager
+    result = rule_manager.delete_rule(rule_type, rule_id)
+    async with async_session() as audit_session:
+        await log_from_request(
+            audit_session, request, user, action="rule.delete",
+            target_type="rule", target_id=f"{rule_type}:{rule_id}",
+            after={"success": result.get("success")},
+        )
     return result
 
 @router.get("/rules/{rule_type}/{rule_id}/versions")
@@ -712,11 +805,21 @@ async def get_rule_versions(
 @router.post("/rules/{rule_type}/{rule_id}/rollback")
 async def rollback_rule(
     rule_type: str, rule_id: str, body: dict,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
     user: UserInfo = Depends(RequireRole("admin")),
 ):
     from rule_manager import rule_manager
     async with async_session() as session:
-        return await rule_manager.rollback(session, rule_type, rule_id, body.get("target_version", 1), body.get("changed_by", "admin"))
+        result = await rule_manager.rollback(session, rule_type, rule_id, body.get("target_version", 1), body.get("changed_by", "admin"))
+    async with async_session() as audit_session:
+        await log_from_request(
+            audit_session, request, user, action="rule.rollback",
+            target_type="rule", target_id=f"{rule_type}:{rule_id}",
+            after={"target_version": body.get("target_version", 1),
+                   "result": str(result)[:500]},
+        )
+    return result
 
 @router.post("/rules/sandbox")
 async def sandbox_test_rule(body: dict, user: UserInfo = Depends(RequireRole("admin"))):

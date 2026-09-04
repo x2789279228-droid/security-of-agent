@@ -15,9 +15,9 @@ const TYPE_FILTERS: { value: OrderType | ''; label: string }[] = [
 
 const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
   pending: { label: '待处理', color: '#86868b', bg: 'rgba(134,134,139,0.10)' },
-  assigned: { label: '已指派', color: '#0A84FF', bg: 'rgba(10,132,255,0.10)' },
+  assigned: { label: '已指派', color: '#111111', bg: '#e8e8e8' },
   in_progress: { label: '进行中', color: '#FF9F0A', bg: 'rgba(255,159,10,0.12)' },
-  completed: { label: '已完成', color: '#34c759', bg: 'rgba(52,199,89,0.10)' },
+  completed: { label: '已完成', color: '#111111', bg: '#f2f2f2' },
   cancelled: { label: '已取消', color: '#86868b', bg: 'rgba(134,134,139,0.10)' },
 }
 
@@ -86,7 +86,7 @@ export function WorkOrdersTab() {
                 initial={{ opacity: 0, y: 16 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ ...spring.ui, delay: Math.min(i * 0.03, 0.3) }}
-                className="bg-white border border-line rounded-2xl px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+                className="bg-white border border-line rounded-none px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
               >
                 <div className="flex items-start gap-3">
                   <OrderTypeIcon type={o.order_type} />
@@ -95,7 +95,9 @@ export function WorkOrdersTab() {
                       <span className="text-[11px] font-mono text-ink-faint">{o.order_number}</span>
                       <span className="px-2 py-0.5 rounded-md text-[10px] font-medium" style={{ color: sm.color, background: sm.bg }}>{sm.label}</span>
                       <span className="text-[10px] text-ink-faint">{orderTypeLabel(o.order_type)}工单</span>
-                      {o.sla_breached && <SlaBadge deadline={o.sla_deadline} breached />}
+                      {o.sla_breached && !['completed', 'cancelled'].includes(o.status) && (
+                        <SlaBadge deadline={o.sla_deadline} breached />
+                      )}
                     </div>
                     <h3 className="text-sm font-semibold text-ink tracking-tight mt-1">{o.title || '(无标题)'}</h3>
                     {o.description && <p className="text-xs text-ink-soft mt-1 line-clamp-2">{o.description}</p>}

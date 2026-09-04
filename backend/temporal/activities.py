@@ -40,6 +40,43 @@ async def audit_round(inp: dict) -> dict:
 
     set_trace_context(caller="audit_pipeline", event_id=event_id, session_id=session_id)
 
+    # 分层预算: 仅非 P0 在硬预算下 short-circuit; P0 保留最小 LLM hop
+    from agents.llm_fallback import should_short_circuit_for_tier
+    _triage = (log_data or {}).get("_audit_triage") or {}
+    _tier = str(_triage.get("tier") or "P2")
+    if should_short_circuit_for_tier(_tier):
+        logger.warning(
+            f"[Temporal-audit_round] budget hard — short-circuit "
+            f"event#{event_id} tier={_tier} round{round_num}"
+        )
+        return {
+            "round": round_num,
+            "mode": mode,
+            "depth": mode,
+            "sub_tasks": 0,
+            "tool_calls": 0,
+            "audit": {},
+            "verdict": {},
+            "missed_threats": [],
+            "short_circuit": "budget_exhausted",
+            "audit_full": {
+                "grounding_score": 0.0,
+                "kb_verification": {},
+                "schema_valid": False,
+                "confidence": 0.0,
+                "threat_detected": False,
+                "severity": (log_data or {}).get("severity", "info"),
+                "needs_human_review": True,
+                "threat_type": "",
+            },
+            "verdict_full": {
+                "conclusion": "insufficient_evidence",
+                "confidence": 0.0,
+                "final_summary": f"硬预算短路(tier={_tier}),非P0不占LLM槽",
+            },
+            "evidence": [],
+        }
+
     # decompose 不需要 DB session; execute 需要 → 内部开 session
     with pipeline_tracer.span("decomposer", event_id=event_id, session_id=session_id):
         decomp_output = await decomposer.decompose(
@@ -92,6 +129,14 @@ async def audit_round(inp: dict) -> dict:
         }
         for mt in verdict.missed_threats
     ]
+    # hop-budget early-stop → 禁止补审轮(与 async 路径对齐)
+    hop_trace = getattr(audit_result, "hop_trace", None) or []
+    if any(isinstance(h, dict) and h.get("skip_reasoning") for h in hop_trace):
+        logger.info(
+            f"[Temporal-audit_round] hop-budget early-stop → no supplement "
+            f"event#{event_id} cleared_missed={len(missed)}"
+        )
+        missed = []
 
     return {
         "round": round_num,
@@ -111,6 +156,7 @@ async def audit_round(inp: dict) -> dict:
             "threat_detected": bool(getattr(audit_result, "threat_detected", False)),
             "severity": getattr(audit_result, "severity", "info"),
             "needs_human_review": bool(getattr(audit_result, "needs_human_review", False)),
+            "threat_type": getattr(audit_result, "threat_type", ""),
         },
         "verdict_full": {
             "conclusion": getattr(verdict, "conclusion", ""),
@@ -153,12 +199,22 @@ async def save_result(inp: dict) -> dict:
             for claim in (rd.get("audit") or {}).get("evidence") or []:
                 if isinstance(claim, dict) and "threat_claims" in claim:
                     evidence_for_gate.extend(claim.get("threat_claims") or [])
+        _sigma = log_data.get("_sigma") or {} if isinstance(log_data, dict) else {}
+        _anomaly = log_data.get("_anomaly") or {} if isinstance(log_data, dict) else {}
         merged = apply_faithfulness_gate(
             merged,
             answer=answer_text,
             contexts=contexts_from_audit(log_data, evidence_for_gate),
             query=str(log_data.get("message") or ""),
             abstain=bool((final_verdict or {}).get("abstain") or merged.get("verdict") == "insufficient_evidence"),
+            non_llm_signals={
+                "sigma_detected": bool(_sigma.get("detected")),
+                "hits": _sigma.get("hits") or [],
+                "anomaly_score": _anomaly.get("score") if isinstance(_anomaly, dict) else 0,
+                "event_type": (log_data or {}).get("event") or (log_data or {}).get("type") or "",
+                "event_severity": (log_data or {}).get("severity") or "",
+                "sigma_severity": _sigma.get("max_severity") or _sigma.get("severity") or "",
+            },
         )
     except Exception:
         merged.setdefault("response_blocked", False)
@@ -199,43 +255,96 @@ async def save_result(inp: dict) -> dict:
     ga_kb = last_audit_full["kb_verification"] if last_audit_full else {}
     ga_schema = last_audit_full["schema_valid"] if last_audit_full else True
 
+    # 审计结论的威胁类型: 审计产出为中文词表(如 "数据外泄"), 统一转换为
+    # 响应策略匹配用的英文枚举(如 DATA_EXFIL); 审计未给出时回退日志侧推断值
+    audit_threat_raw = str((last_audit_full or {}).get("threat_type") or "")
+    _fallback_name = ""
+    if isinstance(log_data, dict):
+        _fallback_name = str(
+            log_data.get("threat_type") or log_data.get("event")
+            or log_data.get("type") or ""
+        )
+    threat_type_enum = ""
+    try:
+        from correlation_engine import infer_threat_type
+        threat_type_enum = (
+            infer_threat_type(audit_threat_raw) or infer_threat_type(_fallback_name)
+        )
+    except Exception:
+        threat_type_enum = ""
+    if threat_type_enum:
+        merged["threat_type"] = threat_type_enum
+
+    short_circuit = ""
+    for rd in all_rounds:
+        if rd.get("short_circuit"):
+            short_circuit = str(rd.get("short_circuit") or "")
+            break
+    audit_status = "fallback" if short_circuit else "completed"
+
+    audit_payload = {
+        "prompt_version": AUDIT_PROMPT_VERSION,
+        # v5 修复:补 status 字段 — 此前 Temporal 路径落库缺 status,
+        # /api/logs 审计统计与前端全部显示为空 (100/100 "无状态")
+        "status": audit_status,
+        "fallback": bool(short_circuit),
+        "fallback_reason": short_circuit or "",
+        "threat_type": threat_type_enum,
+        "threat_type_raw": audit_threat_raw,
+        "rounds": len(all_rounds),
+        "max_rounds": max_rounds,
+        "merged": merged,
+        "rounds_detail": [
+            {
+                "round": r.get("round"),
+                "mode": r.get("mode"),
+                "threat_detected": r.get("audit", {}).get("threat_detected"),
+                "confidence": r.get("audit", {}).get("confidence"),
+                "missed_count": len(r.get("missed_threats", [])),
+            }
+            for r in all_rounds
+        ],
+        "final_verdict": final_verdict,
+        "evidence_trail": all_evidence,
+        "hallucination": {
+            "risk": merged.get("confidence", 0) < 0.3,
+            "rounds": len(all_rounds),
+            "needs_human": merged.get("needs_human", False),
+        },
+        "grounding": {
+            "score": ga_score,
+            "kb_verification": ga_kb,
+            "schema_valid": ga_schema,
+        },
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
     async with db_session() as session:
         db_evt = await session.get(SecurityEvent, event_id)
         if db_evt:
             db_evt.analyzed = True
             db_evt.raw_data = {
                 **(db_evt.raw_data or {}),
-                "_audit_llm": {
-                    "prompt_version": AUDIT_PROMPT_VERSION,
-                    "rounds": len(all_rounds),
-                    "max_rounds": max_rounds,
-                    "merged": merged,
-                    "rounds_detail": [
-                        {
-                            "round": r.get("round"),
-                            "mode": r.get("mode"),
-                            "threat_detected": r.get("audit", {}).get("threat_detected"),
-                            "confidence": r.get("audit", {}).get("confidence"),
-                            "missed_count": len(r.get("missed_threats", [])),
-                        }
-                        for r in all_rounds
-                    ],
-                    "final_verdict": final_verdict,
-                    "evidence_trail": all_evidence,
-                    "hallucination": {
-                        "risk": merged.get("confidence", 0) < 0.3,
-                        "rounds": len(all_rounds),
-                        "needs_human": merged.get("needs_human", False),
-                    },
-                    "grounding": {
-                        "score": ga_score,
-                        "kb_verification": ga_kb,
-                        "schema_valid": ga_schema,
-                    },
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                },
+                "_audit_llm": audit_payload,
             }
             await session.commit()
+
+    # 跨进程: 丢弃 backend 热缓存,否则 /audit-llm/pipeline 永远读到 ingest 空快照
+    try:
+        from event_store import event_store
+        event_store.invalidate(event_id, broadcast=True)
+    except Exception as inv_err:
+        logger.debug(f"[Temporal-save] cache invalidate skipped: {inv_err}")
+
+    # 归还 in-flight 名额(start_audit_workflow 时 acquire)
+    try:
+        from temporal.client import inflight_release, pop_workflow_tier
+        _tier = await pop_workflow_tier(event_id)
+        if not _tier:
+            _tier = str((log_data or {}).get("_audit_triage", {}).get("tier") or "")
+        await inflight_release(tier=_tier)
+    except Exception:
+        pass
 
     event_bus.publish("audit_complete", {
         "event_id": event_id,
@@ -246,7 +355,18 @@ async def save_result(inp: dict) -> dict:
         "rounds": len(all_rounds),
         "duration_s": round(time.time() - (inp.get("t_start") or time.time()), 1),
         "src_ip": log_data.get("src_ip", ""),
+        "stage": "pipeline_complete",
+        "agent_id": "reviewer",
+        "agents_completed": [
+            "decomposer", "tool_builder", "executor", "reviewer",
+        ],
+        "threat_type": threat_type_enum or merged.get("threat_type", ""),
+        "verdict": merged.get("verdict", ""),
+        "summary": str((final_verdict or {}).get("final_summary") or "")[:200],
     })
+    # 注意: 不可把 audit_payload(内含 merged) 再挂回 merged,否则 Temporal
+    # JSON 序列化报 Circular reference,save_result 三连失败 → CAD 永不执行。
+    # cad_verify 会从 DB 回源 `_audit_llm`(已在上方 commit)。
     return merged
 
 
@@ -263,6 +383,10 @@ async def trigger_response(inp: dict) -> dict:
     session_id = inp["session_id"]
     merged = inp.get("merged") or {}
 
+    # v5 修复(A):响应来源标记,写入 policy_match 日志供追溯(封禁是谁决定的)
+    threat_info.setdefault("response_source", "audit_llm")
+    threat_info.setdefault("allow_blocking", True)
+
     try:
         _resp_orch = get_orchestrator()
         async with db_session() as s:
@@ -278,6 +402,8 @@ async def trigger_response(inp: dict) -> dict:
             "src_ip": threat_info.get("src_ip", ""),
             "confidence": threat_info.get("confidence", merged.get("confidence", 0)),
             "status": "triggered",
+            "stage": "response",
+            "agent_id": "response",
         })
         return {"triggered": True}
     except Exception as e:
@@ -287,7 +413,12 @@ async def trigger_response(inp: dict) -> dict:
 
 @activity.defn
 async def cad_verify(inp: dict) -> dict:
-    """CAD 独立审计(独立 session, 不参与内容生产)。"""
+    """CAD 独立审计(独立 session, 不参与内容生产)。
+
+    v6 修复: 此前 workflow 传入 audit_llm={} → CAD 永远 0/0 verified、
+    证据完整度 0.00、熔断器持续 tripped。优先用入参,缺省则从 DB 读
+    save_result 刚写回的 `_audit_llm`(含 evidence_trail)。
+    """
     from agents.agent_cad import cad_agent
     from models import SecurityEvent, async_session as db_session
     from observability.pipeline_tracer import pipeline_tracer
@@ -298,9 +429,17 @@ async def cad_verify(inp: dict) -> dict:
 
     try:
         async with db_session() as session:
+            db_evt = await session.get(SecurityEvent, event_id)
+            if not audit_llm_data and db_evt:
+                audit_llm_data = (db_evt.raw_data or {}).get("_audit_llm") or {}
+            # 入参若只有 merged 摘要而无 evidence_trail,同样回源 DB
+            if audit_llm_data and not audit_llm_data.get("evidence_trail") and db_evt:
+                db_audit = (db_evt.raw_data or {}).get("_audit_llm") or {}
+                if db_audit.get("evidence_trail"):
+                    audit_llm_data = db_audit
+
             with pipeline_tracer.span("cad_verify", event_id=event_id, session_id=session_id):
                 cad_report = await cad_agent.audit_pipeline(session, event_id, audit_llm_data)
-            db_evt = await session.get(SecurityEvent, event_id)
             if db_evt:
                 db_evt.raw_data = {
                     **(db_evt.raw_data or {}),
@@ -312,6 +451,11 @@ async def cad_verify(inp: dict) -> dict:
                     },
                 }
                 await session.commit()
+                try:
+                    from event_store import event_store
+                    event_store.invalidate(event_id, broadcast=True)
+                except Exception:
+                    pass
             tripped = bool(cad_report["circuit_breaker"].get("tripped", False))
             if tripped:
                 logger.critical(f"[CAD] CIRCUIT BREAKER for event #{event_id}: {cad_report['circuit_breaker'].get('reason')}")

@@ -193,6 +193,23 @@ class Reviewer:
         ])
 
         try:
+            from agents.llm_fallback import is_llm_fallback
+            is_fb, fb_reason = is_llm_fallback(result)
+            if is_fb:
+                logger.warning(f"Reviewer LLM fallback (no retry): {fb_reason}")
+                base_conclusion = (
+                    "threat_confirmed" if getattr(audit_result, "threat_detected", False)
+                    else "suspicious"
+                )
+                return FinalVerdict(
+                    conclusion=base_conclusion,
+                    confidence=float(getattr(audit_result, "confidence", 0) or 0) * 0.8,
+                    human_intervention=True,
+                    final_summary=str(getattr(audit_result, "summary", "") or "")[:500],
+                    reviewer_notes=f"llm_fallback:{fb_reason}",
+                    abstain=True,
+                )
+
             # 结构化验证（Pydantic）
             from audit_schemas import validate_reviewer_output
             parsed, schema_errors = validate_reviewer_output(result)

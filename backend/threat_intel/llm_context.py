@@ -77,7 +77,7 @@ async def llm_summarize_threat_context(
             {"role": "system", "content": render("security/threat_intel_context_system")},
             {"role": "user", "content": prompt},
         ],
-        budget_cost_jpy=0.03,
+        budget_cost_yuan=0.03,
     )
 
     if result:

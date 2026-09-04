@@ -1,28 +1,30 @@
 @import "tailwindcss";
 
 @theme {
-  /* ── Apple 浅色调色板 ── */
-  --color-surface: #f5f5f7;          /* Apple 标志性浅灰背景 */
+  /* 单色极简 · 5 阶灰 */
+  --color-ink: #111111;
+  --color-ink-soft: #555555;
+  --color-ink-faint: #888888;
+  --color-surface: #fafafa;
   --color-card: #ffffff;
-  --color-ink: #1d1d1f;              /* Apple 近黑主文字 */
-  --color-ink-soft: #6e6e73;         /* Apple 次级灰 */
-  --color-ink-faint: #86868b;        /* Apple 三级灰 */
-  --color-accent: #0071e3;           /* Apple 蓝 */
-  --color-accent-hover: #0077ed;
-  --color-link: #0066cc;             /* Apple 链接蓝 */
-  --color-line: #d2d2d7;             /* Apple 边框灰 */
-  --color-ok: #34c759;               /* Apple 系统绿 */
-  --color-warn: #ff9f0a;             /* Apple 系统琥珀 */
-  --color-alert: #ff3b30;            /* Apple 系统红 */
+  --color-line: #e6e6e6;
+  --color-mist: #f2f2f2;
+  --color-paper: #fafafa;
+  --color-accent: #111111;
+  --color-accent-hover: #333333;
+  --color-link: #111111;
+  --color-ok: #111111;
+  --color-warn: #555555;
+  --color-alert: #111111;
+  --color-cinnabar: #111111;
+  --color-nong: #555555;
+  --color-hui: #888888;
+  --color-dan: #c8c8c8;
+  --color-qing: #e8e8e8;
 
-  /* ── Apple 系统字体栈（中文优先苹方/雅黑）── */
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro SC",
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
-    Helvetica, Arial, sans-serif;
-  /* 迁移别名：旧代码的 font-serif 统一渲染为无衬线，保持 Apple 风 */
-  --font-serif: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro SC",
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
-    Helvetica, Arial, sans-serif;
+  --font-sans: "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC",
+    "Hiragino Sans GB", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-serif: "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", sans-serif;
   --font-mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
     "Liberation Mono", monospace;
 }
@@ -33,12 +35,190 @@ html {
   text-rendering: optimizeLegibility;
 }
 
-::selection {
-  background: rgba(0, 113, 227, 0.16);
-  color: #0071e3;
+body {
+  background-color: #fafafa;
+  color: #111111;
+  font-family: var(--font-sans);
+  font-weight: 400;
+  overflow-x: hidden;
 }
 
-::-webkit-scrollbar { width: 8px; height: 8px }
+::selection {
+  background: #111111;
+  color: #ffffff;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px }
 ::-webkit-scrollbar-track { background: transparent }
-::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 8px }
-::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.28) }
+::-webkit-scrollbar-thumb { background: #c8c8c8 }
+::-webkit-scrollbar-thumb:hover { background: #888888 }
+
+/* 直角卡片 */
+.mono-card {
+  background: #ffffff;
+  border: 1px solid #e6e6e6;
+  border-radius: 0;
+}
+
+.mono-card-ink {
+  background: #ffffff;
+  border: 1px solid #111111;
+  border-radius: 0;
+}
+
+/* 底边输入，对齐参考图搜索栏 */
+.mono-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #e6e6e6;
+  border-radius: 0;
+  padding: 10px 0;
+  color: #111;
+  outline: none;
+}
+.mono-input:focus {
+  border-bottom-color: #111111;
+}
+.mono-input::placeholder {
+  color: #c8c8c8;
+}
+
+/* 登录/注册专用输入：浅底填色 + 细线框，聚焦加深 */
+.auth-input {
+  width: 100%;
+  background: #f2f2f2;
+  border: 1px solid #e6e6e6;
+  border-radius: 0;
+  padding: 12px 14px;
+  color: #111;
+  outline: none;
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.auth-input:hover {
+  background: #efefef;
+  border-color: #d4d4d4;
+}
+.auth-input:focus {
+  background: #ffffff;
+  border-color: #111111;
+  box-shadow: inset 0 0 0 1px #111111;
+}
+.auth-input::placeholder {
+  color: #b0b0b0;
+}
+.auth-input[aria-invalid="true"] {
+  border-color: #555555;
+  background: #f7f7f7;
+}
+.auth-input[aria-invalid="true"]:focus {
+  border-color: #111111;
+  box-shadow: inset 0 0 0 1px #111111;
+}
+
+/* 覆盖浏览器 autofill 默认黄底（Chrome/Edge/Safari） */
+.auth-input:-webkit-autofill,
+.auth-input:-webkit-autofill:hover,
+.auth-input:-webkit-autofill:focus,
+.auth-input:-webkit-autofill:active {
+  -webkit-text-fill-color: #111111 !important;
+  caret-color: #111111;
+  border-color: #e6e6e6;
+  /* 用大 inset shadow 盖住黄底 */
+  box-shadow: 0 0 0 1000px #f2f2f2 inset !important;
+  transition: background-color 99999s ease-out;
+}
+.auth-input:focus:-webkit-autofill,
+.auth-input:focus:-webkit-autofill:hover {
+  border-color: #111111;
+  box-shadow:
+    0 0 0 1000px #ffffff inset,
+    inset 0 0 0 1px #111111 !important;
+}
+.auth-input:autofill {
+  background: #f2f2f2;
+  color: #111111;
+}
+.auth-input:focus:autofill {
+  background: #ffffff;
+}
+
+/* 兼容旧 class：全部改直角、去毛玻璃 */
+.glass,
+.glass-strong {
+  background: #ffffff;
+  border: 1px solid #e6e6e6;
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.glass-nav {
+  background: #fafafa;
+  border-bottom: 1px solid #e6e6e6;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+.glass-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #e6e6e6;
+  border-radius: 0;
+}
+.glass-input:focus {
+  border-bottom-color: #111;
+  box-shadow: none;
+  outline: none;
+  background: transparent;
+}
+
+.ink-rule {
+  height: 1px;
+  background: #e6e6e6;
+}
+
+.rule-ink {
+  height: 2px;
+  width: 28px;
+  background: #111111;
+}
+
+/* 宽屏铺满，左右只留页边 */
+.page-shell {
+  width: 100%;
+  max-width: 1760px;
+  margin-inline: auto;
+  padding-inline: 2rem;
+}
+@media (min-width: 1280px) {
+  .page-shell { padding-inline: 3rem; }
+}
+@media (min-width: 1600px) {
+  .page-shell { padding-inline: 4rem; }
+}
+
+/* 全站直角：覆盖残留圆角 */
+.rounded-full,
+.rounded-2xl,
+.rounded-xl,
+.rounded-lg,
+.rounded-md,
+.rounded-sm,
+.rounded-\[20px\],
+.rounded-\[22px\],
+.rounded-\[24px\] {
+  border-radius: 0 !important;
+}
+
+.page-title {
+  font-size: 32px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  color: #111;
+  line-height: 1.1;
+}
+.page-sub {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 300;
+  color: #888;
+}

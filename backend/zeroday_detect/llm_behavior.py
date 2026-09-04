@@ -89,7 +89,7 @@ async def llm_interpret_behavior(
             {"role": "system", "content": render("security/zeroday_sandbox_system")},
             {"role": "user", "content": prompt},
         ],
-        budget_cost_jpy=0.05,
+        budget_cost_yuan=0.05,
     )
 
     if result:

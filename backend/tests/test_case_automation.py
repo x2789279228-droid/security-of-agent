@@ -44,11 +44,11 @@ async def _reset():
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def _mk_event(severity: str, src_ip="10.0.0.9"):
+async def _mk_event(severity: str, src_ip="10.0.0.9", session_id="sess-t", event_type="PORT_SCAN"):
     from models import SecurityEvent, async_session
     async with async_session() as s:
         evt = SecurityEvent(
-            session_id="sess-t", event_type="PORT_SCAN", severity=severity,
+            session_id=session_id, event_type=event_type, severity=severity,
             src_ip=src_ip, dst_ip="172.16.0.5", message="scan",
             raw_data={}, analyzed=False,
         )
@@ -240,6 +240,168 @@ class TestAutoDispatch:
                     assert dbc.status == "closed"
             finally:
                 cfg.settings.case_auto_close_hours = old
+        _run(t())
+
+
+    def test_auto_resolve_after_response_completes_order(self):
+        """自动响应落地且已空闲 → 完成工单、案例 resolved。"""
+        async def t():
+            from models import SecurityEvent, SecurityCase, WorkOrder, ResponseLog, async_session
+            from sqlalchemy import select
+            from case_manager import case_manager
+            await _reset()
+            evt = await _mk_event("high")
+            async with async_session() as s:
+                case = await case_manager.auto_create_case(s, await s.get(SecurityEvent, evt.id))
+                s.add(ResponseLog(
+                    session_id="sess-t", event_id=evt.id, threat_type="PORT_SCAN",
+                    action_name="block_ip", action_success=True, auto_execute=True,
+                    approval_status="approved",
+                ))
+                dbc = await s.get(SecurityCase, case.id)
+                dbc.updated_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+                await s.commit()
+                result = await case_manager.try_auto_resolve(s, dbc, idle_minutes=10)
+            assert result.get("resolved") is True
+            async with async_session() as s:
+                dbc = await s.get(SecurityCase, case.id)
+                orders = (await s.execute(
+                    select(WorkOrder).where(WorkOrder.case_id == case.id)
+                )).scalars().all()
+            assert dbc.status == "resolved"
+            assert all(o.status == "completed" for o in orders)
+        _run(t())
+
+    def test_auto_resolve_skips_pending_approval(self):
+        async def t():
+            from models import SecurityEvent, SecurityCase, ResponseLog, async_session
+            from case_manager import case_manager
+            await _reset()
+            evt = await _mk_event("high")
+            async with async_session() as s:
+                case = await case_manager.auto_create_case(s, await s.get(SecurityEvent, evt.id))
+                s.add(ResponseLog(
+                    session_id="sess-t", event_id=evt.id, threat_type="DATA_EXFIL",
+                    action_name="policy_match", action_success=True, auto_execute=False,
+                    approval_status="pending",
+                ))
+                dbc = await s.get(SecurityCase, case.id)
+                dbc.updated_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+                await s.commit()
+                result = await case_manager.try_auto_resolve(s, dbc, idle_minutes=10)
+            assert result.get("resolved") is False
+            assert result.get("reason") == "pending_approval"
+            async with async_session() as s:
+                dbc = await s.get(SecurityCase, case.id)
+            assert dbc.status == "responding"
+        _run(t())
+
+    def test_stale_sla_resolves_without_response_logs(self):
+        """已过 SLA 且无人处理 → 收口，避免运营中心永久全红。"""
+        async def t():
+            from models import SecurityEvent, SecurityCase, async_session
+            from case_manager import case_manager
+            await _reset()
+            evt = await _mk_event("high")
+            async with async_session() as s:
+                case = await case_manager.auto_create_case(s, await s.get(SecurityEvent, evt.id))
+                dbc = await s.get(SecurityCase, case.id)
+                dbc.sla_deadline = datetime.now(timezone.utc) - timedelta(hours=1)
+                await s.commit()
+                result = await case_manager.try_auto_resolve(s, dbc, idle_minutes=10)
+            assert result.get("resolved") is True
+            async with async_session() as s:
+                dbc = await s.get(SecurityCase, case.id)
+            assert dbc.status == "resolved"
+        _run(t())
+
+    def test_auto_resolve_respects_idle_window(self):
+        async def t():
+            from models import SecurityEvent, SecurityCase, ResponseLog, async_session
+            from case_manager import case_manager
+            await _reset()
+            evt = await _mk_event("high")
+            async with async_session() as s:
+                case = await case_manager.auto_create_case(s, await s.get(SecurityEvent, evt.id))
+                s.add(ResponseLog(
+                    session_id="sess-t", event_id=evt.id, threat_type="PORT_SCAN",
+                    action_name="rate_limit", action_success=True, auto_execute=True,
+                ))
+                await s.commit()
+                dbc = await s.get(SecurityCase, case.id)
+                result = await case_manager.try_auto_resolve(s, dbc, idle_minutes=10)
+            assert result.get("resolved") is False
+            assert result.get("reason") == "not_idle"
+        _run(t())
+
+    def test_repeat_auto_create_same_event_is_idempotent(self):
+        """同一事件二次 auto_create_case 不得并开两案。"""
+        async def t():
+            from models import SecurityEvent, SecurityCase, async_session
+            from sqlalchemy import select, func
+            from case_manager import case_manager
+            await _reset()
+            e1 = await _mk_event("high", session_id="idem-sess")
+            async with async_session() as s:
+                c1 = await case_manager.auto_create_case(s, await s.get(SecurityEvent, e1.id))
+            async with async_session() as s:
+                c2 = await case_manager.auto_create_case(s, await s.get(SecurityEvent, e1.id))
+            assert c1.id == c2.id
+            async with async_session() as s:
+                n = (await s.execute(select(func.count()).select_from(SecurityCase))).scalar()
+            assert n == 1
+        _run(t())
+
+    def test_different_sessions_same_ip_do_not_merge(self):
+        """有 session_id 时禁止被同 IP 的旧案例吸走。"""
+        async def t():
+            from models import SecurityEvent, async_session, SecurityCase
+            from case_manager import case_manager
+            await _reset()
+            e1 = await _mk_event("medium", src_ip="45.33.32.156", session_id="demo_a")
+            e2 = await _mk_event("medium", src_ip="45.33.32.156", session_id="demo_b")
+            async with async_session() as s:
+                c1 = await case_manager.auto_create_case(s, await s.get(SecurityEvent, e1.id))
+            async with async_session() as s:
+                c2 = await case_manager.auto_create_case(s, await s.get(SecurityEvent, e2.id))
+            assert c1.id != c2.id
+            async with async_session() as s:
+                db1 = await s.get(SecurityCase, c1.id)
+                db2 = await s.get(SecurityCase, c2.id)
+            assert db1.event_count == 1
+            assert db2.event_count == 1
+        _run(t())
+
+    def test_same_session_killchain_upgrades_title_and_dispatches(self):
+        """同源杀伤链聚合成一案，标题升到 DATA_EXFIL，并自动派单。"""
+        async def t():
+            from models import SecurityEvent, SecurityCase, WorkOrder, async_session
+            from sqlalchemy import select
+            from case_manager import case_manager
+            await _reset()
+            e1 = await _mk_event(
+                "medium", src_ip="45.33.32.156", session_id="demo_chain",
+                event_type="PORT_SCAN",
+            )
+            async with async_session() as s:
+                case = await case_manager.auto_create_case(s, await s.get(SecurityEvent, e1.id))
+            e2 = await _mk_event(
+                "critical", src_ip="192.168.1.100", session_id="demo_chain",
+                event_type="DATA_EXFIL",
+            )
+            async with async_session() as s:
+                case = await case_manager.auto_create_case(s, await s.get(SecurityEvent, e2.id))
+            async with async_session() as s:
+                dbc = await s.get(SecurityCase, case.id)
+                orders = (await s.execute(
+                    select(WorkOrder).where(WorkOrder.case_id == case.id)
+                )).scalars().all()
+            assert dbc.event_count == 2
+            assert dbc.threat_type == "DATA_EXFIL"
+            assert "DATA_EXFIL" in dbc.title
+            assert dbc.priority == "critical"
+            assert dbc.status == "responding"
+            assert len(orders) >= 1
         _run(t())
 
 

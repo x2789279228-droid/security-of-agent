@@ -1,3 +1,32 @@
+# ── TaskManager 共享定义 (3 副本 × 5 slots = 集群总并发槽 15) ──
+# 经 <<: *flink-taskmanager 展开为 flink-taskmanager-1/2/3;
+# 各副本仅差异化 container_name 与宿主机指标端口 (9251/9252/9253 → 容器 9250)
+x-flink-taskmanager: &flink-taskmanager
+  image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:-dev}
+  build:
+    context: ./flink-jobs
+    dockerfile: Dockerfile
+  restart: always
+  command: taskmanager
+  environment:
+    FLINK_PROPERTIES: |
+      jobmanager.rpc.address: flink-jobmanager
+      taskmanager.numberOfTaskSlots: 5
+      # ── 与 JobManager 对齐的状态/checkpoint 配置 ──
+      state.backend.type: rocksdb
+      state.checkpoint-storage: filesystem
+      state.checkpoints.dir: file:///var/flink-state/checkpoints
+      state.backend.incremental: true
+      metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+      metrics.reporter.prom.port: 9250
+    KAFKA_BOOTSTRAP: kafka:9092
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  volumes:
+    # 与 JobManager 共享持久化状态卷 (checkpoint 可见性)
+    - flink_state:/var/flink-state
+  depends_on:
+    - flink-jobmanager
+
 services:
   postgres:
     image: pgvector/pgvector:0.8.2-pg16
@@ -177,7 +206,8 @@ services:
         restart-strategy.fixed-delay.delay: 10s
         restart-strategy.fixed-delay.attempts: 3
         # ── 并行度: 由配置文件统一驱动 (不再在代码硬编码, 按 topic 分区弹性扩容) ──
-        parallelism.default: 3
+        # 3 个默认作业 × 5 = 15 槽, 与 3 副本 TaskManager × 5 slots 布局精确匹配
+        parallelism.default: 5
         # ── 指标: Prometheus Reporter (容器端口 9250) ──
         metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
         metrics.reporter.prom.port: 9250
@@ -193,40 +223,57 @@ services:
     volumes:
       # 持久化状态卷: checkpoint/savepoint 跨容器重建保留 (生产关键)
       - flink_state:/var/flink-state
-    # REST/Dashboard 不映射宿主: 外部经 frontend:3002 (Basic Auth) 访问,
-    # 作业提交用 `docker compose exec flink-jobmanager /opt/flink/submit-jobs.sh`
+    # REST/Dashboard 不映射宿主: 外部经 frontend:3002 (Basic Auth) 访问。
+    # 作业提交由 flink-job-submitter(守护) 自动完成, 手动重提仍可用
+    #   `docker compose exec flink-jobmanager /opt/flink/submit-jobs.sh`
     depends_on:
       kafka:
         condition: service_healthy
 
-  flink-taskmanager:
+  # ── TaskManager ×3 (每副本 5 slots, 集群总并发槽 = 15) ──
+  # 生产级多副本: 单节点故障时其余 TM 仍可承接任务 (并行度 5 × 3 作业需 15 槽)
+  flink-taskmanager-1:
+    <<: *flink-taskmanager
+    container_name: soc-flink-taskmanager-1
+    ports:
+      - "127.0.0.1:9251:9250"   # Prometheus/调试 (副本 1)
+  flink-taskmanager-2:
+    <<: *flink-taskmanager
+    container_name: soc-flink-taskmanager-2
+    ports:
+      - "127.0.0.1:9252:9250"   # Prometheus/调试 (副本 2)
+  flink-taskmanager-3:
+    <<: *flink-taskmanager
+    container_name: soc-flink-taskmanager-3
+    ports:
+      - "127.0.0.1:9253:9250"   # Prometheus/调试 (副本 3)
+
+  # ── Flink 作业守护提交器 (Job 启动自动化) ──
+  # 常驻轮询: JM 就绪 + 总槽 ≥ 15 时自动执行幂等 submit-jobs.sh。
+  # `docker compose up -d` 后无需手动命令即自动提交核心作业;
+  # JM/TM 重启或作业失败后自动补交。手动重提不再作为必需步骤。
+  flink-job-submitter:
     image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:-dev}
     build:
       context: ./flink-jobs
       dockerfile: Dockerfile
-    container_name: soc-flink-taskmanager
+    container_name: soc-flink-job-submitter
     restart: always
-    command: taskmanager
+    # 复用同一 soc-flink 镜像; 绕过官方 flink docker-entrypoint,
+    # 直接以 bash 运行守护脚本. host/port 由 auto-submit.sh 读取容器 env JM_HOST/JM_PORT.
+    entrypoint: ["/bin/bash", "-c", "exec /opt/flink/auto-submit.sh"]
     environment:
-      FLINK_PROPERTIES: |
-        jobmanager.rpc.address: flink-jobmanager
-        taskmanager.numberOfTaskSlots: 6
-        # ── 与 JobManager 对齐的状态/checkpoint 配置 ──
-        state.backend.type: rocksdb
-        state.checkpoint-storage: filesystem
-        state.checkpoints.dir: file:///var/flink-state/checkpoints
-        state.backend.incremental: true
-        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
-        metrics.reporter.prom.port: 9250
+      JM_HOST: flink-jobmanager
+      JM_PORT: "8081"
+      POLL_SECONDS: "${FLINK_AUTO_SUBMIT_POLL_SECONDS:-30}"
+      AUTO_SUBMIT_MIN_SLOTS: "15"
       KAFKA_BOOTSTRAP: kafka:9092
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-    ports:
-      - "127.0.0.1:9251:9250"
-    volumes:
-      # 与 JobManager 共享持久化状态卷 (checkpoint 可见性)
-      - flink_state:/var/flink-state
     depends_on:
-      - flink-jobmanager
+      kafka:
+        condition: service_healthy
+      flink-jobmanager:
+        condition: service_started
 
   backend:
     image: ghcr.io/x2789279228-droid/soc-backend:${IMAGE_TAG:-dev}
@@ -318,6 +365,12 @@ services:
       SHARED_MEMORY_LLM_INTEL_ENABLED: ${SHARED_MEMORY_LLM_INTEL_ENABLED:-false}
       SHARED_MEMORY_LLM_SANDBOX_ENABLED: ${SHARED_MEMORY_LLM_SANDBOX_ENABLED:-false}
       SHARED_MEMORY_LLM_PHISHING_ENABLED: ${SHARED_MEMORY_LLM_PHISHING_ENABLED:-false}
+      # L2 响应策略 YAML（运行时目录；entrypoint 从镜像种子补齐）
+      RESPONSE_POLICIES_DIR: ${RESPONSE_POLICIES_DIR:-/data/response_policies}
+      RESPONSE_TAXONOMY_PATH: ${RESPONSE_TAXONOMY_PATH:-/data/response_policies/taxonomy.yml}
+      RESPONSE_POLICY_RELOAD_SEC: ${RESPONSE_POLICY_RELOAD_SEC:-30}
+      RESPONSE_TAXONOMY_RELOAD_SEC: ${RESPONSE_TAXONOMY_RELOAD_SEC:-30}
+      RESPONSE_UNCERTAIN_ENABLED: ${RESPONSE_UNCERTAIN_ENABLED:-true}
     volumes:
       # 挂载专用 soc-firewall 密钥（性能验证用，test only，未做 from/no-pty 等加固）
       - ./config/ssh/firewall_key:/tmp/ssh/firewall_key:ro
@@ -325,6 +378,8 @@ services:
       # entrypoint.sh 启动时 if [ -f /tmp/ssh-keys/id_rsa ] → cp 到 /tmp/ssh/ 和 /root/.ssh/
       # 之前只挂 /tmp/ssh/firewall_key,entrypoint 永远找不到, ssh_transport 走 stub
       - ./config/ssh/firewall_key:/tmp/ssh-keys/id_rsa:ro
+      # L2/L3: 运营新增/修改的响应策略 + taxonomy 跨重建持久化
+      - response-policies-data:/data/response_policies
     ports:
       - "8001:8000"
     depends_on:
@@ -349,6 +404,8 @@ services:
     ports:
       - "3001:80"     # Web 前端
       - "3002:8080"   # Flink Dashboard 认证反代 (Basic Auth)
+      # 注: 3004 端口 dev compose 启动时会被覆盖为 "3004:3000" (vite dev server)
+      # 如果只跑 prod, 3004 不可用; 跑 dev 时 3004 走 vite HMR
     volumes:
       # 生成方式见 tools/gen-htpasswd.sh
       - ./config/nginx/flink.htpasswd:/etc/nginx/flink.htpasswd:ro
@@ -372,16 +429,42 @@ services:
       SHARED_MEMORY_EMBEDDING_BASE_URL: ${SHARED_MEMORY_EMBEDDING_BASE_URL:-https://maas-api.cn-huabei-1.xf-yun.com/v2}
       SHARED_MEMORY_EMBEDDING_MODEL: ${SHARED_MEMORY_EMBEDDING_MODEL:-mimo-v2.5}
       SHARED_MEMORY_EMBEDDING_DIM: ${SHARED_MEMORY_EMBEDDING_DIM:-768}
+      # v5 修复:worker 侧补齐响应执行与检索所需配置 — 此前缺失导致
+      #   ① block_ip 在 worker 内 fw_ssh_host 为空 → gaierror 全部 error
+      #   ② vector.search 连不上 Qdrant → 知识检索恒 0 candidates
+      SHARED_MEMORY_QDRANT_URL: ${SHARED_MEMORY_QDRANT_URL:-http://qdrant:6333}
+      SHARED_MEMORY_QDRANT_COLLECTION: ${SHARED_MEMORY_QDRANT_COLLECTION:-soc_knowledge_chunks}
+      SHARED_MEMORY_QDRANT_VECTOR_SIZE: ${SHARED_MEMORY_QDRANT_VECTOR_SIZE:-768}
+      SHARED_MEMORY_FW_SSH_HOST: ${SHARED_MEMORY_FW_SSH_HOST:-soc-firewall}
+      SHARED_MEMORY_FW_SSH_PORT: ${SHARED_MEMORY_FW_SSH_PORT:-22}
+      SHARED_MEMORY_FW_SSH_USER: ${SHARED_MEMORY_FW_SSH_USER:-root}
+      SHARED_MEMORY_FW_SSH_PASSWORD: ${SHARED_MEMORY_FW_SSH_PASSWORD:-}
+      SHARED_MEMORY_FW_USE_SUDO: ${SHARED_MEMORY_FW_USE_SUDO:-false}
+      SHARED_MEMORY_RESPONSE_TRANSPORT_MODE: ${SHARED_MEMORY_RESPONSE_TRANSPORT_MODE:-auto}
+      SHARED_MEMORY_RESPONSE_SSH_HOST: ${SHARED_MEMORY_RESPONSE_SSH_HOST:-host.docker.internal}
+      SHARED_MEMORY_RESPONSE_SSH_PORT: ${SHARED_MEMORY_RESPONSE_SSH_PORT:-22}
+      SHARED_MEMORY_RESPONSE_SSH_USER: ${SHARED_MEMORY_RESPONSE_SSH_USER:-Admin}
+      SHARED_MEMORY_RESPONSE_SSH_KEY_FILE: ${SHARED_MEMORY_RESPONSE_SSH_KEY_FILE:-/tmp/ssh/id_rsa}
       # Temporal (worker 消费编排队列)
       SHARED_MEMORY_TEMPORAL_HOST: temporal:7233
       SHARED_MEMORY_TEMPORAL_NAMESPACE: default
       SHARED_MEMORY_TEMPORAL_TASK_QUEUE: audit-pipeline
+      # v5 修复:并发上限 — 无上限时批量重放会打爆 LLM API (429 风暴致审计降级)
+      TEMPORAL_CONCURRENCY: ${TEMPORAL_CONCURRENCY:-30}
       # OpenTelemetry (activity 内 span → collector → Tempo/Jaeger)
       SHARED_MEMORY_OTEL_ENABLED: "true"
       SHARED_MEMORY_OTEL_ENDPOINT: http://otel-collector:4317
       SHARED_MEMORY_ENV_NAME: ${SHARED_MEMORY_ENV_NAME:-dev}
       SHARED_MEMORY_FIELD_ENCRYPTION_KEY: ${SHARED_MEMORY_FIELD_ENCRYPTION_KEY:-}
       SHARED_MEMORY_ALLOWED_ORIGINS: '${SHARED_MEMORY_ALLOWED_ORIGINS:-["http://localhost:3001"]}'
+      RESPONSE_POLICIES_DIR: ${RESPONSE_POLICIES_DIR:-/data/response_policies}
+      RESPONSE_TAXONOMY_PATH: ${RESPONSE_TAXONOMY_PATH:-/data/response_policies/taxonomy.yml}
+      RESPONSE_POLICY_RELOAD_SEC: ${RESPONSE_POLICY_RELOAD_SEC:-30}
+      RESPONSE_TAXONOMY_RELOAD_SEC: ${RESPONSE_TAXONOMY_RELOAD_SEC:-30}
+      RESPONSE_UNCERTAIN_ENABLED: ${RESPONSE_UNCERTAIN_ENABLED:-true}
+    volumes:
+      - response-policies-data:/data/response_policies
+      - ./config/ssh/firewall_key:/tmp/ssh-keys/id_rsa:ro
     depends_on:
       - temporal
       - backend
@@ -462,7 +545,8 @@ services:
     ports:
       - "127.0.0.1:7233:7233"   # gRPC; 供 backend/worker 容器内网访问
     depends_on:
-      - temporal-postgres
+      temporal-postgres:
+        condition: service_healthy
 
   temporal-ui:
     image: temporalio/ui:2.38.1
@@ -491,7 +575,9 @@ services:
       - "127.0.0.1:9090:9090"   # 仅本机调试
     depends_on:
       - flink-jobmanager
-      - flink-taskmanager
+      - flink-taskmanager-1
+      - flink-taskmanager-2
+      - flink-taskmanager-3
       - backend
 
   # ── Grafana (Tempo + Prometheus 统一看板; 经 frontend:3002/grafana/ 反代) ──
@@ -599,3 +685,4 @@ volumes:
   grafana_data:
   jaeger_data:
   temporal_postgres_data:
+  response-policies-data:

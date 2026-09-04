@@ -21,7 +21,7 @@ LLM 增强器 (LLM Enhancer) — P0.S 共享基础设施
         module="phishing",
         cache_key=f"phish:{sender}:{subject}",
         prompt_messages=[...],
-        budget_cost_jpy=0.1,    # 单次成本估算(¥)
+        budget_cost_yuan=0.1,    # 单次成本估算(¥)
     )
 """
 import asyncio
@@ -176,7 +176,7 @@ async def enhance(
     module: str,
     cache_key: str,
     prompt_messages: list[dict],
-    budget_cost_jpy: float = 0.1,
+    budget_cost_yuan: float = 0.1,
     timeout_sec: Optional[int] = None,
     temperature: float = 0.1,
 ) -> Optional[dict]:
@@ -187,7 +187,7 @@ async def enhance(
         module: "traffic" | "phishing" | "data_security"
         cache_key: 业务去重键 (如 "phish:no-reply@amaz0n.com:URGENT account")
         prompt_messages: OpenAI 兼容 messages 列表
-        budget_cost_jpy: 单次成本估算 (¥),超预算则不调用
+        budget_cost_yuan: 单次成本估算 (¥),超预算则不调用
         timeout_sec: 单次超时,None=用 settings.llm_enhancer_timeout_sec
 
     Returns:
@@ -224,7 +224,7 @@ async def enhance(
         return None
 
     # 3. 预算检查
-    if not _check_and_consume_budget(module, budget_cost_jpy):
+    if not _check_and_consume_budget(module, budget_cost_yuan):
         return None
 
     # 4. 信号量限流 + 超时 + 异常吃掉
@@ -236,15 +236,23 @@ async def enhance(
                 raw = await summary.llm.chat(prompt_messages, temperature=temperature)
                 parsed = _safe_parse_json(raw)
                 if parsed is not None:
+                    if parsed.get("fallback"):
+                        # 预算耗尽/未配置等降级响应:不得冒充业务结论写入业务缓存,
+                        # 也不作为有效结果返回调用方(与超时/异常同语义 → None)
+                        logger.warning(
+                            f"[LlmEnhancer:{module}] LLM returned fallback payload "
+                            f"({parsed.get('error', 'unknown')}), discarding"
+                        )
+                        return None
                     _biz_cache_set(biz_key, parsed)
                 return parsed
     except asyncio.TimeoutError:
         logger.warning(f"[LlmEnhancer:{module}] timeout {timeout_sec}s")
-        _release_budget_on_failure(module, budget_cost_jpy)
+        _release_budget_on_failure(module, budget_cost_yuan)
         return None
     except Exception as e:
         logger.warning(f"[LlmEnhancer:{module}] LLM call failed: {e}")
-        _release_budget_on_failure(module, budget_cost_jpy)
+        _release_budget_on_failure(module, budget_cost_yuan)
         return None
 
 
@@ -322,34 +330,34 @@ def safe_dispatch(coro: Awaitable, *, log_label: str = "") -> None:
 
 async def enhance_traffic(
     cache_key: str, prompt_messages: list[dict],
-    budget_cost_jpy: float = 0.05,
+    budget_cost_yuan: float = 0.05,
 ) -> Optional[dict]:
     """流量大模型专用入口."""
     return await enhance(
         module="traffic", cache_key=cache_key,
-        prompt_messages=prompt_messages, budget_cost_jpy=budget_cost_jpy,
+        prompt_messages=prompt_messages, budget_cost_yuan=budget_cost_yuan,
     )
 
 
 async def enhance_phishing(
     cache_key: str, prompt_messages: list[dict],
-    budget_cost_jpy: float = 0.1,
+    budget_cost_yuan: float = 0.1,
 ) -> Optional[dict]:
     """钓鱼大模型专用入口."""
     return await enhance(
         module="phishing", cache_key=cache_key,
-        prompt_messages=prompt_messages, budget_cost_jpy=budget_cost_jpy,
+        prompt_messages=prompt_messages, budget_cost_yuan=budget_cost_yuan,
     )
 
 
 async def enhance_data_security(
     cache_key: str, prompt_messages: list[dict],
-    budget_cost_jpy: float = 0.1,
+    budget_cost_yuan: float = 0.1,
 ) -> Optional[dict]:
     """数据安全大模型专用入口."""
     return await enhance(
         module="data_security", cache_key=cache_key,
-        prompt_messages=prompt_messages, budget_cost_jpy=budget_cost_jpy,
+        prompt_messages=prompt_messages, budget_cost_yuan=budget_cost_yuan,
     )
 
 
@@ -357,43 +365,43 @@ async def enhance_data_security(
 
 async def enhance_encrypted_traffic(
     cache_key: str, prompt_messages: list[dict],
-    budget_cost_jpy: float = 0.05,
+    budget_cost_yuan: float = 0.05,
 ) -> Optional[dict]:
     """加密流量 LLM 语义判定入口."""
     return await enhance(
         module="encrypted_traffic", cache_key=cache_key,
-        prompt_messages=prompt_messages, budget_cost_jpy=budget_cost_jpy,
+        prompt_messages=prompt_messages, budget_cost_yuan=budget_cost_yuan,
     )
 
 
 async def enhance_edr(
     cache_key: str, prompt_messages: list[dict],
-    budget_cost_jpy: float = 0.05,
+    budget_cost_yuan: float = 0.05,
 ) -> Optional[dict]:
     """EDR 跨源关联 LLM 叙事入口."""
     return await enhance(
         module="edr", cache_key=cache_key,
-        prompt_messages=prompt_messages, budget_cost_jpy=budget_cost_jpy,
+        prompt_messages=prompt_messages, budget_cost_yuan=budget_cost_yuan,
     )
 
 
 async def enhance_intel(
     cache_key: str, prompt_messages: list[dict],
-    budget_cost_jpy: float = 0.03,
+    budget_cost_yuan: float = 0.03,
 ) -> Optional[dict]:
     """威胁情报 LLM 上下文摘要入口."""
     return await enhance(
         module="intel", cache_key=cache_key,
-        prompt_messages=prompt_messages, budget_cost_jpy=budget_cost_jpy,
+        prompt_messages=prompt_messages, budget_cost_yuan=budget_cost_yuan,
     )
 
 
 async def enhance_sandbox(
     cache_key: str, prompt_messages: list[dict],
-    budget_cost_jpy: float = 0.05,
+    budget_cost_yuan: float = 0.05,
 ) -> Optional[dict]:
     """沙箱行为 LLM 解读入口."""
     return await enhance(
         module="sandbox", cache_key=cache_key,
-        prompt_messages=prompt_messages, budget_cost_jpy=budget_cost_jpy,
+        prompt_messages=prompt_messages, budget_cost_yuan=budget_cost_yuan,
     )

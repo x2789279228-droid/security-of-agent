@@ -77,11 +77,26 @@ async def lifespan(app: FastAPI):
     redis_client = await sliding_window.get_redis()
     if redis_client:
         embedder.set_redis(redis_client)
+        # v6: LLM 响应缓存接入同一 Redis(跨重启/跨容器共享), 替代原纯进程内缓存
+        summary.llm.set_redis(redis_client)
         context_stream.set_redis(redis_client)
         anomaly_detector.set_redis(redis_client)
         # 回滚记录双写 Redis：进程重启后已执行动作仍可回滚
         from response_engine.response_executor import rollback_store
         rollback_store.set_redis(redis_client)
+        # v6: Temporal worker 跨进程写回后,需 Redis 广播才能:
+        #   1) 丢弃本进程 event_store 热缓存(否则 pipeline API 永远 pending)
+        #   2) 把 audit_complete 注入本进程 SSE(否则 Monitor 看不到报告)
+        from event_store import event_store as _event_store
+        from event_bus import event_bus as _event_bus
+        from temporal import client as _temporal_client
+        from audit_pq import audit_pq as _audit_pq
+        _event_store.set_redis(redis_client)
+        _event_bus.set_redis(redis_client)
+        _temporal_client.set_redis(redis_client)
+        _audit_pq.set_redis(redis_client)
+        await _event_store.start_invalidate_listener()
+        await _event_bus.start_redis_bridge()
         await anomaly_detector.load_baselines_from_redis()
     logger.info("安全审计模式: 所有事件全量存储，无有损压缩 + 异常基线持久化")
     if not settings.llm_api_key:
@@ -137,6 +152,14 @@ async def lifespan(app: FastAPI):
             await seed_knowledge_base(rag_session)
     except Exception as e:
         logger.warning(f"Knowledge base seeding failed (will retry): {e}")
+
+    # 启动时后台回填缺失 embedding(幂等, 独立 session; seed 因 count>10 skip 时也照常触发)
+    try:
+        from rag.seeder import launch_embedding_backfill
+        launch_embedding_backfill(scope="chunks")
+        launch_embedding_backfill(scope="memories")
+    except Exception as e:
+        logger.warning(f"Startup embedding backfill launch failed: {e}")
 
     # 数据源注册表初始化
     source_registry.load_from_config()

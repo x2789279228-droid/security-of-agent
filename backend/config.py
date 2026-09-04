@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     sliding_window_size: int = 500
     sliding_window_minutes: int = 15         # 时间窗口（分钟）
     embedding_cache_ttl: int = 3600
+    # LLM 响应缓存 TTL(秒): Redis 化后跨重启/跨容器共享; 默认 24h 收割"24h 内重复 prompt"
+    llm_cache_ttl: int = 86400
     vector_search_threshold: float = 0.75
 
     # Qdrant 向量数据库 (RAG 知识库检索; 空则禁用 Qdrant, 回退 pgvector)
@@ -67,6 +69,7 @@ class Settings(BaseSettings):
     kafka_topic_cep_partial: str = "security-cep-partial"
     kafka_topic_cep_patterns: str = "security-cep-patterns"
     kafka_topic_sigma_hit: str = "security-sigma-hit"   # pySigma 聚合候选 → Flink 阈值窗口
+    kafka_topic_behavior_alerts: str = "security-behavior-alerts"  # L4 Flink 行为基线
     kafka_consumer_group: str = "soc-backend"
     kafka_enabled: bool = False              # True=Kafka 模式, False=兼容旧 HTTP 直连模式
     # Confluent Schema Registry (跨运行时 Schema 契约, 见 schema_registry.py)
@@ -84,6 +87,24 @@ class Settings(BaseSettings):
     temporal_host: str = "temporal:7233"
     temporal_namespace: str = "default"
     temporal_task_queue: str = "audit-pipeline"
+    # r6: 单 workflow 执行硬上限(秒); 超时由 Temporal 终止,避免永久 RUNNING
+    temporal_workflow_execution_timeout_s: int = 900
+    # 全局 in-flight 审计上限(Temporal start + async 共用 Redis 计数);
+    # 超限时 P0/P1 入队、P2/P3 降级,避免 1100 火忘把 20 槽堵死。0=不限制
+    audit_inflight_max: int = 30
+    # 运行中 stuck 收口阈值(分钟); analyzed=false 超过该时长 → fallback reap
+    stuck_audit_reap_minutes: int = 15
+    # LLM 通道分层: 软/硬预算水位(%); 硬水位下仍保留 P0 最小 LLM hop
+    audit_soft_budget_pct: float = 70.0
+    audit_hard_budget_pct: float = 95.0
+    # P0 预留日预算比例(0-0.5); 软门禁不消耗该预留
+    audit_p0_reserve_pct: float = 0.25
+    # FastPath 强信号后是否降为复盘轻车道
+    audit_fastpath_demote: bool = True
+    # 优先级队列: inflight 满时 P0/P1 等待时长(秒)
+    audit_pq_ttl_s: int = 900
+    # PQ 拉取间隔(秒)
+    audit_pq_drain_interval_s: float = 1.0
 
     # Sigma 检测引擎: pySigma=真 Sigma(pySigma+SQLite backend 读 rules/*.yml), legacy=原纯 dict 匹配
     sigma_engine: str = "pySigma"
@@ -105,9 +126,16 @@ class Settings(BaseSettings):
     # ── 案例自动派单 ──
     # 命中这些 priority 的自动聚合案例 → 自动派生工单并推进到 responding (逗号分隔)
     case_auto_order_priorities: str = "high,critical"
+    # 自动工单默认指派人（空则保持 pending 无负责人）
+    case_default_assignee: str = "admin"
 
     # resolved 案例停留超过该小时数仍未人工 closed → scheduler 自动 closed (0=不自动关闭)
     case_auto_close_hours: int = 24
+    # 自动响应成功后，案例空闲超过该分钟 → 完成工单并 resolved（0=立即收口，负值=关闭此功能）
+    case_auto_resolve_idle_minutes: int = 10
+
+    # stuck 事件自动清理阈值（分钟）；0=启动时不自动清理
+    stuck_auto_reset_minutes: int = 30
 
     # ── 安全执行层 (SafeExecutor) ──
     execution_mode: str = "live"             # dry_run | mock | live

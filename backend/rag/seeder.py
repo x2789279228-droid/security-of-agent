@@ -8,11 +8,12 @@
   - 日志分析模式与 IOC 指标
   - 漏洞分类与处置指南
 """
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .knowledge_base import kb_manager
@@ -966,7 +967,7 @@ async def seed_knowledge_base(session: AsyncSession):
                 threat_types=doc_data["threat_types"],
                 severity=doc_data["severity"],
                 tags=doc_data["tags"],
-                embedding=[0.0],
+                embedding=None,  # 占位不由这里写入(None → 由 seed 后受管回填按实际维度算)
                 token_count=chunk_data["token_count"],
             )
             session.add(chunk)
@@ -975,82 +976,176 @@ async def seed_knowledge_base(session: AsyncSession):
     await session.commit()
     logger.info(f"Knowledge base seeded: {len(SEED_KNOWLEDGE)} documents, {total_chunks} chunks")
 
-    asyncio_create = __import__("asyncio").create_task
-    asyncio_create(_compute_missing_embeddings(session))
+    # 受管后台回填（持有任务引用, 不被 GC 取消）。新开独立 session, 不复用已提交的短命 session。
+    launch_embedding_backfill()
 
 
-async def _compute_missing_embeddings(session_factory_or_session):
-    """为没有 embedding 的 chunk 计算向量"""
+# ── 受管 embedding 后台回填 ──
+# 修复 v6 (2026-09-02): 原实现用 fire-and-forget `asyncio.create_task(_compute_missing_embeddings(session))`
+# ——持有 request-scoped session、任务无引用被 GC 取消, 回填从未真正跑过(Qdrant/pg 实测 0 真实向量)。
+# 现改为: 任务引用被模块级 set 保活(完成自动移除), 自建独立 async_session,
+# 并支持由 scheduler 周期性触发, 达到"重启/漏跑即自愈"。
+
+_backfill_tasks: set = set()
+# 每批最大 embedding 数(避免一次性占用过多 API 并发与内存)
+_BACKFILL_BATCH = 200
+# 全零向量 epsilon: abs(v) 均 <= eps 视为"占位零向量", 需重算
+_ZERO_EPS = 1e-5
+# 单次运行内同一 id 连续失败的"退避"上限; 达上限后本运行不再尝试(交由 5min 巡检重新尝试)
+_MAX_FAIL_PER_ID = 3
+
+
+def launch_embedding_backfill(scope: str = "chunks") -> dict:
+    """登记一个受管后台回填任务; 若相同 scope 已在跑则跳过。
+    返回 {launched: bool, running: bool}。不阻塞调用方。"""
+    running = any(getattr(t, "__scope__", None) == scope and not t.done()
+                  for t in _backfill_tasks)
+    if running:
+        return {"launched": False, "running": True}
+
+    task = asyncio.create_task(_backfill_runner(scope=scope))
+    setattr(task, "__scope__", scope)
+    _backfill_tasks.add(task)
+    task.add_done_callback(_backfill_tasks.discard)
+    return {"launched": True, "running": True}
+
+
+async def _backfill_runner(scope: str = "chunks"):
+    """独立 session 下做 embedding 回填(含缺失与全零占位)。"""
+    from models import Memory, async_session  # noqa: F401 (model 选择用)
+    from models import KnowledgeChunk
+    from summary_compression import embedder
+    from config import settings
+
+    if scope not in ("chunks", "memories"):
+        scope = "chunks"
+    model = Memory if scope == "memories" else KnowledgeChunk
+    target_dim = settings.embedding_dim
+    batch = max(1, _BACKFILL_BATCH)
     try:
-        from models import KnowledgeChunk
-        from sqlalchemy import select
-        from summary_compression import embedder
-
-        if hasattr(session_factory_or_session, "execute"):
-            await _do_compute(session_factory_or_session, KnowledgeChunk, embedder)
-        else:
-            from models import async_session
-            async with async_session() as session:
-                await _do_compute(session, KnowledgeChunk, embedder)
-    except Exception as e:
-        logger.warning(f"Embedding computation failed (will retry later): {e}")
-
-
-async def _do_compute(session, model, embedder):
-    """批量计算 embedding"""
-    from sqlalchemy import select, func
-
-    total = (await session.execute(
-        select(func.count(model.id)).where(
-            model.embedding.is_(None) | (model.embedding == [0.0])
-        )
-    )).scalar() or 0
-
-    if total == 0:
-        return
-
-    stmt = select(model).where(
-        model.embedding.is_(None) | (model.embedding == [0.0])
-    ).limit(50)
-    result = await session.execute(stmt)
-    chunks = result.scalars().all()
-
-    logger.info(f"Computing embeddings for {len(chunks)} chunks...")
-    for chunk in chunks:
-        try:
-            vec = await embedder.embed(chunk.content[:1000])
-            chunk.embedding = vec
-        except Exception as e:
-            logger.warning(f"Embedding failed for chunk {chunk.id}: {e}")
-
-    await session.commit()
-    logger.info(f"Embeddings computed for {len(chunks)} chunks")
-
-    # ── Qdrant 双写: embedding 回填后同步向量到 Qdrant (RAG 检索事实源) ──
-    # 仅当 model 是 KnowledgeChunk(具备 chunk_id/doc_id) 时才写 qdrant;
-    # qdrant 不可用/失败不阻塞主流程(降级 pgvector)。
-    if getattr(model, "__tablename__", "") == "knowledge_chunks":
-        try:
-            from qdrant_store import qdrant_store
-
-            synced = 0
-            for chunk in chunks:
-                if not chunk.embedding or not getattr(chunk, "chunk_id", None):
-                    continue
-                await qdrant_store.upsert_chunk(
-                    chunk_id=chunk.chunk_id,
-                    doc_id=chunk.doc_id,
-                    vector=[float(x) for x in chunk.embedding],
-                    payload={
-                        "content": (chunk.content or "")[:1500],
-                        "title": getattr(chunk, "title", "") or "",
-                        "threat_types": list(getattr(chunk, "threat_types", []) or []),
-                        "severity": getattr(chunk, "severity", "") or "",
-                        "source": getattr(chunk, "source", "") or "",
-                        "tags": list(getattr(chunk, "tags", []) or []),
-                    },
+        async with async_session() as session:
+            done_total = 0
+            attempts: dict = {}  # id -> 本运行连续失败次数(退避门)
+            for _ in range(10000):  # 死循环护栏
+                base_ids = await _select_missing_ids(session, model, target_dim, limit=batch * 2)
+                # 过滤掉本运行中已达退避上限的顽固 id(交由下一次巡检新运行重试)
+                ids = [i for i in base_ids if attempts.get(i, 0) < _MAX_FAIL_PER_ID]
+                ids = ids[:batch]
+                if not ids:
+                    break
+                stmt = select(model).where(model.id.in_(ids))
+                chunks = (await session.execute(stmt)).scalars().all()
+                logger.info(
+                    f"[EmbedBackfill] Computing embeddings for {len(chunks)} "
+                    f"{scope} (target_dim={target_dim}, batch={batch})..."
                 )
-                synced += 1
-            logger.info(f"[Qdrant] 双写 {synced} 个 knowledge_chunks embedding 到 qdrant")
-        except Exception as qe:
-            logger.warning(f"[Qdrant] 双写失败(降级 pgvector): {qe}")
+                worked = 0
+                degraded_now = 0
+                for ch in chunks:
+                    try:
+                        raw = getattr(ch, "content", None) or " "
+                        vec = await embedder.embed(str(raw)[:1000])
+                        vec = list(vec or [])
+                        if not vec or len(vec) < max(target_dim - 8, 8) or max((abs(x) for x in vec), default=1.0) <= _ZERO_EPS:
+                            # API 失败或返回零向量(降级产物) → 视为失败, 不存脏数据
+                            degraded_now += 1
+                            attempts[ch.id] = attempts.get(ch.id, 0) + 1
+                            await asyncio.sleep(0.2)  # 节流, 给上游 API 一点喘息
+                            continue
+                        ch.embedding = vec[:target_dim] if len(vec) > target_dim else vec
+                        worked += 1
+                        attempts.pop(ch.id, None)  # 成功则清退避计数
+                    except Exception as e:
+                        logger.warning(f"Embedding failed for chunk {ch.id}: {e}")
+                        degraded_now += 1
+                        attempts[ch.id] = attempts.get(ch.id, 0) + 1
+                if degraded_now:
+                    logger.info(f"[EmbedBackfill] batch degraded={degraded_now} ok={worked}")
+                await session.commit()
+                done_total += len(chunks)
+                if worked == 0:
+                    # 本批全部失败(API 不可用或全被退避) → 退出, 交由下次调度重试; 已 commit 的保留
+                    logger.warning(f"[EmbedBackfill] batch had {worked} ok; aborting to retry later")
+                    return
+                logger.info(f"[EmbedBackfill] committed batch, cumulative done={done_total}")
+                if not ids or len(ids) < batch:
+                    break
+            if done_total == 0:
+                logger.info(f"[EmbedBackfill] no {scope} missing embeddings; skip")
+            else:
+                logger.info(f"[EmbedBackfill] {scope} done, total backfilled={done_total}")
+                if scope == "chunks":
+                    await _sync_all_to_qdrant(done_total)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(f"[EmbedBackfill] {scope} failed (will retry later): {e}")
+
+
+async def _select_missing_ids(session, model, dim: int, limit: int):
+    """返回需要回填(embedding IS NULL 或维度不符或全零)的 id 列表。
+
+    注意: pgvector 无维度列会按实际长度存向量; 历史占位曾以 1536 维写成全零向量
+    (pgvector 保存值即该长度), 因此不能依赖 `embedding == [0.0]` 这类 Python 列表
+    字面量比较——对长向量永远不会为真, 这正是原 bug #2。改为 SQL 层
+    vector_dims() + 全零向量检测, 保证占位也纳入回填。"""
+    table = model.__tablename__
+    sql = text(f"""
+        SELECT id FROM {table}
+        WHERE embedding IS NULL
+           OR vector_dims(embedding) <> :dim
+           OR (SELECT coalesce(bool_and(abs(v) <= :eps), false)
+               FROM unnest(cast(embedding as real[])) v) = true
+        ORDER BY id
+        LIMIT :limit
+    """)
+    rows = (await session.execute(sql, {"dim": dim, "eps": _ZERO_EPS, "limit": limit})).all()
+    return [r[0] for r in rows]
+
+
+async def _sync_all_to_qdrant(expected: int):
+    """尽力把最新 pg 向量(回填完成后)sync 到 Qdrant; 失败静默降级 pgvector。"""
+    from config import settings
+    from qdrant_store import qdrant_store
+    from sqlalchemy import text as _text
+    try:
+        dim = settings.embedding_dim
+        # qdrant store 的批量 upsert 需要运行在访问模型的 session 内; 这里直接用独立连接执行
+        from models import async_session as _as
+        async with _as() as session:
+            sql = _text("""
+                SELECT chunk_id, doc_id, embedding, content, title, threat_types,
+                       severity, source, tags
+                FROM knowledge_chunks
+                WHERE embedding IS NOT NULL AND vector_dims(embedding) = :dim
+            """)
+            rows = (await session.execute(sql, {"dim": dim})).all()
+        synced_items = []
+        for r in rows:
+            vec = [float(x) for x in r[2]]
+            synced_items.append({
+                "chunk_id": r[0], "doc_id": r[1], "vector": vec,
+                "payload": {
+                    "content": (r[3] or "")[:1500], "title": r[4] or "",
+                    "threat_types": list(r[5] or []), "severity": r[6] or "",
+                    "source": r[7] or "", "tags": list(r[8] or []),
+                },
+            })
+        total = 0
+        for i in range(0, len(synced_items), 64):
+            await qdrant_store.upsert_chunks_batch(synced_items[i:i + 64])
+            total += len(synced_items[i:i + 64])
+        logger.info(f"[Qdrant] sync {total} knowledge chunks to qdrant (backfilled ~{expected})")
+    except Exception as qe:
+        logger.warning(f"[Qdrant] 双写失败(降级 pgvector): {qe}")
+
+
+async def has_missing_embeddings(scope: str = "chunks") -> bool:
+    """供 scheduler/启动检查是否仍有缺失(避免反复空跑)。"""
+    from config import settings
+    from models import KnowledgeChunk, Memory, async_session
+    dim = settings.embedding_dim
+    async with async_session() as session:
+        model = KnowledgeChunk if scope == "chunks" else Memory
+        ids = await _select_missing_ids(session, model, dim, limit=1)
+        return bool(ids)

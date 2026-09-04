@@ -20,4 +20,5 @@ scrape_configs:
   - job_name: soc-flink-taskmanager
     metrics_path: /metrics
     static_configs:
-      - targets: ["flink-taskmanager:9251"]
+      # 3 副本 TaskManager, 指标端口均为容器内 9250 (prometheus reporter)
+      - targets: ["flink-taskmanager-1:9250", "flink-taskmanager-2:9250", "flink-taskmanager-3:9250"]

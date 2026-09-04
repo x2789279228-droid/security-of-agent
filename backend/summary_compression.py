@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import hashlib
@@ -85,12 +86,11 @@ class CostTracker:
         today = date.today().isoformat()
         return max(0, self.daily_budget - self._daily_usage[today])
 
-    def estimate_cost_jpy(self, prompt_tokens: int, completion_tokens: int) -> float:
+    def estimate_cost_yuan(self, prompt_tokens: int, completion_tokens: int) -> float:
         """按输入/输出每千 token 单价估算费用。
 
-        注意: 返回值的单位与 price_*_per_1k 一致——本项目按 mimo-v2.5 官方单价配置为
-        ¥/1K tokens(0.001 输入 / 0.002 输出), 故返回人民币元(¥), 非日元。
-        该函数名保留历史命名, 语义请用 estimate_cost_yuan。
+        返回人民币元(¥): price_*_per_1k 的单位为 ¥/1K tokens
+        (本项目按 mimo-v2.5 官方单价配置, 0.001 输入 / 0.002 输出)。
         """
         cost = 0.0
         if self.price_input_per_1k > 0:
@@ -99,8 +99,8 @@ class CostTracker:
             cost += (max(0, int(completion_tokens or 0)) / 1000) * self.price_output_per_1k
         return round(cost, 4)
 
-    # 语义别名: 本项目按 ¥(元) 计价, 避免维护者误读为日元换算
-    estimate_cost_yuan = estimate_cost_jpy
+    # 弃用别名: 历史命名误标 JPY(实为人民币元), 保留一个版本供旧调用方过渡
+    estimate_cost_jpy = estimate_cost_yuan
 
     def stats(self) -> dict:
         today = date.today().isoformat()
@@ -118,7 +118,9 @@ class CostTracker:
             "usage_pct": round(used / self.daily_budget * 100, 1) if self.daily_budget else 0.0,
             "price_input_per_1k": self.price_input_per_1k,
             "price_output_per_1k": self.price_output_per_1k,
-            "estimated_cost_jpy": self.estimate_cost_jpy(prompt, completion),
+            "estimated_cost_yuan": self.estimate_cost_yuan(prompt, completion),
+            # 弃用键: 与 estimated_cost_yuan 同值, 保留一个版本供前端/脚本迁移
+            "estimated_cost_jpy": self.estimate_cost_yuan(prompt, completion),
             "tracked_events": len(self._event_costs),
         }
 
@@ -176,8 +178,13 @@ class LLMClient:
         self.base_url = settings.llm_base_url.rstrip("/")
         self.model = settings.llm_model
         self.client: httpx.AsyncClient | None = None
-        self._response_cache: dict[str, tuple[str, float]] = {}  # key → (response, timestamp)
-        self._cache_ttl = 600  # 10 分钟缓存
+        # LLM 响应缓存: 进程内 dict 作为快速路径, Redis 作为跨重启/跨容器共享源
+        self._response_cache: dict[str, str] = {}  # key → response(JSON {v,t}), 快速路径
+        self.redis = None
+        self._cache_ttl = settings.llm_cache_ttl
+
+    def set_redis(self, redis_client):
+        self.redis = redis_client
 
     async def ensure_client(self):
         if self.client is None:
@@ -194,7 +201,23 @@ class LLMClient:
         ctx = get_trace_context()
         event_id = int(ctx.get("event_id", 0) or 0)
 
-        # 成本检查：超预算时降级
+        # 响应缓存（相同 prompt + temperature → 缓存响应）: Redis 主源 + 本地 dict 快速路径
+        # 缓存命中是零 token 成本路径（不扣预算），必须置于预算门禁之前——
+        # 否则预算耗尽期间连免费命中也不可达，缓存"只出不进"随 TTL 枯竭（被门禁饿死）。
+        digest = hashlib.md5(
+            f"{prompt_text}:{temperature}".encode("utf-8")
+        ).hexdigest()
+        cache_key = f"llmcache:{digest}"
+        cached = await self._cache_get(cache_key)
+        if cached is not None:
+            emit_trace(
+                status="success", cache_hit=True,
+                prompt_tokens=prompt_tokens, completion_tokens=0, total_tokens=0,
+                latency_ms=(time.time() - t_start) * 1000,
+            )
+            return cached
+
+        # 成本检查：超预算时降级（仅拦真实 API 调用，上面的缓存命中不受门禁影响）
         if cost_tracker.is_over_budget():
             logger.warning(f"[CostControl] Daily budget exhausted, returning fallback")
             emit_trace(
@@ -206,19 +229,6 @@ class LLMClient:
                 "error": "每日 LLM 预算已用尽", "fallback": True,
                 "budget_stats": cost_tracker.stats(),
             }, ensure_ascii=False)
-
-        # 响应缓存（相同 prompt + temperature → 缓存响应）
-        cache_key = hashlib.md5(
-            f"{prompt_text}:{temperature}".encode("utf-8")
-        ).hexdigest()
-        cached = self._response_cache.get(cache_key)
-        if cached and (time.time() - cached[1]) < self._cache_ttl:
-            emit_trace(
-                status="success", cache_hit=True,
-                prompt_tokens=prompt_tokens, completion_tokens=0, total_tokens=0,
-                latency_ms=(time.time() - t_start) * 1000,
-            )
-            return cached[0]
 
         if not self.api_key:
             logger.warning("LLM API key not configured, returning fallback")
@@ -233,28 +243,76 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
+            "reasoning_split": True,  # MiniMax-M3: thinking 拆到独立字段，不污染 JSON 输出
         }
         effort = (getattr(settings, "llm_reasoning_effort", "") or "").strip()
         if effort:
             payload["reasoning_effort"] = effort
         last_error = None
         retries = 0
-        for attempt in range(2):
+        # v5 修复(D):LLM 韧性 — 429 指数退避重试(2s/8s) +
+        # reasoning_split 空 content 提取失败时关闭该参数降级重试。
+        # 今日日志实测: MiniMax-M3 偶发 429 Too Many Requests 与
+        # "无法从 LLM 响应提取文本"(choices[].message.content 为空)。
+        _backoff_sec = (2.0, 8.0)
+        _no_reasoning_split = False
+        for attempt in range(3):
             try:
+                req_payload = dict(payload)
+                if _no_reasoning_split:
+                    req_payload.pop("reasoning_split", None)
                 resp = await self.client.post(
                     f"{self.base_url}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json=payload,
+                    json=req_payload,
                 )
-                if resp.status_code == 400 and "reasoning_effort" in payload:
+                if resp.status_code == 400 and "reasoning_effort" in req_payload:
                     payload.pop("reasoning_effort", None)
+                    continue
+                if resp.status_code == 429:
+                    wait_s = _backoff_sec[min(retries, len(_backoff_sec) - 1)]
+                    retry_after = (resp.headers.get("retry-after") or "").strip()
+                    if retry_after:
+                        try:
+                            wait_s = max(wait_s, float(retry_after))
+                        except ValueError:
+                            pass
+                    # v5 修复:加随机抖动,避免大量并发调用同一时刻集体重试(惊群)
+                    import random
+                    wait_s *= random.uniform(0.8, 1.5)
+                    retries += 1
+                    last_error = f"HTTP 429 Too Many Requests (attempt {attempt+1})"
+                    logger.warning(
+                        f"LLM rate-limited (429), backoff {wait_s:.0f}s "
+                        f"then retry (attempt {attempt+1})"
+                    )
+                    emit_trace(
+                        status="degraded", error_type="rate_limited_429",
+                        prompt_tokens=prompt_tokens,
+                        latency_ms=(time.time() - t_start) * 1000,
+                        retry_count=retries,
+                    )
+                    await asyncio.sleep(wait_s)
                     continue
                 resp.raise_for_status()
                 data = resp.json()
-                content = _extract_text_content(data)
+                try:
+                    content = _extract_text_content(data)
+                except (ValueError, KeyError, IndexError, TypeError):
+                    if req_payload.get("reasoning_split") and not _no_reasoning_split:
+                        # reasoning_split=True 时 content 可能为空(reasoning 在
+                        # 独立字段), 关闭该参数让模型把正文写回 content
+                        logger.warning(
+                            "LLM content extraction failed with reasoning_split, "
+                            "retrying with reasoning_split disabled"
+                        )
+                        _no_reasoning_split = True
+                        retries += 1
+                        continue
+                    raise
                 usage = data.get("usage") or {}
                 total_tokens = int(usage.get("total_tokens", 0)) or (
                     prompt_tokens + estimate_tokens(content)
@@ -267,15 +325,8 @@ class LLMClient:
                     completion_tokens=int(usage.get("completion_tokens", estimate_tokens(content))),
                 )
 
-                # 缓存响应
-                self._response_cache[cache_key] = (content, time.time())
-                # 清理过期缓存
-                if len(self._response_cache) > 200:
-                    now = time.time()
-                    self._response_cache = {
-                        k: v for k, v in self._response_cache.items()
-                        if now - v[1] < self._cache_ttl
-                    }
+                # 缓存响应(Redis 主源 + 本地快速路径); TTL 交由 Redis EXPIRE 管理, 不做全量清空
+                await self._cache_set(cache_key, content)
 
                 emit_trace(
                     status="success",
@@ -305,6 +356,37 @@ class LLMClient:
         if self.client:
             await self.client.aclose()
 
+    # ── LLM 响应缓存基底 (Redis 主源 + 本地 dict 快速路径) ──
+
+    async def _cache_get(self, key: str):
+        """取缓存; 命中返回内容, 未命中/异常返回 None(降级实时调用)。"""
+        # 1) 本地快速路径
+        local = self._response_cache.get(key)
+        if local is not None:
+            return local
+        # 2) Redis 共享源(raw 即响应内容; 命中后回填本地)
+        if self.redis is not None and key.startswith("llmcache:"):
+            try:
+                raw = await self.redis.get(key)
+                if raw is not None:
+                    text_val = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
+                    self._response_cache[key] = text_val
+                    if len(self._response_cache) > 5000:  # 极简上限防本地畸形膨胀
+                        self._response_cache.pop(next(iter(self._response_cache)), None)
+                    return text_val
+            except Exception:
+                pass
+        return None
+
+    async def _cache_set(self, key: str, content: str):
+        """写入 Redis(带 TTL)与本地快速路径; Redis 不可用时静默降级为仅本地。"""
+        self._response_cache[key] = content
+        if self.redis is not None and key.startswith("llmcache:"):
+            try:
+                await self.redis.setex(key, self._cache_ttl, content)
+            except Exception:
+                pass
+
 
 class EmbeddingClient:
     """Embedding 客户端 — 支持Redis缓存与降级"""
@@ -315,6 +397,17 @@ class EmbeddingClient:
         self.model = settings.embedding_model
         self.client: httpx.AsyncClient | None = None
         self.redis = None
+        # 缓存命中计数: hits/misses/errors — 嵌入命中率指标的数据源
+        # (Redis 未注入/故障计入 misses, 该"全 miss"状态因此可见)
+        self._stats = {"hits": 0, "misses": 0, "errors": 0}
+
+    def stats(self) -> dict:
+        total = self._stats["hits"] + self._stats["misses"]
+        return {
+            **self._stats,
+            "total": total,
+            "hit_rate": round(self._stats["hits"] / total, 4) if total else 0.0,
+        }
 
     def set_redis(self, redis_client):
         self.redis = redis_client
@@ -323,21 +416,52 @@ class EmbeddingClient:
         if self.client is None:
             self.client = httpx.AsyncClient(timeout=60.0)
 
-    async def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str, type_: str = "db") -> list[float]:
+        """向量化。
+
+        type_ 默认为 "db"（用于构建向量库）；查询检索时调用方应传 "query" 以启用 MiniMax
+        的不对称检索方案。本方法兼容两种响应格式：
+          - MiniMax embo-01:  {vectors: [[...]], base_resp: {...}}
+          - OpenAI 兼容:     {data: [{embedding: [...]}], ...}
+
+        可观测性: 每条调用经 emit_trace(caller="embedding") 落 AgentTrace,
+        cache_hit 区分缓存命中/未命中,供 agent-traces/stats 聚合命中率。
+        """
+        from trace_hook import emit_trace
+
+        t_start = time.time()
+
+        def _trace(**kw):
+            emit_trace(caller="embedding", operation="embed", model=self.model,
+                       total_tokens=0, latency_ms=(time.time() - t_start) * 1000, **kw)
+
         if not self.api_key:
+            self._stats["errors"] += 1
             logger.warning("Embedding API key not configured, returning zero vector")
+            _trace(status="degraded", error_type="no_api_key")
             return [0.0] * settings.embedding_dim
 
-        cache_key = f"embed_cache:{hashlib.md5(text.encode('utf-8')).hexdigest()}"
+        # 缓存键包含 type，避免 db/query 互相串扰
+        cache_key = f"embed_cache:{type_}:{hashlib.md5(text.encode('utf-8')).hexdigest()}"
         if self.redis:
-            cached = await self.redis.get(cache_key)
+            try:
+                cached = await self.redis.get(cache_key)
+            except Exception as e:
+                # Redis 故障降级为 miss 继续真实调用（此前会直接冒泡中断检索）
+                logger.warning(f"Embedding cache read failed, falling back to API: {e}")
+                cached = None
             if cached:
+                self._stats["hits"] += 1
+                _trace(status="success", cache_hit=True)
                 return json.loads(cached)
+        self._stats["misses"] += 1
 
         await self.ensure_client()
+        # MiniMax embo-01 协议：texts 数组 + type 字段
         payload = {
             "model": self.model,
-            "input": text,
+            "texts": [text],
+            "type": type_,
         }
         last_error = None
         for attempt in range(2):
@@ -352,14 +476,23 @@ class EmbeddingClient:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                result = data["data"][0]["embedding"]
+                # 双协议响应兼容：MiniMax (vectors) / OpenAI (data[].embedding)
+                if isinstance(data, dict) and "vectors" in data and data["vectors"]:
+                    result = data["vectors"][0]
+                elif isinstance(data, dict) and "data" in data and data["data"]:
+                    result = data["data"][0]["embedding"]
+                else:
+                    raise ValueError(f"Unknown embedding response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
                 if self.redis:
                     await self.redis.setex(cache_key, settings.embedding_cache_ttl, json.dumps(result))
+                _trace(status="success", cache_hit=False)
                 return result
             except Exception as e:
                 last_error = e
                 logger.warning(f"Embedding attempt {attempt+1} failed: {e}")
+        self._stats["errors"] += 1
         logger.error(f"Embedding call failed after retries: {last_error}")
+        _trace(status="error", error_type="embedding_failed")
         return [0.0] * settings.embedding_dim
 
     async def close(self):

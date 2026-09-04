@@ -62,7 +62,16 @@ class BatchActionResult:
 
 
 class RollbackStore:
-    """回滚令牌存储（内存+Redis双写）"""
+    """回滚令牌存储（内存+Redis双写）
+
+    内存为主、Redis 为持久化兜底：进程重启后内存丢失，
+    仍可通过 Redis 中的记录回滚已执行的动作（TTL 内有效）。
+    Redis 写入失败只降级为纯内存模式，不影响动作执行。
+    """
+
+    # Redis key 前缀与 TTL（7 天）：超过 TTL 的回滚记录自动过期
+    REDIS_KEY_PREFIX = "rollback:"
+    REDIS_TTL_SEC = 7 * 24 * 3600
 
     def __init__(self):
         self._store: dict[str, list[dict]] = {}  # token → [action_records]
@@ -71,19 +80,42 @@ class RollbackStore:
     def set_redis(self, redis_client):
         self._redis = redis_client
 
-    def record(self, token: str, action_records: list[dict]):
+    async def record(self, token: str, action_records: list[dict]):
         self._store[token] = action_records
+        if self._redis is not None:
+            try:
+                await self._redis.set(
+                    f"{self.REDIS_KEY_PREFIX}{token}",
+                    json.dumps(action_records, ensure_ascii=False, default=str),
+                    ex=self.REDIS_TTL_SEC,
+                )
+            except Exception as e:
+                logger.warning(f"RollbackStore: failed to persist token to Redis: {e}")
         logger.info(f"RollbackStore: recorded {len(action_records)} actions under token {token[:16]}...")
 
-    def get(self, token: str) -> Optional[list[dict]]:
+    async def get(self, token: str) -> Optional[list[dict]]:
         records = self._store.get(token)
         if records:
             return records
-        # TODO: 从Redis读取
+        # 内存未命中（如进程重启后）→ 从 Redis 读取并回填
+        if self._redis is not None:
+            try:
+                raw = await self._redis.get(f"{self.REDIS_KEY_PREFIX}{token}")
+                if raw:
+                    records = json.loads(raw)
+                    self._store[token] = records
+                    return records
+            except Exception as e:
+                logger.warning(f"RollbackStore: failed to read token from Redis: {e}")
         return None
 
-    def remove(self, token: str):
+    async def remove(self, token: str):
         self._store.pop(token, None)
+        if self._redis is not None:
+            try:
+                await self._redis.delete(f"{self.REDIS_KEY_PREFIX}{token}")
+            except Exception as e:
+                logger.warning(f"RollbackStore: failed to delete token from Redis: {e}")
 
 
 rollback_store = RollbackStore()
@@ -170,7 +202,7 @@ class ResponseExecutor:
         batch_result.end_time = time.time()
 
         # 存储回滚记录
-        rollback_store.record(batch_token, action_records)
+        await rollback_store.record(batch_token, action_records)
 
         logger.info(
             f"Batch execute: {batch_result.succeeded}/{batch_result.total} actions OK "
@@ -239,7 +271,7 @@ class ResponseExecutor:
         Returns:
             BatchActionResult
         """
-        records = rollback_store.get(batch_token)
+        records = await rollback_store.get(batch_token)
         if not records:
             return BatchActionResult(
                 total=0,
@@ -291,7 +323,7 @@ class ResponseExecutor:
 
     async def get_rollback_status(self, batch_token: str) -> dict:
         """查询回滚状态"""
-        records = rollback_store.get(batch_token)
+        records = await rollback_store.get(batch_token)
         if not records:
             return {"found": False}
         return {

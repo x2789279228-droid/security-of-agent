@@ -1,14 +1,65 @@
 # ════════════════════════════════════════════
-# 开发环境覆盖 (docker-compose.yml 基础上叠加)
-#   用法: docker compose up -d --build
-#   说明: 基础 docker-compose.yml 即开发默认(源码构建 + 宿主机调试端口)。
-#         本文件仅做开发期安全兜底: 响应引擎不连真实 SSH、执行层只记录不落防火墙。
+# 开发环境覆盖 — bind mount 源码 + 热重载
+#   用法: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#   效果: 改 Python / 前端代码 0.5s 自动热重载, 不再 rebuild 镜像
+#
+# 叠加在 docker-compose.yml 之上 (merge env / replace command / replace ports / replace volumes)
+#   - backend: uvicorn --reload (Python 代码改动 0.5s 生效)
+#   - frontend: vite dev server (HMR 热更新, 改 .tsx 即时刷新浏览器)
+#   - bind mount 宿主机 ./backend 和 ./frontend, 容器内代码 = 宿主机代码
+#   - dev 强制 RESPONSE_TRANSPORT_MODE=stub + EXECUTION_MODE=dry_run (保护生产 SSH 主机)
+#
+# ⚠️ 端口注意:
+#   - dev 走 :3004 (Windows NAT 3001 缓存顽固不释放, 临时避开)
+#   - prod 走 :3001 (走原 compose 路径, 完整 image build 发布)
+#   - Windows NAT 端口缓存修复: net stop winnat && net start winnat 或重启 Docker Desktop
+#   - 同一时间只能选一种模式 (容器名都是 shared-memory-backend / shared-memory-frontend)
 # ════════════════════════════════════════════
 services:
   backend:
+    # env mapping deep merge, 这里只追加 3 个 stub 兜底
     environment:
-      # 开发环境: 响应引擎走 stub 传输(不连真实 SSH 主机), 执行层 dry_run(仅记录)
       SHARED_MEMORY_RESPONSE_TRANSPORT_MODE: stub
       SHARED_MEMORY_EXECUTION_MODE: dry_run
-      # 开发环境放行本机 CORS(前端 Vite 默认 5173)
-      SHARED_MEMORY_ALLOWED_ORIGINS: '["http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:5173", "http://127.0.0.1:5173"]'
+      # dev 放行 Vite 默认 5173 端口, 方便本地浏览器直接调试
+      SHARED_MEMORY_ALLOWED_ORIGINS: '["http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:3004", "http://127.0.0.1:3004", "http://localhost:5173", "http://127.0.0.1:5173"]'
+    # 覆盖 Dockerfile CMD: uvicorn --reload 让 .py 改动 0.5s 生效
+    #   --reload-dir /app: 监听宿主机 bind mount 进来的代码 (uvicorn 在容器内)
+    command: ["uvicorn", "app:app", "--reload", "--host", "0.0.0.0", "--port", "8000", "--reload-dir", "/app"]
+    # bind mount 宿主机 backend 目录到容器 /app
+    #   容器内 /app 整个被覆盖, 但镜像里 pip 装好的依赖 (/usr/local/lib/python3.12/...) 不受影响
+    #   镜像作为"底包"提供 Python 环境, 宿主机目录提供代码
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    # dev 用专用 Dockerfile.dev (node:22-alpine + npm ci + vite dev server)
+    #   prod Dockerfile 是多阶段 builder→nginx, 运行时是 nginx 没有 npx
+    #   dev 需要 node 运行时跑 `npm run dev` (vite dev server)
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    # 给 dev 镜像一个本地 tag, 避免与 prod 镜像冲突
+    image: shared-memory-frontend:dev
+    # 覆盖 Dockerfile CMD: vite dev server (HMR 热更新, WebSocket 推送)
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3000"]
+    # Docker Desktop bind mount (Windows→Linux 9P/virtiofs) 默认 inotify 不工作
+    # 必须开 polling 才能让 chokidar 检测到宿主机文件改动
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "300"
+      WATCHPACK_POLLING: "true"
+    # 替换 ports: 容器内 vite 3000 端口 → 宿主机 3004
+    #   之前尝试改回 :3001 但 Windows NAT 缓存顽固不释放 (等了 3 小时仍 port already allocated)
+    #   改回 :3004 让 dev 立刻可用; 后续要恢复 :3001 用 net stop winnat / 重启 Docker Desktop
+    #   dev 看 Flink Dashboard 直接用 :9250 (宿主机端口)
+    ports:
+      - "3004:3000"
+    # bind mount 宿主机 frontend 目录, 但排除 node_modules (用容器内已 npm ci 装好的)
+    #   anonymous volume /app/node_modules 保证容器内 node_modules 不被宿主机空目录覆盖
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+      - flink-jobmanager

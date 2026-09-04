@@ -274,7 +274,10 @@ async def _vector_search(
     query: str = "",
     top_k: int = 5,
 ) -> list[dict]:
-    """向量检索语义相关记忆（memories 表，通用记忆）"""
+    """向量检索语义相关记忆（memories 表，通用记忆）
+
+    note: agent 记忆是自指语义(doc 与 query 同源), 保持 db-db 对称编码, 与写入端一致;
+    不对称检索(query vs db)仅适用于 knowledge 知识库这类"文档↔自然语言问题"场景。"""
     embedding = await embedder.embed(query)
     memories = await vector_store.search_similar(
         session, embedding, top_k=top_k, for_llm=True,
@@ -303,7 +306,7 @@ async def _knowledge_search(
 
     query_embedding = None
     if query:
-        query_embedding = await embedder.embed(query)
+        query_embedding = await embedder.embed(query, type_="query")  # 不对称检索: 查询查库
 
     result = await rag_retriever.retrieve(
         session,

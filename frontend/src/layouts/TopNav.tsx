@@ -15,32 +15,18 @@ const tabs = [
 export function TopNav() {
   const location = useLocation()
   const navigate = useNavigate()
-  const { username, logout } = useAuthStore()
+  const { username, token, logout } = useAuthStore()
 
   return (
-    <header
-      className="fixed top-0 left-0 right-0 z-50 h-11 border-b border-black/[0.08]"
-      style={{
-        background: 'rgba(251, 251, 253, 0.8)',
-        backdropFilter: 'saturate(180%) blur(20px)',
-        WebkitBackdropFilter: 'saturate(180%) blur(20px)',
-      }}
-    >
-      <div className="h-full max-w-[1200px] mx-auto flex items-center justify-between px-6">
-        {/* 品牌 */}
+    <header className="fixed top-0 left-0 right-0 z-50 h-14 bg-surface">
+      <div className="page-shell h-full flex items-center justify-between">
         <button
           onClick={() => navigate(ROUTES.HOME)}
-          className="flex items-center gap-2 group"
+          className="text-[15px] font-black tracking-wide text-ink"
         >
-          <svg viewBox="0 0 24 24" className="w-4 h-4 text-ink transition-colors group-hover:text-accent" fill="currentColor">
-            <path d="M12 2L4 5.5v5.1c0 4.97 3.41 9.62 8 10.9 4.59-1.28 8-5.93 8-10.9V5.5L12 2zm0 2.2l6 2.63v4.77c0 3.94-2.63 7.63-6 8.83-3.37-1.2-6-4.89-6-8.83V6.83l6-2.63zm-1 9.3l-2.5-2.5-1.4 1.4L11 16.3l5.9-5.9-1.4-1.4L11 13.5z" />
-          </svg>
-          <span className="text-[13px] font-semibold text-ink tracking-tight transition-colors group-hover:text-accent">
-            共享记忆
-          </span>
+          共享记忆
         </button>
 
-        {/* 导航链接 — Apple 12px */}
         <nav className="hidden md:flex items-center gap-7">
           {tabs.map((tab) => {
             const active = location.pathname === tab.path
@@ -48,27 +34,44 @@ export function TopNav() {
               <button
                 key={tab.path}
                 onClick={() => navigate(tab.path)}
-                className={`text-xs transition-colors ${
-                  active ? 'text-ink font-medium' : 'text-ink/70 hover:text-ink'
+                className={`relative text-[13px] tracking-wide transition-colors ${
+                  active ? 'text-ink font-bold' : 'text-ink-faint hover:text-ink'
                 }`}
               >
                 {tab.label}
+                {active && (
+                  <span className="absolute left-0 -bottom-1 h-[2px] w-full bg-ink" aria-hidden />
+                )}
               </button>
             )
           })}
         </nav>
 
-        {/* 用户区 */}
-        <div className="flex items-center gap-4">
-          <span className="text-xs text-ink/70">{username || 'admin'}</span>
-          <button
-            onClick={() => { logout(); navigate('/login') }}
-            className="text-xs text-ink/50 hover:text-alert transition-colors"
-          >
-            退出
-          </button>
+        <div className="flex items-center gap-4 text-[12px] tracking-[0.18em]">
+          {token ? (
+            <>
+              <span className="text-ink-faint">{username || 'admin'}</span>
+              <button
+                onClick={() => {
+                  logout()
+                  navigate('/login')
+                }}
+                className="text-ink hover:opacity-70"
+              >
+                退出
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => navigate('/login')}
+              className="text-ink font-medium hover:opacity-70"
+            >
+              登录
+            </button>
+          )}
         </div>
       </div>
+      <div className="h-px bg-line" />
     </header>
   )
 }

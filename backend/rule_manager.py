@@ -55,17 +55,27 @@ class RuleManager:
                 for r in sigma_detector.rules
             ]
         elif rule_type == "response_policy":
+            from response_engine import policy_store
             from response_engine.response_policies import policy_engine
+            # 优先 YAML 列表（含 Uncertain 模板）；内存引擎作兜底
+            yaml_list = policy_store.list_policies()
+            if yaml_list:
+                return yaml_list
             return [
                 {
-                    "rule_id": p.name,
+                    "rule_id": p.policy_id or p.name,
                     "name": p.name,
                     "description": p.description,
                     "severity": p.min_severity,
                     "threat_type": p.threat_type,
+                    "category": p.category,
                     "auto_execute": p.auto_execute,
                     "require_approval": p.require_approval,
                     "priority": p.priority,
+                    "cooldown_minutes": p.cooldown_minutes,
+                    "min_confidence": p.min_confidence,
+                    "actions": p.actions,
+                    "enabled": p.enabled,
                     "type": "response_policy",
                 }
                 for p in policy_engine.get_policies()
@@ -84,21 +94,29 @@ class RuleManager:
                 if r.rule_id == rule_id:
                     return asdict(r)
         elif rule_type == "response_policy":
+            from response_engine import policy_store
             from response_engine.response_policies import policy_engine
+            data = policy_store.get_policy(rule_id)
+            if data:
+                return {
+                    "rule_id": data.get("id") or data.get("name"),
+                    "name": data.get("name"),
+                    "threat_type": data.get("threat_type"),
+                    "category": data.get("category", ""),
+                    "actions": data.get("actions"),
+                    "min_confidence": data.get("min_confidence"),
+                    "min_severity": data.get("min_severity"),
+                    "auto_execute": data.get("auto_execute"),
+                    "require_approval": data.get("require_approval"),
+                    "priority": data.get("priority"),
+                    "cooldown_minutes": data.get("cooldown_minutes"),
+                    "description": data.get("description"),
+                    "enabled": data.get("enabled", True),
+                    "role": data.get("role", ""),
+                }
             p = policy_engine.get_policy(rule_id)
             if p:
-                return {
-                    "name": p.name,
-                    "threat_type": p.threat_type,
-                    "actions": p.actions,
-                    "min_confidence": p.min_confidence,
-                    "min_severity": p.min_severity,
-                    "auto_execute": p.auto_execute,
-                    "require_approval": p.require_approval,
-                    "priority": p.priority,
-                    "cooldown_minutes": p.cooldown_minutes,
-                    "description": p.description,
-                }
+                return p.to_dict()
         return None
 
     def create_rule(
@@ -132,6 +150,14 @@ class RuleManager:
             sigma_detector.rules.append(new_rule)
             logger.info(f"[RuleManager] Created sigma rule: {rule_id}")
             return {"success": True, "rule_id": rule_id, "version": 1}
+
+        elif rule_type == "response_policy":
+            from response_engine import policy_store
+            from response_engine.response_policies import policy_engine
+            result = policy_store.create_policy(content, changed_by=changed_by)
+            if result.get("success"):
+                policy_engine.reload()
+            return result
 
         return {"success": False, "error": f"不支持的规则类型: {rule_type}"}
 
@@ -185,34 +211,41 @@ class RuleManager:
             return {"success": False, "error": f"规则 {rule_id} 不存在"}
 
         elif rule_type == "response_policy":
+            from response_engine import policy_store
             from response_engine.response_policies import policy_engine
+            result = policy_store.update_policy(
+                rule_id, content,
+                change_summary=change_summary,
+                changed_by=changed_by,
+            )
+            if result.get("success"):
+                policy_engine.reload()
+                # 同步内存字段（reload 已覆盖；保留兼容）
+                return {
+                    "success": True,
+                    "rule_id": result.get("rule_id", rule_id),
+                    "change_summary": change_summary,
+                    "version_data": result.get("version_data", {}),
+                }
+            # YAML 缺失时回退内存改写（测试 / 无文件场景）
             policy = policy_engine.get_policy(rule_id)
             if not policy:
-                return {"success": False, "error": f"策略 {rule_id} 不存在"}
-
-            for key in ["min_confidence", "min_severity", "auto_execute",
-                        "require_approval", "cooldown_minutes", "priority"]:
+                return result
+            for key in [
+                "min_confidence", "min_severity", "auto_execute",
+                "require_approval", "cooldown_minutes", "priority",
+                "actions", "threat_type", "category", "description", "enabled",
+            ]:
                 if key in content:
                     setattr(policy, key, content[key])
-
             return {
                 "success": True,
                 "rule_id": rule_id,
                 "change_summary": change_summary,
                 "version_data": {
                     "rule_type": "response_policy",
-                    "rule_id": rule_id,
-                    "content": {
-                        "name": policy.name,
-                        "threat_type": policy.threat_type,
-                        "actions": policy.actions,
-                        "min_confidence": policy.min_confidence,
-                        "min_severity": policy.min_severity,
-                        "auto_execute": policy.auto_execute,
-                        "require_approval": policy.require_approval,
-                        "priority": policy.priority,
-                        "cooldown_minutes": policy.cooldown_minutes,
-                    },
+                    "rule_id": policy.name,
+                    "content": policy.to_dict(),
                     "change_summary": change_summary,
                     "changed_by": changed_by,
                 },
@@ -235,7 +268,14 @@ class RuleManager:
             ]
             logger.info(f"[RuleManager] Removed sigma rule: {rule_id}")
             return {"success": True, "rule_id": rule_id}
-        return {"success": False, "error": "仅支持 sigma 规则删除"}
+        elif rule_type == "response_policy":
+            from response_engine import policy_store
+            from response_engine.response_policies import policy_engine
+            result = policy_store.delete_policy(rule_id, hard=False)
+            if result.get("success"):
+                policy_engine.reload()
+            return result
+        return {"success": False, "error": f"不支持的规则类型删除: {rule_type}"}
 
     # ── 版本管理 ──
 

@@ -1,0 +1,19 @@
+id: POL-SCAN-CAT
+name: 扫描类通用限速
+enabled: true
+description: SCAN 父类：未知扫描变种
+match:
+  category: SCAN
+  min_confidence: 0.35
+  min_severity: low
+actions:
+- name: rate_limit
+  params:
+    bandwidth_kbps: 500
+- name: send_alert
+  params:
+    severity: medium
+auto_execute: true
+require_approval: false
+priority: 40
+cooldown_minutes: 10

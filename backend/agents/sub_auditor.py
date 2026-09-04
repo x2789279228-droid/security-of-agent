@@ -171,6 +171,10 @@ class SubAuditor(BaseAuditComponent):
         # 不再手动 from trace_hook import set_trace_context
 
         # 首次调用 + 结构化验证 + 可选重试
+        # r6 修复: LLM 预算/调用降级响应禁止当格式错误重试 — 否则 20 槽被
+        # budget_exhausted 空转占满,后千级事件 analyzed=0。
+        from agents.llm_fallback import is_llm_fallback
+
         parsed = None
         schema_errors = []
         raw_result = ""
@@ -194,6 +198,24 @@ class SubAuditor(BaseAuditComponent):
                     {"role": "system", "content": self._system_prompt()},
                     {"role": "user", "content": prompt},
                 ])
+
+            is_fb, fb_reason = is_llm_fallback(raw_result)
+            if is_fb:
+                logger.warning(
+                    f"SubAuditor LLM fallback (no retry): chunk={chunk.chunk_id} "
+                    f"reason={fb_reason}"
+                )
+                return ChunkVerdict(
+                    chunk_id=chunk.chunk_id,
+                    threat_detected=False,
+                    summary=f"LLM 降级: {fb_reason}",
+                    confidence=0.0,
+                    hallucination_risk=1.0,
+                    unsubstantiated=True,
+                    schema_valid=False,
+                    schema_errors=[f"llm_fallback:{fb_reason}"],
+                    raw_llm_output=raw_result if isinstance(raw_result, str) else str(raw_result),
+                )
 
             from audit_schemas import validate_sub_auditor_output
             parsed, schema_errors = validate_sub_auditor_output(raw_result)

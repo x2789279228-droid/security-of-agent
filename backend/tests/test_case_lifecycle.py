@@ -47,6 +47,9 @@ class TestCaseManager:
     def test_responding_can_resolve(self):
         assert "resolved" in VALID_TRANSITIONS["responding"]
 
+    def test_responding_can_wait_approval(self):
+        assert "pending_approval" in VALID_TRANSITIONS["responding"]
+
     def test_resolved_can_close(self):
         assert "closed" in VALID_TRANSITIONS["resolved"]
 
@@ -79,6 +82,7 @@ class TestCaseManager:
             event_count = 3
             assignee = "analyst1"
             sla_deadline = None
+            sla_breached = False
             disposition = ""
             disposition_by = ""
             tags = ["apt"]

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from models import get_session, SecurityEvent
 from auth import get_current_user, RequireRole, UserInfo
+from audit_trail import log_from_request
 from event_store import event_store
 from agents import decomposer, tool_builder, executor, reviewer
 from agents.agent_cad import cad_agent
@@ -217,13 +218,18 @@ async def get_pipeline_result(
     event_id: int,
     session: AsyncSession = Depends(get_session)
 ):
-    """获取 Audit-LLM 流水线的审核结果"""
-    evt = await event_store.get_by_id(session, event_id)
+    """获取 Audit-LLM 流水线的审核结果。
+
+    强制 prefer_db: Temporal worker 跨进程写回 `_audit_llm` 后,
+    本进程热缓存可能仍是 ingest 时的空快照; 直接读 DB 才能看到报告。
+    """
+    evt = await event_store.get_by_id(session, event_id, prefer_db=True)
     if not evt:
         raise HTTPException(404, "Event not found")
 
     raw = evt.raw_data or {}
     pipeline = raw.get("_audit_llm", {}) or {}
+    cad = raw.get("_cad_audit", {}) or {}
     error = raw.get("_audit_llm_error", "") or pipeline.get("error", "")
     analyzed = bool(getattr(evt, "analyzed", False) or pipeline or error)
     status = pipeline.get("status") or (
@@ -237,6 +243,7 @@ async def get_pipeline_result(
         "analyzed": analyzed,
         "status": status,
         "pipeline_result": pipeline,
+        "cad_audit": cad or None,
         "error": error or None,
     }
 
@@ -265,7 +272,7 @@ async def get_evidence_trail(
     session: AsyncSession = Depends(get_session)
 ):
     """获取审计全链路证据追溯（断言↔事件ID映射）"""
-    evt = await event_store.get_by_id(session, event_id)
+    evt = await event_store.get_by_id(session, event_id, prefer_db=True)
     if not evt:
         raise HTTPException(404, "Event not found")
 
@@ -327,20 +334,54 @@ async def get_circuit_breaker(user: UserInfo = Depends(get_current_user)):
     return circuit_breaker.get_status()
 
 @router.post("/cad/circuit-breaker/reset")
-async def reset_circuit_breaker(user: UserInfo = Depends(RequireRole("admin"))):
+async def reset_circuit_breaker(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
     """人工重置熔断器"""
-    return circuit_breaker.reset()
+    result = circuit_breaker.reset()
+    await log_from_request(
+        session, request, user, action="circuit_breaker.reset",
+        target_type="circuit_breaker", target_id="cad",
+        after={"result": str(result)[:500]},
+        reason="人工重置 CAD 熔断器",
+    )
+    return result
 
 @router.put("/cad/thresholds")
-async def update_cad_thresholds(body: dict, user: UserInfo = Depends(RequireRole("admin"))):
+async def update_cad_thresholds(
+    body: dict,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
     """运行时更新 CAD 熔断阈值"""
     updated = circuit_breaker.update_thresholds(**body)
+    await log_from_request(
+        session, request, user, action="cad.thresholds_update",
+        target_type="circuit_breaker", target_id="cad",
+        before={"thresholds": circuit_breaker.get_status()["thresholds"]},
+        after={"updated": updated},
+    )
     return {"success": True, "updated": updated, "current": circuit_breaker.get_status()["thresholds"]}
 
 @router.post("/cad/override/{event_id}")
-async def cad_override(event_id: int, user: UserInfo = Depends(RequireRole("admin"))):
+async def cad_override(
+    event_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
     """人工覆盖 CAD 决策（标记为误报）"""
     circuit_breaker.record_override(event_id)
+    await log_from_request(
+        session, request, user, action="cad.override",
+        target_type="security_event", target_id=str(event_id),
+        after={"marked_as": "false_positive",
+               "accuracy": circuit_breaker.accuracy_stats()},
+        reason="人工覆盖 CAD 决策",
+    )
     return {"success": True, "event_id": event_id, "accuracy": circuit_breaker.accuracy_stats()}
 
 @router.get("/cad/accuracy")

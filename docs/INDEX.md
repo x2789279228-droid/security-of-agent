@@ -38,6 +38,12 @@
 - [../README.md](../README.md) — 项目自述（启动、快速使用）
 - [../security_audit_report.md](../security_audit_report.md) — 渗透审计报告（早期）
 
+## 安全审计与修复计划
+
+- [security-audit/AUDIT_REPORT.md](./security-audit/AUDIT_REPORT.md) — 平台安全审计
+- [security-audit/attack-perf-large-scale-2026-09-02.md](./security-audit/attack-perf-large-scale-2026-09-02.md) — 大规模攻击压测
+- [security-audit/threat-policy-uncertain-fix-plan-2026-09-02.md](./security-audit/threat-policy-uncertain-fix-plan-2026-09-02.md) — 问题 3：未知 threat_type 静默放过 → 分级降噪 / 策略外置 / 分类树 / 行为基线
+
 ## 跨项目审计
 
 `D:\揭榜挂帅\audit\` 下有项目状态审查与历史排查报告：

@@ -52,8 +52,8 @@ function classNames(...classes: (string | false | undefined)[]) {
 function Collapse({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="border border-line rounded-lg overflow-hidden">
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 text-sm font-medium text-ink">
+    <div className="border border-line overflow-hidden">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-4 py-2.5 bg-mist text-sm font-medium text-ink">
         {title}
         <span className={`transition-transform ${open ? 'rotate-180' : ''}`}>▼</span>
       </button>
@@ -195,16 +195,15 @@ export default function SecurityAudit() {
 
   return (
     <PageTransition>
-      <div className="max-w-5xl mx-auto px-6 pt-14 pb-16">
-        <h1 className="text-4xl font-semibold tracking-tight text-ink">安全审计测试台</h1>
-        <p className="text-[15px] text-ink-soft mt-2 mb-8">Audit-LLM + CAD 系统可靠性测试 — 支持单条 / 批量 / 文件导入</p>
+      <div className="page-shell pt-12 pb-20">
+        <h1 className="page-title">安全审计测试台</h1>
+        <p className="page-sub mb-8">Audit-LLM + CAD 系统可靠性测试 — 支持单条 / 批量 / 文件导入</p>
 
-        {/* Tab Bar — Apple 分段控件 */}
-        <div className="flex gap-1 mb-8 p-1 bg-black/[0.05] rounded-full w-fit">
+        <div className="flex flex-wrap gap-2 mb-8">
           {([{ id: 'inject', label: '单条注入' }, { id: 'batch', label: '批量导入' }, { id: 'pipeline', label: '流水线' }, { id: 'cad', label: 'CAD审计' }, { id: 'chains', label: '攻击链' }] as { id: Tab; label: string }[]).map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-              className={classNames('px-5 py-2 text-[13px] font-medium rounded-full transition-all',
-                activeTab === tab.id ? 'bg-card text-ink shadow-[0_1px_4px_rgba(0,0,0,0.1)]' : 'text-ink-soft hover:text-ink')}>
+              className={classNames('px-4 py-2 text-[13px] tracking-[0.08em] border border-ink',
+                activeTab === tab.id ? 'bg-ink text-white' : 'bg-transparent text-ink hover:bg-ink hover:text-white')}>
               {tab.label}
             </button>
           ))}
@@ -218,7 +217,7 @@ export default function SecurityAudit() {
               <div className="flex flex-wrap gap-2">
                 {EVENT_PRESETS.map(p => (
                   <button key={p.label} onClick={() => applyPreset(p)}
-                    className="px-3 py-1.5 text-xs font-sans rounded-lg border border-line hover:bg-gray-50 transition-colors">
+                    className="px-3 py-1.5 text-xs font-sans rounded-none border border-line hover:bg-gray-50 transition-colors">
                     {p.label}
                   </button>
                 ))}
@@ -227,18 +226,18 @@ export default function SecurityAudit() {
             <div>
               <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">事件 JSON</label>
               <textarea value={eventJson} onChange={e => setEventJson(e.target.value)}
-                className="w-full h-40 px-3 py-2 text-xs font-mono border border-line rounded-lg resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
+                className="w-full h-40 px-3 py-2 text-xs font-mono border border-line rounded-none resize-none focus:outline-none focus:ring-1 focus:ring-accent" />
             </div>
             <div className="flex items-center gap-3">
               <input type="text" placeholder="Session ID (可选)" value={sessionId}
                 onChange={e => setSessionId(e.target.value)}
-                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
               <button onClick={handleInject} disabled={loading}
-                className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                className="px-5 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:opacity-90 disabled:opacity-50">
                 {loading ? '注入中...' : '注入事件'}
               </button>
             </div>
-            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-none text-xs text-red-700">{error}</div>}
             {result && <Collapse title="注入结果" defaultOpen>{JSON.stringify(result, null, 2)}</Collapse>}
             <div className="pt-4 border-t border-line">
               <p className="text-xs font-sans font-medium text-ink-faint mb-2">或手动触发 Audit-LLM 完整流水线</p>
@@ -247,7 +246,7 @@ export default function SecurityAudit() {
                 try { const data = await api.runAuditLLM(JSON.parse(eventJson)); setResult(data) }
                 catch (e: any) { setError(e.message) } finally { setLoading(false) }
               }} disabled={loading}
-                className="px-4 py-2 text-xs font-sans font-medium bg-purple-600 text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                className="px-4 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:opacity-90 disabled:opacity-50">
                 运行 Audit-LLM
               </button>
             </div>
@@ -265,7 +264,7 @@ export default function SecurityAudit() {
                   <button key={n} onClick={() => {
                     const events = generateBatch(n)
                     setBatchInput(JSON.stringify(events, null, 2))
-                  }} className="px-3 py-1.5 text-xs font-sans rounded-lg border border-line hover:bg-gray-50 transition-colors">
+                  }} className="px-3 py-1.5 text-xs font-sans rounded-none border border-line hover:bg-gray-50 transition-colors">
                     生成 {n} 条
                   </button>
                 ))}
@@ -278,7 +277,7 @@ export default function SecurityAudit() {
                     message: i < 40 ? `正常操作 #${i + 1}` : `攻击行为 #${i + 1}`,
                   }))
                   setBatchInput(JSON.stringify(events, null, 2))
-                }} className="px-3 py-1.5 text-xs font-sans rounded-lg border border-line hover:bg-gray-50 transition-colors">
+                }} className="px-3 py-1.5 text-xs font-sans rounded-none border border-line hover:bg-gray-50 transition-colors">
                   模拟攻击链场景 (60条)
                 </button>
               </div>
@@ -288,7 +287,7 @@ export default function SecurityAudit() {
             <div>
               <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">上传 JSON 文件</label>
               <input ref={fileInputRef} type="file" accept=".json,.txt" onChange={handleFileUpload}
-                className="text-xs font-sans text-ink-faint file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-line file:text-xs file:font-sans file:font-medium file:bg-white file:text-ink hover:file:bg-gray-50" />
+                className="text-xs font-sans text-ink-faint file:mr-3 file:py-1.5 file:px-3 file:rounded-none file:border file:border-line file:text-xs file:font-sans file:font-medium file:bg-white file:text-ink hover:file:bg-gray-50" />
             </div>
 
             {/* JSON 编辑区 */}
@@ -300,7 +299,7 @@ export default function SecurityAudit() {
                 </span>}
               </label>
               <textarea value={batchInput} onChange={e => setBatchInput(e.target.value)}
-                className="w-full h-48 px-3 py-2 text-xs font-mono border border-line rounded-lg resize-none focus:outline-none focus:ring-1 focus:ring-accent"
+                className="w-full h-48 px-3 py-2 text-xs font-mono border border-line rounded-none resize-none focus:outline-none focus:ring-1 focus:ring-accent"
                 placeholder='[{"event":"PORT_SCAN","severity":"high","src_ip":"10.0.0.1","message":"扫描"}, ...]' />
             </div>
 
@@ -322,7 +321,7 @@ export default function SecurityAudit() {
             <div className="flex items-center gap-3">
               <input type="text" placeholder="Session ID (可选，同组事件共享)" value={sessionId}
                 onChange={e => setSessionId(e.target.value)}
-                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
               <button onClick={async () => {
                   setError('')
                   try {
@@ -333,21 +332,21 @@ export default function SecurityAudit() {
                     setError(`解析失败: ${e.message || e}。请确保是 JSON 数组格式`)
                   }
                 }} disabled={loading || !batchInput.trim()}
-                className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                className="px-5 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:opacity-90 disabled:opacity-50">
                 {loading ? '导入中...' : '开始批量导入'}
               </button>
             </div>
 
-            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
+            {error && <div className="p-3 bg-red-50 border border-red-200 rounded-none text-xs text-red-700">{error}</div>}
 
             {/* 批量结果 */}
             {batchResult && (
               <div className="space-y-3">
                 <div className="flex gap-3 text-xs font-sans">
-                  <span className="px-3 py-1.5 bg-green-50 text-green-700 rounded-lg">成功: {batchResult.succeed}/{batchResult.total}</span>
-                  <span className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg">Session: {batchResult.session_id.slice(0, 12)}...</span>
+                  <span className="px-3 py-1.5 bg-green-50 text-green-700 rounded-none">成功: {batchResult.succeed}/{batchResult.total}</span>
+                  <span className="px-3 py-1.5 bg-mist text-ink rounded-none">Session: {batchResult.session_id.slice(0, 12)}...</span>
                   <button onClick={() => { setSessionId(batchResult.session_id); setChainSessionId(batchResult.session_id); setActiveTab('chains') }}
-                    className="px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100">
+                    className="px-3 py-1.5 border border-ink text-ink rounded-none hover:bg-ink hover:text-white">
                     查看攻击链
                   </button>
                 </div>
@@ -363,11 +362,29 @@ export default function SecurityAudit() {
             {pipelineEventId && <div className="text-xs text-ink-faint font-sans">查看事件 #{pipelineEventId} 的流水线结果</div>}
             {pipelineData ? (
               <>
+                <div className="flex flex-wrap gap-2 text-xs font-sans">
+                  <span className={`px-3 py-1.5 rounded-none ${pipelineData.status === 'completed' ? 'bg-green-50 text-green-700' : pipelineData.status === 'failed' ? 'bg-red-50 text-red-700' : 'bg-mist text-ink'}`}>
+                    状态: {pipelineData.status || 'unknown'}
+                  </span>
+                  <span className="px-3 py-1.5 bg-mist text-ink rounded-none">
+                    analyzed: {String(pipelineData.analyzed)}
+                  </span>
+                  {pipelineData.pipeline_result?.threat_type && (
+                    <span className="px-3 py-1.5 bg-orange-50 text-orange-700 rounded-none">
+                      {pipelineData.pipeline_result.threat_type}
+                    </span>
+                  )}
+                </div>
+                {pipelineData.pipeline_result?.final_verdict?.final_summary && (
+                  <Collapse title="审计报告摘要" defaultOpen>
+                    {pipelineData.pipeline_result.final_verdict.final_summary}
+                  </Collapse>
+                )}
                 <Collapse title="合并结论" defaultOpen>{JSON.stringify(pipelineData.pipeline_result?.merged, null, 2)}</Collapse>
-                <Collapse title="各轮次详情" defaultOpen>{JSON.stringify(pipelineData.pipeline_result?.rounds_detail, null, 2)}</Collapse>
+                <Collapse title="各轮次详情">{JSON.stringify(pipelineData.pipeline_result?.rounds_detail, null, 2)}</Collapse>
                 <Collapse title="证据链 (断言↔事件ID)">{JSON.stringify(pipelineData.pipeline_result?.evidence_trail, null, 2)}</Collapse>
                 <Collapse title="Reviewer 裁决">{JSON.stringify(pipelineData.pipeline_result?.final_verdict, null, 2)}</Collapse>
-                <Collapse title="CAD 穿透验证">{JSON.stringify(pipelineData.pipeline_result?.hallucination, null, 2)}</Collapse>
+                <Collapse title="CAD 穿透验证">{JSON.stringify(pipelineData.cad_audit || pipelineData.pipeline_result?.hallucination, null, 2)}</Collapse>
               </>
             ) : (
               <div className="text-xs text-ink-faint font-sans p-8 text-center">
@@ -382,17 +399,17 @@ export default function SecurityAudit() {
           <div className="space-y-4">
             <Collapse title="熔断器状态" defaultOpen>{cbStatus ? JSON.stringify(cbStatus, null, 2) : '加载中...'}</Collapse>
             <div className="flex gap-2 flex-wrap">
-              <button onClick={loadCadStatus} className="px-4 py-2 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">刷新CAD状态</button>
+              <button onClick={loadCadStatus} className="px-4 py-2 text-xs font-sans font-medium bg-gray-100 rounded-none hover:bg-gray-200">刷新CAD状态</button>
               <button onClick={async () => { try { const data = await api.triggerContextAudit(); setResult(data) } catch (e: any) { setError(e.message) } }}
-                className="px-4 py-2 text-xs font-sans font-medium bg-orange-500 text-white rounded-lg hover:opacity-90">运行上下文审计</button>
+                className="px-4 py-2 text-xs font-sans font-medium bg-orange-500 text-white rounded-none hover:opacity-90">运行上下文审计</button>
               <button onClick={async () => { try { await api.resetCircuitBreaker(); await loadCadStatus() } catch (e: any) { setError(e.message) } }}
-                className="px-4 py-2 text-xs font-sans font-medium bg-red-500 text-white rounded-lg hover:opacity-90">重置熔断器</button>
+                className="px-4 py-2 text-xs font-sans font-medium bg-red-500 text-white rounded-none hover:opacity-90">重置熔断器</button>
             </div>
             {result && activeTab === 'cad' && <Collapse title="上下文审计结果" defaultOpen>{JSON.stringify(result, null, 2)}</Collapse>}
             <div className="pt-4 border-t border-line">
               <p className="text-xs font-sans font-medium text-ink-faint mb-2">按事件ID查询 CAD 穿透验证</p>
               <input type="number" placeholder="Event ID" onChange={e => { const id = parseInt(e.target.value); if (id) api.getCadVerification(id).then(setResult).catch(e => setError(e.message)) }}
-                className="w-32 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
+                className="w-32 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
               {result && activeTab === 'cad' && <Collapse title="CAD 验证结果" defaultOpen>{JSON.stringify(result, null, 2)}</Collapse>}
             </div>
           </div>
@@ -404,8 +421,8 @@ export default function SecurityAudit() {
             <div className="flex gap-2 items-center">
               <input type="text" placeholder="Session ID" value={chainSessionId}
                 onChange={e => setChainSessionId(e.target.value)}
-                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent" />
-              <button onClick={queryChains} className="px-4 py-2 text-xs font-sans font-medium bg-accent text-white rounded-lg hover:opacity-90">查询攻击链</button>
+                className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
+              <button onClick={queryChains} className="px-4 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:opacity-90">查询攻击链</button>
             </div>
             {chainData && (
               <>
@@ -427,7 +444,7 @@ export default function SecurityAudit() {
         {/* 全局统计 */}
         <div className="mt-8 pt-6 border-t border-line">
           <button onClick={async () => { try { const data = await api.getAuditStats(); setResult(data) } catch (e: any) { setError(e.message) } }}
-            className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-lg hover:bg-gray-200">刷新统计</button>
+            className="px-3 py-1.5 text-xs font-sans font-medium bg-gray-100 rounded-none hover:bg-gray-200">刷新统计</button>
         </div>
       </div>
     </PageTransition>

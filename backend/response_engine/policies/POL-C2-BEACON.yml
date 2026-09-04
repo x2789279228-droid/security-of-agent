@@ -1,0 +1,22 @@
+id: POL-C2-BEACON
+name: C2通信自动封禁
+enabled: true
+description: 检测到C2回连：封禁IP + 限速 + 告警
+match:
+  threat_type: C2_BEACON
+  min_confidence: 0.8
+  min_severity: high
+actions:
+- name: block_ip
+  params:
+    duration_minutes: 120
+- name: rate_limit
+  params:
+    bandwidth_kbps: 100
+- name: send_alert
+  params:
+    severity: critical
+auto_execute: false
+require_approval: false
+priority: 100
+cooldown_minutes: 60

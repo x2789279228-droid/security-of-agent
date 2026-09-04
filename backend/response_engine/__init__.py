@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 响应引擎 (Response Engine) — 安全审计的主动响应层
 
@@ -26,7 +27,11 @@
 """
 # 核心模块（无外部依赖）
 from .response_registry import response_registry, ResponseActionDef
-from .response_policies import policy_engine, ResponsePolicy, ThreatActionMap
+from .response_policies import (
+    policy_engine, ResponsePolicy, ThreatActionMap, MatchStatus,
+    UNCERTAIN_POLICY_NAME, BENIGN_TYPES,
+)
+from . import policy_store
 from .response_executor import response_executor, ActionResult
 from .human_approval import approval_queue, ApprovalTicket, ApprovalStatus
 from .transport import ssh_transport
@@ -50,7 +55,8 @@ def get_response_logger():
 
 __all__ = [
     "response_registry", "ResponseActionDef",
-    "policy_engine", "ResponsePolicy", "ThreatActionMap",
+    "policy_engine", "ResponsePolicy", "ThreatActionMap", "MatchStatus",
+    "UNCERTAIN_POLICY_NAME", "BENIGN_TYPES", "policy_store",
     "response_executor", "ActionResult",
     "get_orchestrator", "get_response_logger",
     "approval_queue", "ApprovalTicket", "ApprovalStatus",

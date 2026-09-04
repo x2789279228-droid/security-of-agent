@@ -56,7 +56,7 @@ class TestLlmEnhancer:
             llm_enhancer._MODULE_BUDGET.clear()
             r = await llm_enhancer.enhance(
                 module="phishing", cache_key="t1",
-                prompt_messages=[], budget_cost_jpy=0.1,
+                prompt_messages=[], budget_cost_yuan=0.1,
             )
             assert r is None
         _run(t())
@@ -319,7 +319,7 @@ class TestDataSecurityLlmClassifier:
             original_enhance = None
             try:
                 import llm_enhancer
-                async def fake_enhance(*, cache_key, prompt_messages, budget_cost_jpy):
+                async def fake_enhance(*, cache_key, prompt_messages, budget_cost_yuan):
                     return {
                         "is_sensitive": True, "category": "PII",
                         "confidence": 0.9, "false_positive_prob": 0.1,
@@ -351,7 +351,7 @@ class TestDataSecurityLlmClassifier:
             settings.llm_data_security_enabled = True
             try:
                 import llm_enhancer
-                async def fake_enhance(*, cache_key, prompt_messages, budget_cost_jpy):
+                async def fake_enhance(*, cache_key, prompt_messages, budget_cost_yuan):
                     return {
                         "is_sensitive": "yes",            # 非布尔
                         "category": "weird_category",     # 非法

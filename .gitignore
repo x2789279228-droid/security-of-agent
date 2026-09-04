@@ -48,6 +48,7 @@ flink-jobs/.mvn/
 # AI 工具配置(含本机路径)
 .qwen/
 .mimocode/
+.mavis/
 
 # 渗透测试报告 / 真实流量数据 / 本机安全脚本
 security_audit_report.md
@@ -67,3 +68,22 @@ convert_to_json.py
 demo_e2e.py
 demo_start.bat
 /*test_*.py
+
+# ── 一次性压测/诊断产物（ticket 级临时文件，不入库） ──
+# 探测脚本 / 事件/指标数据 / 会话 id / 压测报告输出等, 由 r-session 周期性生成
+.tmp_*
+*.tmp_*
+13054
+build-backend*.log
+build_out*.txt
+dev-*.log
+dev-up*.log
+frontend-build.log
+frontend-up.log
+r5_report.md
+r6_report.md
+r7_report.md
+r8_report.md
+/convert_to_json.py
+# SSH 防火墙/响应密钥（含私钥）→ 仅本机测试, 不入库
+config/ssh/

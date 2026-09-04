@@ -133,7 +133,7 @@ export function LifecycleLoop({
             style={{ left: x, top: y, transform: 'translate(-50%, -50%)' }}
           >
             <span
-              className="relative flex items-center justify-center rounded-2xl bg-white border shadow-[0_2px_12px_rgba(0,0,0,0.06)] transition-shadow group-hover:shadow-[0_4px_20px_rgba(0,0,0,0.12)]"
+              className="relative flex items-center justify-center rounded-none bg-white border shadow-[0_2px_12px_rgba(0,0,0,0.06)] transition-shadow group-hover:shadow-[0_4px_20px_rgba(0,0,0,0.12)]"
               style={{ width: NODE_R * 2, height: NODE_R * 2, borderColor: `${color}30` }}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">

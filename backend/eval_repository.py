@@ -232,6 +232,49 @@ async def get_traces(
         return {"traces": [], "total": 0, "limit": limit, "offset": offset}
 
 
+async def get_cache_channel_stats() -> dict:
+    """缓存命中率按通道聚合（全局视图，不受 caller 过滤影响）。
+
+    通道划分：embedding = caller=="embedding"；llm = 其余全部真实 LLM 调用。
+    embedding 行由 EmbeddingClient.embed() 的 emit_trace 写入。
+    """
+    try:
+        async with async_session() as session:
+            async def _count(*conds) -> int:
+                return (await session.execute(
+                    select(func.count(AgentTrace.id)).where(*conds)
+                )).scalar() or 0
+
+            llm_total = await _count(AgentTrace.caller != "embedding")
+            llm_hits = await _count(
+                AgentTrace.caller != "embedding", AgentTrace.cache_hit == True,
+            )
+            emb_total = await _count(AgentTrace.caller == "embedding")
+            emb_hits = await _count(
+                AgentTrace.caller == "embedding", AgentTrace.cache_hit == True,
+            )
+
+        def _rate(h: int, t: int) -> float:
+            return round(float(h) / t, 4) if t else 0.0
+
+        return {
+            "llm": {
+                "calls": int(llm_total), "hits": int(llm_hits),
+                "rate": _rate(llm_hits, llm_total),
+            },
+            "embedding": {
+                "calls": int(emb_total), "hits": int(emb_hits),
+                "rate": _rate(emb_hits, emb_total),
+            },
+        }
+    except Exception as e:
+        logger.error(f"get_cache_channel_stats failed: {e}")
+        return {
+            "llm": {"calls": 0, "hits": 0, "rate": 0.0},
+            "embedding": {"calls": 0, "hits": 0, "rate": 0.0},
+        }
+
+
 async def get_trace_stats(caller: str = "") -> dict:
     """轨迹聚合统计"""
     try:
@@ -276,6 +319,12 @@ async def get_trace_stats(caller: str = "") -> dict:
                 ) if conditions else select(func.count(AgentTrace.id)).where(AgentTrace.status == "degraded")
             )).scalar() or 0
 
+            cache_hits = (await session.execute(
+                select(func.count(AgentTrace.id)).where(
+                    *(conditions + [AgentTrace.cache_hit == True])
+                ) if conditions else select(func.count(AgentTrace.id)).where(AgentTrace.cache_hit == True)
+            )).scalar() or 0
+
             by_operation = {}
             op_rows = (await session.execute(
                 select(AgentTrace.operation, func.count(AgentTrace.id)).where(*conditions)
@@ -316,6 +365,9 @@ async def get_trace_stats(caller: str = "") -> dict:
                 "error_count": int(errors),
                 "degraded_count": int(degraded),
                 "degraded_rate": round(float(degraded) / total, 4) if total else 0.0,
+                "cache_hit_count": int(cache_hits),
+                "cache_hit_rate": round(float(cache_hits) / total, 4) if total else 0.0,
+                "cache_by_channel": await get_cache_channel_stats(),
                 "by_operation": by_operation,
                 "by_error_type": by_error_type,
                 "by_degraded_type": by_degraded_type,

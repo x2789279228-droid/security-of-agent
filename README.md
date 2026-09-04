@@ -124,11 +124,25 @@ docker-compose up -d --build
 - **Flink Dashboard**: http://localhost:3002 (Basic Auth, 凭证由 `tools/gen-htpasswd.sh` 生成)
 - Redis / PostgreSQL / Schema Registry 仅绑定 `127.0.0.1`, 不对外网暴露
 
-### 3. 提交 Flink 作业
+### 3. Flink 作业提交
+
+作业启动已自动化:compose 内置 `flink-job-submitter` 守护服务,`docker compose up -d`
+后无需任何手动命令,待 JobManager 与 3×TaskManager(集群 15 并发槽)就绪即自动提交
+LogValidationJob / AnomalyDetectionJob / SigmaThresholdAggregationJob 三个核心作业;
+JobManager 重启或作业失败后亦会自动补交(幂等,不产生双实例)。
 
 ```bash
-# 进入 Flink JobManager 容器提交作业 (REST 8081 不再映射宿主)
+# 查看提交日志
+docker compose logs -f flink-job-submitter
+
+# 手动(兜底)重提 — 仅重提默认 3 个核心作业, 守护本就幂等, 手动仅排查用
 docker exec soc-flink-jobmanager /opt/flink/submit-jobs.sh flink-jobmanager
+
+# 可选: 额外启用 NDR 扩展作业 (Flow/TLS, 需先自行核实输出 topic 端到端消费)
+#   槽位告警: 默认 3 作业并行度 5 已用满集群 15 槽; 再加 NDR (共 5 作业×上行并行)
+#   可能槽位不足 → 先调低 FLINK_PARALLELISM 或扩充 TaskManager 再执行。
+docker exec -e SUBMIT_NDR_JOBS=1 -e FLINK_PARALLELISM=2 \
+  soc-flink-jobmanager /opt/flink/submit-jobs.sh flink-jobmanager
 ```
 
 ### 4. 注入测试数据 (Kafka 模式)

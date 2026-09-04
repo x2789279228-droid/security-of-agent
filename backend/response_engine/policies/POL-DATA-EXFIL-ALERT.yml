@@ -1,0 +1,16 @@
+id: POL-DATA-EXFIL-ALERT
+name: 数据外泄紧急告警
+enabled: true
+description: 数据外泄：至少发送告警（隔离走审批策略）
+match:
+  threat_type: DATA_EXFIL
+  min_confidence: 0.4
+  min_severity: medium
+actions:
+- name: send_alert
+  params:
+    severity: critical
+auto_execute: true
+require_approval: false
+priority: 88
+cooldown_minutes: 30

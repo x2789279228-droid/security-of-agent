@@ -52,6 +52,10 @@ class SigmaRule:
     mitre_attack_id: str = ""           # ATT&CK 技术 ID (如 T1110)
     mitre_tactic: str = ""             # ATT&CK 战术 (如 credential-access)
     aggregation: Optional[dict] = None  # 聚合条件 {"func":"count","field":"src_ip","op":">","threshold":5,"timeframe":"5m"}
+    # v5 修复:条件组合语义。默认 "or"(历史行为,URL/事件名任一命中即算);
+    # "and" 用于需要多条件同时成立的精确规则(如 SIG-007: SSH 端口 AND 登录失败特征),
+    # 修复"仅 dst_port=22 就把正常 SSH 登录误判为暴力破解"的误报源
+    condition_mode: str = "or"          # "or" | "and"
 
 
 @dataclass
@@ -92,6 +96,9 @@ class SigmaDetector:
         self.rules: list[SigmaRule] = []
         # 聚合滑动窗口: {rule_id: {group_key: deque[(timestamp, value)]}}
         self._agg_windows: dict[str, dict[str, deque]] = defaultdict(lambda: defaultdict(deque))
+        # 惰性清理间隔（秒）：不活跃 group_key 无人触碰，过期数据会永久滞留
+        self.CLEANUP_INTERVAL_SEC = 300
+        self._last_cleanup: float = 0.0
         self._load_default_rules()
         logger.info(f"SigmaDetector: loaded {len(self.rules)} rules")
 
@@ -198,11 +205,17 @@ class SigmaDetector:
                 confidence="medium",
                 action_recommend="block_ip",
                 conditions={
-                    "host_port": [22],
-                    "event_contains": ["BRUTE_FORCE", "SSH_BRUTE", "LOGIN_FAIL"],
+                    "dst_port": [22],
+                    "protocol_in": ["ssh", "tcp/22"],
+                    "event_contains": ["BRUTE_FORCE", "SSH_BRUTE", "LOGIN_FAIL", "登录失败", "暴力破解", "爆破"],
                 },
+                # v5 修复:必须同时满足 SSH 端口/协议 AND 登录失败特征。
+                # 此前 OR 语义下仅 dst_port=22 就命中,正常 SSH 登录被误判暴破
+                # (2026-09-01 复现:良性 USER_LOGIN dst=22 → SIG-007 命中 → 误封禁)。
+                condition_mode="and",
                 mitre_attack_id="T1110.001",
                 mitre_tactic="credential-access",
+                # 聚合用于升级处置；首条结论型事件仍会告警（见 detect）
                 aggregation={"func": "count", "field": "src_ip", "op": ">", "threshold": 3, "timeframe": "5m"},
             ),
             # ── 扩展规则：覆盖 platform 已有的事件类型 ──
@@ -243,7 +256,9 @@ class SigmaDetector:
                 confidence="medium",
                 action_recommend="require_confirmation",
                 conditions={
-                    "event_contains": ["LATERAL_MOVE", "LATERAL_SSH", "PRIV_ESCALATION"],
+                    "event_contains": [
+                        "LATERAL_MOVE", "LATERAL_MOVEMENT", "LATERAL_SSH", "PRIV_ESCALATION",
+                    ],
                 },
                 mitre_attack_id="T1021",
                 mitre_tactic="lateral-movement",
@@ -275,6 +290,7 @@ class SigmaDetector:
         - 字段映射标准化
         """
         results = []
+        self._maybe_cleanup()
         # 字段映射标准化
         normalized = self._normalize_fields(event)
 
@@ -284,19 +300,34 @@ class SigmaDetector:
         message = str(normalized.get("message", ""))
         severity_raw = normalized.get("severity", 0)
         src_ip = str(normalized.get("src_ip", ""))
-        event_text = f"{event_type} {message}".upper()
+        # 空格归一为下划线: 让 "LOGIN_FAIL" 类下划线模式能命中
+        # "login failed" 等自然语言消息 (如 "SSH login failed" → LOGIN_FAILED 含 LOGIN_FAIL)
+        event_text = f"{event_type} {message}".upper().replace(" ", "_")
 
         for rule in self.rules:
             if not rule.enabled:
                 continue
 
-            if not self._match_conditions(rule, url, host, event_text, severity_raw):
+            if not self._match_conditions(rule, url, host, event_text, severity_raw, normalized):
                 continue
 
-            # 聚合条件检查
+            # 聚合条件：未达阈值时，若事件类型本身已是结论型威胁，仍告警（不丢首检）
+            action_override = None
             if rule.aggregation:
-                if not self._check_aggregation(rule, normalized):
-                    continue
+                agg_ok = self._check_aggregation(rule, normalized)
+                if not agg_ok:
+                    conclusive = {
+                        "BRUTE_FORCE", "SSH_BRUTE", "LOGIN_FAIL",
+                        "C2_BEACON", "DATA_EXFIL", "PORT_SCAN",
+                        "LATERAL_MOVE", "LATERAL_MOVEMENT",
+                    }
+                    if event_type.upper() in conclusive or any(
+                        p.upper() == event_type.upper()
+                        for p in (rule.conditions.get("event_contains") or [])
+                    ):
+                        action_override = "alert"
+                    else:
+                        continue
 
             # 威胁加成
             final_severity = rule.severity
@@ -307,6 +338,9 @@ class SigmaDetector:
 
             # 灰度标记
             shadow_tag = " [SHADOW]" if rule.shadow_mode else ""
+            action = action_override or rule.action_recommend
+            if rule.shadow_mode:
+                action = "alert"
 
             results.append(DetectionResult(
                 rule_id=rule.rule_id,
@@ -314,7 +348,7 @@ class SigmaDetector:
                 severity=final_severity,
                 attack_type=rule.attack_type,
                 confidence=rule.confidence,
-                action_recommend="alert" if rule.shadow_mode else rule.action_recommend,
+                action_recommend=action,
                 matched_fields={
                     "event_type": event_type,
                     "src_ip": src_ip,
@@ -387,6 +421,45 @@ class SigmaDetector:
         elif tf.endswith("s"):
             return int(tf[:-1])
         return 300  # 默认 5 分钟
+
+    def cleanup_windows(self, now: Optional[float] = None):
+        """全量清扫聚合滑动窗口，防止长期运行内存无限增长。
+
+        _check_aggregation 只清理当前被查询的 group_key 内的过期条目，
+        不再命中的 src_ip 连同其中的过期事件会永久滞留，这里统一处理：
+        清空超过最大 timeframe 的条目，删除空 group_key / 空 rule_id。
+        """
+        now = now if now is not None else time.time()
+        max_tf = max(
+            (
+                self._parse_timeframe(r.aggregation.get("timeframe", "5m"))
+                for r in self.rules
+                if r.aggregation
+            ),
+            default=300,
+        )
+        cutoff = now - max_tf
+        for rule_id in list(self._agg_windows.keys()):
+            rule_windows = self._agg_windows[rule_id]
+            for group_key in list(rule_windows.keys()):
+                window = rule_windows[group_key]
+                while window and window[0][0] < cutoff:
+                    window.popleft()
+                if not window:
+                    del rule_windows[group_key]
+            if not rule_windows:
+                del self._agg_windows[rule_id]
+
+    def _maybe_cleanup(self):
+        """detect() 入口的惰性清理：距上次清理超过间隔才执行一次。"""
+        now = time.time()
+        if now - self._last_cleanup < self.CLEANUP_INTERVAL_SEC:
+            return
+        self._last_cleanup = now
+        try:
+            self.cleanup_windows(now)
+        except Exception as e:
+            logger.warning(f"Sigma agg window cleanup failed: {e}")
 
     def detect_batch(self, events: list[dict]) -> dict:
         """
@@ -463,30 +536,56 @@ class SigmaDetector:
         }
 
     def _match_conditions(self, rule: SigmaRule, url: str, host: str,
-                          event_text: str, severity_raw) -> bool:
-        """匹配规则条件（同一规则内多条件为 OR 关系）"""
+                          event_text: str, severity_raw, event: Optional[dict] = None) -> bool:
+        """匹配规则条件
+
+        condition_mode:
+          - "or" (默认, 兼容历史): 任一条件命中即匹配
+          - "and": 所有条件必须同时命中 (精确规则, 如 SIG-007 SSH 暴破)
+        """
+        event = event or {}
+        mode = (rule.condition_mode or "or").lower()
+        matched_any = False
+        matched_all = True
         for key, patterns in rule.conditions.items():
+            hit = False
             if key == "url_contains":
-                if any(p.upper() in url.upper() for p in patterns):
-                    return True
+                hit = any(p.upper() in url.upper() for p in patterns)
             elif key == "event_contains":
-                if any(p.upper() in event_text for p in patterns):
-                    return True
-            elif key == "host_port":
-                port_str = host.rsplit(":", 1)[-1] if ":" in host else ""
-                try:
-                    port = int(port_str)
-                    if any(p == port for p in patterns):
-                        return True
-                except ValueError:
-                    pass
+                hit = any(p.upper() in event_text for p in patterns)
+            elif key in ("host_port", "dst_port"):
+                ports = []
+                for candidate in (
+                    event.get("dst_port"),
+                    event.get("port"),
+                    event.get("dest_port"),
+                ):
+                    try:
+                        if candidate is not None and str(candidate).strip() != "":
+                            ports.append(int(candidate))
+                    except (TypeError, ValueError):
+                        pass
+                if ":" in str(host):
+                    try:
+                        ports.append(int(str(host).rsplit(":", 1)[-1]))
+                    except ValueError:
+                        pass
+                hit = any(p in ports for p in patterns)
+            elif key == "protocol_in":
+                proto = str(event.get("protocol") or event.get("proto") or "").lower()
+                hit = bool(proto) and any(
+                    str(p).lower() == proto or str(p).lower() in proto for p in patterns
+                )
             elif key == "severity_min":
                 try:
-                    if int(severity_raw) >= int(patterns):
-                        return True
+                    hit = int(severity_raw) >= int(patterns)
                 except (ValueError, TypeError):
-                    pass
-        return False
+                    hit = False
+            if hit:
+                matched_any = True
+            else:
+                matched_all = False
+        return matched_all if mode == "and" else matched_any
 
     def _match_boost(self, boost: dict, ip: str) -> bool:
         """威胁加成匹配"""

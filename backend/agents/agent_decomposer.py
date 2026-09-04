@@ -313,14 +313,25 @@ class Decomposer(BaseAuditComponent):
         depth_reason = (
             f"severity={severity}, anomaly_score={anomaly_score:.3f}"
         )
+        # triage 车道可覆盖规则深度(P0→deep / P3→quick)
+        triage = event.get("_audit_triage") or {}
+        force_depth = str(triage.get("force_depth") or "").lower()
+        if force_depth in (AUDIT_DEPTH_QUICK, AUDIT_DEPTH_STANDARD, AUDIT_DEPTH_DEEP):
+            if force_depth != depth:
+                depth_reason += f", triage_override={force_depth}(was {depth})"
+            depth = force_depth
 
         logger.info(
             f"Decomposer(full): depth={depth} type={event_type} "
-            f"src={src_ip} score={anomaly_score:.3f}"
+            f"src={src_ip} score={anomaly_score:.3f} "
+            f"tier={triage.get('tier', '')} lane={triage.get('lane', '')}"
         )
 
         llm_analysis = ""
-        if depth == AUDIT_DEPTH_DEEP:
+        # 硬预算下 P0 仍 deep,但可跳过昂贵 pre-analyze(保留 SubAuditor+synthesize)
+        _sig = triage.get("signals") or {}
+        _skip_pre = bool(triage.get("skip_pre_analyze") or _sig.get("skip_pre_analyze"))
+        if depth == AUDIT_DEPTH_DEEP and not _skip_pre:
             llm_analysis = await self._llm_pre_analyze(event, anomaly_score, anomaly_reasons)
 
         depth_to_tasks = {

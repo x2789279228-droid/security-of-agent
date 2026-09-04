@@ -1,6 +1,6 @@
 package com.soc.job;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import com.soc.model.AlertEvent;
 import com.soc.model.SecurityEvent;
 import com.soc.util.KafkaConfig;
@@ -463,8 +463,8 @@ public class AnomalyDetectionJob {
             String traceparent = TraceUtil.traceparentOf(cepSpan);
             if (!traceparent.isEmpty()) {
                 try {
-                    com.fasterxml.jackson.databind.node.ObjectNode node =
-                            (com.fasterxml.jackson.databind.node.ObjectNode) getMapper().readTree(alertJson);
+                    org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode node =
+                            (org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode) getMapper().readTree(alertJson);
                     node.put("traceparent", traceparent);
                     alertJson = getMapper().writeValueAsString(node);
                 } catch (Exception ignored) {

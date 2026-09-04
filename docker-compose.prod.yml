@@ -12,7 +12,17 @@ services:
   flink-jobmanager:
     image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
 
-  flink-taskmanager:
+  # 3 副本 TaskManager (与 base compose 的 flink-taskmanager-1/2/3 对齐)
+  flink-taskmanager-1:
+    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
+
+  flink-taskmanager-2:
+    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
+
+  flink-taskmanager-3:
+    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
+
+  flink-job-submitter:
     image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:?IMAGE_TAG 必填 (如 main/sha-xxxxxx/1.2.3)}
 
   backend:

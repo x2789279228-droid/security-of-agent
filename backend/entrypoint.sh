@@ -42,5 +42,33 @@ else
     echo "[entrypoint] No SSH key found at $SSH_SRC/id_rsa after 30s retries (stub mode)"
 fi
 
+# L2: 响应策略 YAML 持久化目录
+# 镜像内种子在 /app/response_engine/policies；运行时写到可挂载的
+# RESPONSE_POLICIES_DIR（默认 /data/response_policies），避免重建容器丢失运营新增策略。
+SEED_POLICIES="/app/response_engine/policies"
+SEED_TAXONOMY="/app/response_engine/taxonomy.yml"
+RUNTIME_POLICIES="${RESPONSE_POLICIES_DIR:-/data/response_policies}"
+mkdir -p "$RUNTIME_POLICIES"
+if [ -d "$SEED_POLICIES" ]; then
+    # 仅补齐缺失的种子文件，不覆盖运营已改写的 YAML
+    for f in "$SEED_POLICIES"/*.yml "$SEED_POLICIES"/*.yaml; do
+        [ -f "$f" ] || continue
+        base=$(basename "$f")
+        if [ ! -f "$RUNTIME_POLICIES/$base" ]; then
+            cp "$f" "$RUNTIME_POLICIES/$base" 2>/dev/null || true
+        fi
+    done
+fi
+# L3: 分类树与策略同目录，便于运营热改 alias
+if [ -f "$SEED_TAXONOMY" ] && [ ! -f "$RUNTIME_POLICIES/taxonomy.yml" ]; then
+    cp "$SEED_TAXONOMY" "$RUNTIME_POLICIES/taxonomy.yml" 2>/dev/null || true
+fi
+# 确保 appuser 可写（docker cp / 首次挂载后偶发 root 属主）
+chmod -R a+rwX "$RUNTIME_POLICIES" 2>/dev/null || true
+export RESPONSE_POLICIES_DIR="$RUNTIME_POLICIES"
+export RESPONSE_TAXONOMY_PATH="${RESPONSE_TAXONOMY_PATH:-$RUNTIME_POLICIES/taxonomy.yml}"
+echo "[entrypoint] Response policies dir: $RUNTIME_POLICIES ($(ls -1 "$RUNTIME_POLICIES" 2>/dev/null | wc -l) files)"
+echo "[entrypoint] Taxonomy: $RESPONSE_TAXONOMY_PATH"
+
 # 启动主服务
 exec "$@"

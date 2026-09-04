@@ -1,6 +1,6 @@
 package com.soc.job;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import com.soc.model.SecurityEvent;
 import com.soc.util.KafkaConfig;
 import com.soc.util.TraceIdHeaderProvider;

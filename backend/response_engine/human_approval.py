@@ -31,6 +31,9 @@ class ApprovalStatus(str, Enum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     AUTO_APPROVED = "auto_approved"  # 超时自动批准
+    # 系统按策略自动执行（仅 HIGH 动作且策略显式 auto_execute 豁免），
+    # 供事后审查/回滚，不是审批结果，审批人不可再批/拒
+    AUTO_EXECUTED = "auto_executed"
 
 
 @dataclass
@@ -47,6 +50,8 @@ class ApprovalTicket:
     approved_at: float = 0.0
     reject_reason: str = ""
     result: Optional[dict] = None      # 执行结果
+    priority: str = "p2"               # p1=高优（Uncertain 等）/ p2=普通
+    match_status: str = ""             # matched / uncertain / ...
 
     @property
     def is_expired(self) -> bool:
@@ -55,10 +60,17 @@ class ApprovalTicket:
     @property
     def summary(self) -> str:
         return (
-            f"[{self.status.value}] {self.policy_name} → "
+            f"[{self.status.value}/{self.priority}] {self.policy_name} → "
             f"{len(self.actions)} actions, "
             f"threat={self.threat_info.get('threat_type', '?')}"
+            f"{f' status={self.match_status}' if self.match_status else ''}"
         )
+
+    @property
+    def priority_rank(self) -> int:
+        """数值越小越优先（list_pending 排序用）。"""
+        order = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
+        return order.get(str(self.priority or "p2").lower(), 9)
 
 
 class ApprovalQueue:
@@ -75,6 +87,8 @@ class ApprovalQueue:
         policy_name: str,
         actions: list[dict],
         timeout_minutes: Optional[int] = None,
+        priority: str = "p2",
+        match_status: str = "",
     ) -> ApprovalTicket:
         """提交审批工单"""
         import uuid
@@ -87,6 +101,8 @@ class ApprovalQueue:
             status=ApprovalStatus.PENDING,
             created_at=time.time(),
             expires_at=time.time() + (timeout_minutes or self._default_timeout) * 60,
+            priority=priority or "p2",
+            match_status=match_status or "",
         )
         self._tickets[ticket.id] = ticket
 
@@ -94,6 +110,7 @@ class ApprovalQueue:
             f"[APPROVAL] Ticket #{ticket.id[:8]} submitted: "
             f"{policy_name} ({len(actions)} actions) "
             f"threat={threat_info.get('threat_type','?')} "
+            f"priority={ticket.priority} match_status={ticket.match_status or '-'} "
             f"expires={ticket.expires_at}"
         )
 
@@ -133,8 +150,7 @@ class ApprovalQueue:
         return self._tickets.get(ticket_id)
 
     def list_pending(self) -> list[ApprovalTicket]:
-        """获取所有待审批工单"""
-        now = time.time()
+        """获取所有待审批工单（p1 置顶，其次按创建时间倒序）。"""
         pending = []
         for ticket in self._tickets.values():
             if ticket.status == ApprovalStatus.PENDING:
@@ -142,13 +158,13 @@ class ApprovalQueue:
                     ticket.status = ApprovalStatus.EXPIRED
                 else:
                     pending.append(ticket)
+        pending.sort(key=lambda t: (t.priority_rank, -t.created_at))
         return pending
 
     def list_all(self, limit: int = 50) -> list[ApprovalTicket]:
         tickets = sorted(
             self._tickets.values(),
-            key=lambda t: t.created_at,
-            reverse=True,
+            key=lambda t: (t.priority_rank, -t.created_at),
         )
         return tickets[:limit]
 

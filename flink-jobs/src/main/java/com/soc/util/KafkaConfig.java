@@ -43,6 +43,12 @@ public class KafkaConfig {
     /** Sigma 聚合候选 - pySigma 单事件命中带聚合聚合规则(如 SIG-001/007)的事件; Flink 阈值窗口消费 */
     public static final String TOPIC_SIGMA_HIT = "security-sigma-hit";
 
+    /** NDR 流聚合结果 - FlowAggregationJob 输出 */
+    public static final String TOPIC_FLOWS_AGGREGATED = "ndr-flows-aggregated";
+
+    /** 行为基线告警 - BehaviorAnomalyJob 输出，绕过厂商 threat_type */
+    public static final String TOPIC_BEHAVIOR_ALERTS = "security-behavior-alerts";
+
     // ==================== Kafka 连接配置 ====================
 
     /** Kafka Bootstrap 服务器地址，支持环境变量覆盖 */

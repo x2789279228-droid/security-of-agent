@@ -3,9 +3,9 @@ import { spring } from '../../lib/constants'
 import type { ServiceHealth } from '../../types'
 
 const colors: Record<ServiceHealth, string> = {
-  ok: '#10b981',
-  warn: '#f59e0b',
-  error: '#ef4444',
+  ok: '#111111',
+  warn: '#555555',
+  error: '#888888',
 }
 
 export function StatusDot({ health }: { health: ServiceHealth }) {
