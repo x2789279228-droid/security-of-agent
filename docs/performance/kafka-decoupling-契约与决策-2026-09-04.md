@@ -73,4 +73,10 @@ schema/枚举/IP 不合格会被 Flink rejected 到 security-logs-rejected，不
 - 进程崩溃时"内存中已派发的单条 LLM 审计协程"仍可能中断丢失(与旧 HTTP 同源同界, 非本次引入); audit_pq(Redis, P0/P1 shed 持久化)已在 log_ingestor._audit_pipeline inline,专注 inflight 满降级场景; 其余依托 `stuck_auto_reset`(scheduler)作为最终 backstop 回收 analyzed=false 事件。
 - 为杜绝 Python 权威路径与 Flink 旧 enriched/audit 调度对同一物理事件双审计/双 LLM,决策 §5 采用 single-owner 分区(HTTP→events-ingest,外部→raw) — 物理事件不重复跨喂(见 §5 修订),故 kafka_flink_secondary_llm 开关保留为未来需要 Flink 补审计时的逃生口(默认 false)。
 
+### 8.1 无丢失实证(crash-resume, 2026-09-04)
+- 消费循环改为**仅整批全成功才 commit**;任一条失败→不推进 offset→瞬断/DB 故障重放, 不丢(commit-gating)。
+- 实证: 注入 600 条(网关即回 queued, produced=600/600)→消费推进至 16 即 `docker stop` 杀进程(截断于消费中)→ 重启 backend: `python_ingest_consumed=600, errors=0`(其余 584 由未 commit offset 从 Kafka 自动重放续处理)。
+- 结论: HTTP 上游在 backend 处理被中断时全成功入队(请求不因下游状态失败)→满足时间解耦"DB/LLM故障不阻塞上游"; 恢复后 Kafka 积压自动消化不丢→故障解耦成立。
+
+
 

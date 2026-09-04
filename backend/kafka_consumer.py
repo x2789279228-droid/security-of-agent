@@ -424,10 +424,22 @@ class KafkaConsumerManager:
                 msgs = [m for batch in fetched.values() for m in batch]
                 if not msgs:
                     continue
+                batch_failed = [False]
+
+                async def _exe(m):
+                    if not await self._safe_py_handle(m):
+                        batch_failed[0] = True
+
                 for i in range(0, len(msgs), workers):
                     chunk = msgs[i:i + workers]
-                    await asyncio.gather(*[self._safe_py_handle(m) for m in chunk])
-                await consumer.commit()
+                    await asyncio.gather(*[_exe(m) for m in chunk])
+                # only advance offset when whole fetched batch processed OK;
+                # transient DB/LLM outage -> leave offset -> replay on reconnect (no loss)
+                if batch_failed[0]:
+                    logger.warning(f"Python-ingest batch had failures: not committing, will retry/replay")
+                    await asyncio.sleep(0.5)
+                else:
+                    await consumer.commit()
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -436,17 +448,18 @@ class KafkaConsumerManager:
             await consumer.stop()
 
 
-    async def _safe_py_handle(self, msg):
+    async def _safe_py_handle(self, msg) -> bool:
         try:
             event = msg.value if isinstance(msg.value, dict) else json.loads(msg.value)
             await self._handle_python_ingest(event, "")
             self._stats["python_ingest_consumed"] = self._stats.get("python_ingest_consumed", 0) + 1
             self._stats["last_message_at"] = time.time()
             inc_kafka_consumed(getattr(settings, "kafka_topic_ingest_process", ""))
+            return True
         except Exception as e:
             self._stats["errors"] = self._stats.get("errors", 0) + 1
-            self._stats["python_ingest_consumed"] = self._stats.get("python_ingest_consumed", 0)
             logger.error(f"[Python-ingest] handle error: {e}")
+            return False
 
 
     async def _handle_python_ingest(self, wrapper: dict, trace_id: str):
