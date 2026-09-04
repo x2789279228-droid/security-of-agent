@@ -42,10 +42,14 @@ class CostTracker:
         daily_budget_tokens: int = 5_000_000,
         price_input_per_1k: float = 0.0,
         price_output_per_1k: float = 0.0,
+        unlimited: bool = None,
     ):
         self.daily_budget = daily_budget_tokens
         self.price_input_per_1k = price_input_per_1k
         self.price_output_per_1k = price_output_per_1k
+        if unlimited is None:
+            unlimited = daily_budget_tokens <= 0
+        self._unlimited = bool(unlimited)
         self._daily_usage: dict[str, int] = defaultdict(int)  # date → total_tokens
         self._daily_prompt: dict[str, int] = defaultdict(int)  # date → prompt_tokens
         self._daily_completion: dict[str, int] = defaultdict(int)  # date → completion_tokens
@@ -79,10 +83,14 @@ class CostTracker:
             self._call_count[today] = max(0, int(calls or 0))
 
     def is_over_budget(self) -> bool:
+        if self._unlimited:
+            return False
         today = date.today().isoformat()
         return self._daily_usage[today] >= self.daily_budget
 
-    def remaining_budget(self) -> int:
+    def remaining_budget(self):
+        if self._unlimited:
+            return None
         today = date.today().isoformat()
         return max(0, self.daily_budget - self._daily_usage[today])
 
@@ -115,7 +123,9 @@ class CostTracker:
             "today_calls": self._call_count.get(today, 0),
             "remaining": self.remaining_budget(),
             "over_budget": self.is_over_budget(),
-            "usage_pct": round(used / self.daily_budget * 100, 1) if self.daily_budget else 0.0,
+            "unlimited": bool(self._unlimited),
+            "usage_pct": (0.0 if self._unlimited else
+                          round(used / self.daily_budget * 100, 1) if self.daily_budget else 0.0),
             "price_input_per_1k": self.price_input_per_1k,
             "price_output_per_1k": self.price_output_per_1k,
             "estimated_cost_yuan": self.estimate_cost_yuan(prompt, completion),
@@ -127,6 +137,7 @@ class CostTracker:
 
 cost_tracker = CostTracker(
     daily_budget_tokens=settings.llm_daily_budget_tokens,
+    unlimited=getattr(settings, "llm_budget_unlimited", None),
     price_input_per_1k=settings.llm_price_input_per_1k_tokens,
     price_output_per_1k=settings.llm_price_output_per_1k_tokens,
 )

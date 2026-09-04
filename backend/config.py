@@ -229,7 +229,12 @@ class Settings(BaseSettings):
     llm_enhancer_timeout_sec: int = 15
 
     # ── LLM 成本控制 (P0.T 引入) ──
-    llm_daily_budget_tokens: int = 5_000_000              # 每日全局 token 预算, 超限降级
+    # 上不封顶: 0 = 无上限(默认, LLM审计永不因预算降级); >0 = 日预算额(设备回退时)
+    # 上不封顶: 0 = 无上限(默认, LLM 审计永不因预算降级); >0 = 显式日额度(如需回退硬门禁)
+    llm_daily_budget_tokens: int = 0
+    # 统一开关: True=无上限，所有 LLM 预算只记账不关肘(审计/增强/维度), False=恢复预算门禁(回退)
+    llm_budget_unlimited: bool = True
+              # 每日全局 token 预算, 超限降级
     llm_price_input_per_1k_tokens: float = 0.0            # 输入每千 token 单价(¥), 0=不估算费用
     llm_price_output_per_1k_tokens: float = 0.0           # 输出每千 token 单价(¥), 0=不估算费用
 

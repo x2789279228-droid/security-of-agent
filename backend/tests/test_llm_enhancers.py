@@ -87,19 +87,31 @@ class TestLlmEnhancer:
         assert llm_enhancer._safe_parse_json("") is None
         assert llm_enhancer._safe_parse_json(None) is None
 
-    def test_budget_check_rejects_when_over_limit(self):
-        """超预算时 _check_and_consume_budget 返 False"""
+    def test_budget_check_rejects_when_over_limit(self, monkeypatch):
+        """in strict mode (llm_budget_unlimited=False) module budget over-limit rejects"""
         import llm_enhancer
+        import config as _cfg
+        monkeypatch.setattr(_cfg.settings, "llm_budget_unlimited", False)
         llm_enhancer._MODULE_BUDGET.clear()
-        # 模块 'traffic' 日预算 5¥,连续 100 次单次 0.1¥ 应在 ~50 次后超限
         allowed = 0
         for _ in range(100):
             if llm_enhancer._check_and_consume_budget("traffic", 0.1):
                 allowed += 1
-        # 不是全部通过
         assert allowed < 100
-        # 用满后再次检查应返 False
         assert not llm_enhancer._check_and_consume_budget("traffic", 0.1)
+
+    def test_budget_unlimited_allows_all_calls(self, monkeypatch):
+        """unlimited(unlimited=True) : budget only records, never rejects LLM enhancer call"""
+        import llm_enhancer
+        import config as _cfg
+        monkeypatch.setattr(_cfg.settings, "llm_budget_unlimited", True)
+        llm_enhancer._MODULE_BUDGET.clear()
+        allowed = 0
+        for _ in range(200):
+            if llm_enhancer._check_and_consume_budget("traffic", 0.1):
+                allowed += 1
+        assert allowed == 200
+        assert llm_enhancer._check_and_consume_budget("traffic", 0.1)
 
     def test_budget_release_on_failure(self):
         """失败时退还预算"""

@@ -78,8 +78,9 @@ def _check_and_consume_budget(module: str, cost_jpy: float) -> bool:
         "intel": settings.llm_intel_budget_jpy_per_day,
         "sandbox": settings.llm_sandbox_budget_jpy_per_day,
     }
+    unlimited = bool(getattr(settings, "llm_budget_unlimited", True))
     limit = budget_map.get(module, 0)
-    if limit <= 0:
+    if not unlimited and limit <= 0:
         return False
 
     today = _today_str()
@@ -89,13 +90,14 @@ def _check_and_consume_budget(module: str, cost_jpy: float) -> bool:
         bucket["date"] = today
         bucket["used"] = 0.0
 
-    if bucket["used"] + cost_jpy > limit:
+    if not unlimited and bucket["used"] + cost_jpy > limit:
         logger.warning(
             f"[LlmEnhancer] module '{module}' daily budget exhausted: "
             f"used={bucket['used']:.2f}/{limit}¥, skip this call"
         )
         return False
 
+    # 上不封顶: 只记账(used 累加通报), 不关肘 LLM
     bucket["used"] += cost_jpy
     return True
 
