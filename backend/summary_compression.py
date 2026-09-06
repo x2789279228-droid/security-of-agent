@@ -506,6 +506,99 @@ class EmbeddingClient:
         _trace(status="error", error_type="embedding_failed")
         return [0.0] * settings.embedding_dim
 
+
+    async def _post_embedding(self, texts, type_):
+        import os as _o
+        batch_key = _o.environ.get("SHARED_MEMORY_EMBEDDING_BATCH_KEY", "").strip() or "texts"
+        low = (str(self.model or "") + "|" + str(self.base_url or "")).lower()
+        if batch_key not in ("texts", "input"):
+            batch_key = "texts" if ("embo" in low or "minimax" in low) else "input"
+        payload = {"model": self.model, batch_key: texts}
+        if batch_key == "texts":
+            payload["type"] = type_
+        resp = await self.client.post(
+            f"{self.base_url}/embeddings",
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and data.get("vectors"):
+            return list(data["vectors"])
+        if isinstance(data, dict) and isinstance(data.get("data"), list):
+            return [d["embedding"] for d in data["data"] if isinstance(d, dict) and "embedding" in d]
+        raise ValueError("Unknown embedding response keys")
+
+    async def embed_batch(self, texts, type_: str = "db"):
+        import json as _json, hashlib as _hash, logging as _log
+        from trace_hook import emit_trace
+        t0 = __import__("time").time()
+        items = list(texts)
+        out = [None] * len(items)
+        miss_idx = []
+        for i, tx in enumerate(items):
+            if not isinstance(tx, str) or not tx.strip():
+                out[i] = [0.0] * settings.embedding_dim
+                continue
+            key = f"embed_cache:{type_}:{_hash.md5(tx.encode('utf-8')).hexdigest()}"
+            val = None
+            if self.redis:
+                try:
+                    val = await self.redis.get(key)
+                except Exception:
+                    val = None
+            if val:
+                self._stats["hits"] += 1
+                try:
+                    out[i] = _json.loads(val)
+                except Exception:
+                    out[i] = None
+            else:
+                self._stats["misses"] += 1
+                miss_idx.append(i)
+        failures = 0
+        if miss_idx:
+            await self.ensure_client()
+            need = [items[i] for i in miss_idx]
+            got = []
+            for attempt in range(2):
+                try:
+                    got = await self._post_embedding(need, type_)
+                    break
+                except Exception as e:
+                    failures += 1
+                    if attempt == 0:
+                        _log.getLogger(__name__).warning(f"Embedding batch attempt1 failed: {e}")
+            if not got:
+                for i in miss_idx:
+                    out[i] = [0.0] * settings.embedding_dim
+                emit_trace(caller="embedding", operation="embed_batch", model=self.model,
+                           total_tokens=0, latency_ms=(__import__("time").time()-t0)*1000,
+                           status="error", error_type="embedding_failed")
+            else:
+                for k, i in enumerate(miss_idx):
+                    emb = got[k] if k < len(got) else [0.0]*settings.embedding_dim
+                    out[i] = emb
+                    key = f"embed_cache:{type_}:{_hash.md5(str(items[i]).encode('utf-8')).hexdigest()}"
+                    if self.redis:
+                        try:
+                            await self.redis.setex(key, settings.embedding_cache_ttl, _json.dumps(emb))
+                        except Exception:
+                            pass
+        emit_trace(caller="embedding", operation="embed_batch", model=self.model,
+                   total_tokens=0, latency_ms=(__import__("time").time()-t0)*1000,
+                   status=("degraded" if failures else ("success" if miss_idx else "cache")),
+                   cache_hit=not bool(miss_idx))
+        return out
+
+    async def embed_many(self, texts, type_: str = "db"):
+        import os as _o
+        size = max(1, int(_o.environ.get("EMBED_BATCH_SIZE", "100") or "100"))
+        texts = list(texts)
+        acc = []
+        for i in range(0, len(texts), size):
+            acc.extend(await self.embed_batch(texts[i:i+size], type_=type_))
+        return acc
+
     async def close(self):
         if self.client:
             await self.client.aclose()
