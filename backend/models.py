@@ -12,15 +12,40 @@ MutableJSON = MutableDict.as_mutable(JSON)
 # list 类型的 JSON 列用 MutableList 包装（services/tags/iocs 等数组字段）
 MutableListJSON = MutableList.as_mutable(JSON)
 
-engine = create_async_engine(
-    settings.database_url,
-    echo=False,
-    pool_size=10,          # 常驻连接数（支撑 5 并发审计 + API 请求）
-    max_overflow=20,       # 峰值溢出连接
-    pool_pre_ping=True,    # 取连接前检测存活
-    pool_recycle=1800,     # 30分钟回收连接
+def _make_engine(pool_size: int, max_overflow: int, pool_timeout: float):
+    """SQLite(测试)不传 PG 池参数; 生产 PG 才启用 QueuePool。"""
+    url = settings.database_url
+    kw = {"echo": False}
+    if not str(url or "").startswith("sqlite"):
+        kw.update(
+            pool_size=int(pool_size),
+            max_overflow=int(max_overflow),
+            pool_timeout=float(pool_timeout),
+            pool_pre_ping=True,
+            pool_recycle=1800,
+        )
+    return create_async_engine(url, **kw)
+
+
+# OLTP: ingest / API / audit 短租 SQL。LLM 等待期间不得占用这些连接。
+engine_oltp = _make_engine(
+    getattr(settings, "db_pool_oltp_size", 24),
+    getattr(settings, "db_pool_oltp_overflow", 8),
+    getattr(settings, "db_pool_oltp_timeout_s", 5.0),
 )
-async_session = async_sessionmaker(engine, expire_on_commit=False)
+# 后台索引/调度独立池,避免 memory_tree 把 ingest 饿死。
+# sqlite :memory: 必须共用同一 engine,否则是两套空库。
+if str(settings.database_url or "").startswith("sqlite"):
+    engine_bg = engine_oltp
+else:
+    engine_bg = _make_engine(
+        getattr(settings, "db_pool_bg_size", 8),
+        getattr(settings, "db_pool_bg_overflow", 4),
+        getattr(settings, "db_pool_bg_timeout_s", 10.0),
+    )
+engine = engine_oltp  # 兼容旧 import
+async_session = async_sessionmaker(engine_oltp, expire_on_commit=False)
+async_session_bg = async_sessionmaker(engine_bg, expire_on_commit=False)
 
 class Base(AsyncAttrs, DeclarativeBase):
     pass
@@ -132,6 +157,7 @@ class KnowledgeChunk(Base):
     tags = Column(JSON, default=list)
     embedding = Column(Vector(None))
     token_count = Column(Integer, default=0)
+    search_lex = Column(Text, default="")    # IOC/CJK 预切词，供 tsvector / 词法召回
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -168,6 +194,7 @@ class AgentTrace(Base):
     model = Column(String(100), default="")
     event_id = Column(Integer, default=0, index=True)
     session_id = Column(String(100), default="", index=True)
+    trace_id = Column(String(32), default="", index=True)  # W3C 32 hex, 对齐 Tempo / thought steps
     prompt_tokens = Column(Integer, default=0)
     completion_tokens = Column(Integer, default=0)
     total_tokens = Column(Integer, default=0)
@@ -753,6 +780,97 @@ class AppUser(Base):
 # 安全运营 — 运营 KPI 快照 (P0.B)
 # ════════════════════════════════════════════
 
+class SelfPlayMatch(Base):
+    """红蓝自博弈对局"""
+    __tablename__ = "self_play_matches"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_id = Column(String(64), unique=True, nullable=False, index=True)
+    status = Column(String(20), default="pending", index=True)  # pending|running|completed|stopped|failed
+    mode = Column(String(20), default="sigma")  # sigma|inject|full
+    curriculum_level = Column(Integer, default=0)
+    total_rounds = Column(Integer, default=0)
+    completed_rounds = Column(Integer, default=0)
+    config = Column(MutableJSON, default=dict)
+    metrics = Column(MutableJSON, default=dict)
+    winner = Column(String(20), default="")  # red|blue|draw
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class SelfPlayRound(Base):
+    """自博弈单回合"""
+    __tablename__ = "self_play_rounds"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_id = Column(String(64), nullable=False, index=True)
+    round_num = Column(Integer, default=0, index=True)
+    curriculum_level = Column(Integer, default=0)
+    red_plan = Column(MutableJSON, default=dict)
+    events = Column(MutableListJSON, default=list)
+    blue_obs = Column(MutableListJSON, default=list)
+    outcome = Column(String(20), default="")  # red_win|blue_win|mixed|decoy_only
+    metrics = Column(MutableJSON, default=dict)
+    learned = Column(MutableListJSON, default=list)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class SelfPlayLearnedRule(Base):
+    """自博弈学到的检测规则候选(默认不写生产 Sigma)"""
+    __tablename__ = "self_play_learned_rules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    rule_id = Column(String(50), default="", index=True)
+    match_id = Column(String(64), default="", index=True)
+    source_round = Column(Integer, default=0)
+    title = Column(String(300), default="")
+    attack_type = Column(String(50), default="")
+    mitre_id = Column(String(20), default="")
+    severity = Column(String(20), default="medium")
+    conditions = Column(MutableJSON, default=dict)
+    sigma_yaml = Column(Text, default="")
+    status = Column(String(20), default="candidate", index=True)  # candidate|shadow|promoted|dismissed
+    review_report = Column(MutableJSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class CausalGraph(Base):
+    """PC+GES 学到的事件类型因果图(批式,不进 Flink 热路径)。"""
+    __tablename__ = "causal_graphs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    algorithm = Column(String(20), default="pc+ges")
+    n_windows = Column(Integer, default=0)
+    bin_minutes = Column(Integer, default=30)
+    names = Column(MutableListJSON, default=list)
+    directed = Column(MutableListJSON, default=list)
+    edges = Column(MutableListJSON, default=list)
+    pc = Column(MutableJSON, default=dict)
+    ges = Column(MutableJSON, default=dict)
+    agree_rate = Column(Float, default=0.0)
+    reason = Column(String(80), default="")
+    ok = Column(Boolean, default=False)
+    candidates = Column(MutableListJSON, default=list)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class CausalEdge(Base):
+    """因果图的单条边(含 ACE / 先验冲突)。"""
+    __tablename__ = "causal_edges"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    graph_id = Column(Integer, ForeignKey("causal_graphs.id"), nullable=True, index=True)
+    cause = Column(String(50), default="", index=True)
+    effect = Column(String(50), default="", index=True)
+    confidence = Column(String(40), default="")
+    ace = Column(Float, nullable=True)
+    identifiable = Column(Boolean, default=False)
+    prior_violation = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class KpiSnapshot(Base):
     """KPI 快照 — MTTD/MTTR/案例周期/FP率/SLA breach率等聚合"""
     __tablename__ = "kpi_snapshots"
@@ -766,6 +884,63 @@ class KpiSnapshot(Base):
     metric_value = Column(Float, default=0.0)
     dimensions = Column(MutableJSON, default=dict)                    # {priority}|{threat_type}|{assignee}|{}
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+# ════════════════════════════════════════════
+# MCP Guard — 工具调用审计 / 行为签名
+# ════════════════════════════════════════════
+
+class ToolCallLog(Base):
+    """工具调用审计（append-only）。内存 ring 的持久化副本，留存 ≥ 6 个月。"""
+    __tablename__ = "tool_call_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
+    tool_name = Column(String(64), nullable=False, index=True)
+    caller = Column(String(64), nullable=False, default="unknown", index=True)
+    caller_role = Column(String(32), default="")
+    source = Column(String(32), nullable=False, default="mcp_guard", index=True)
+    session_id = Column(String(64), default="")
+    trace_id = Column(String(64), default="", index=True)
+    event_id = Column(Integer, default=0, index=True)
+    arguments = Column(MutableJSON, default=dict)
+    arg_digest = Column(String(32), default="")
+    decision = Column(String(32), default="", index=True)
+    reason = Column(Text, default="")
+    checks = Column(MutableListJSON, default=list)
+    exec_status = Column(String(32), nullable=True)
+    duration_ms = Column(Float, default=0.0)
+    tool_match_method = Column(String(16), default="exact")
+    signature_score = Column(Float, nullable=True, index=True)
+    signature_reasons = Column(MutableListJSON, default=list)
+
+
+class ToolSignature(Base):
+    """(tool_name, caller) 行为指纹。PR2 检测器写入，PR1 先建表。"""
+    __tablename__ = "tool_signatures"
+
+    tool_name = Column(String(64), primary_key=True)
+    caller = Column(String(64), primary_key=True)
+    payload = Column(MutableJSON, default=dict)
+    sample_count = Column(Integer, nullable=False, default=0)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ToolAnomaly(Base):
+    """工具调用行为偏离告警。PR2 检测器写入，PR1 先建表。"""
+    __tablename__ = "tool_anomalies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
+    call_id = Column(Integer, nullable=True)
+    tool_name = Column(String(64), nullable=False, index=True)
+    caller = Column(String(64), nullable=False, index=True)
+    score = Column(Float, nullable=False)
+    dimensions = Column(MutableJSON, default=dict)
+    reasons = Column(MutableListJSON, default=list)
+    mode = Column(String(16), nullable=False, default="shadow")
+    action_taken = Column(String(16), nullable=False, default="logged")
+    trace_id = Column(String(64), default="")
 
 
 async def _migrate_existing_tables(conn):
@@ -785,6 +960,8 @@ async def _migrate_existing_tables(conn):
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_security_events_event_id ON security_events(event_id)",
         # 可观测: pipeline_spans 增加 trace_id 列 (关联 OTel/Tempo)
         "ALTER TABLE pipeline_spans ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32) DEFAULT ''",
+        "ALTER TABLE llm_traces ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32) DEFAULT ''",
+        "CREATE INDEX IF NOT EXISTS idx_llm_traces_trace_id ON llm_traces(trace_id)",
         "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_type VARCHAR(30) DEFAULT 'agent_output'",
         "ALTER TABLE memories ADD COLUMN IF NOT EXISTS provenance_id VARCHAR(100) DEFAULT ''",
         "ALTER TABLE memories ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64) DEFAULT ''",
@@ -800,6 +977,12 @@ async def _migrate_existing_tables(conn):
         "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
         "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ",
         "ALTER TABLE knowledge_docs ADD COLUMN IF NOT EXISTS cutoff_policy VARCHAR(20) DEFAULT 'strict'",
+        "ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS search_lex TEXT DEFAULT ''",
+        "ALTER TABLE self_play_learned_rules ADD COLUMN IF NOT EXISTS review_report JSONB DEFAULT '{}'",
+        "ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS search_tsv tsvector "
+        "GENERATED ALWAYS AS (to_tsvector('simple', coalesce(search_lex,'') || ' ' || "
+        "coalesce(title,'') || ' ' || coalesce(content,''))) STORED",
+        "CREATE INDEX IF NOT EXISTS knowledge_chunks_tsv_gin ON knowledge_chunks USING gin(search_tsv)",
     ]
     for s in stmts:
         try:

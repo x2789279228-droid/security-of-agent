@@ -5,7 +5,7 @@
   KnowledgeBase (知识库管理)
       → SecurityChunker (安全专用分块)
       → Embedder (复用现有 embedding)
-      → Retriever (混合检索 + 多维度过滤)
+      → Retriever (dense + BM25 → RRF → cross-encoder；规则 query 扩展)
       → ContextBuilder (构建 RAG 上下文注入 LLM)
       → EvidenceVerifier (验证 LLM 断言)
       → Seeder (预置安全知识)

@@ -17,6 +17,8 @@ _FALLBACK_MARKERS = (
     "LLM未配置",
     "LLM调用失败",
     "budget_exhausted",
+    "rate_limited_429",
+    "LLM rate-limited",
 )
 
 
@@ -69,6 +71,12 @@ def is_llm_fallback(text: Any) -> Tuple[bool, str]:
                     return True, _reason_from_marker(m)
             return False, ""
 
+    et = str(data.get("error_type") or "")
+    if et == "rate_limited_429":
+        return True, "rate_limited_429"
+    if data.get("retryable") is True:
+        return True, et or "llm_fallback"
+
     if data.get("fallback") is True:
         err = str(data.get("error") or "")
         return True, _reason_from_error(err)
@@ -92,9 +100,24 @@ def _reason_from_marker(marker: str) -> str:
         return "budget_exhausted"
     if "未配置" in marker:
         return "llm_not_configured"
+    if "429" in marker or "rate-limited" in marker or marker == "rate_limited_429":
+        return "rate_limited_429"
     if "调用失败" in marker:
         return "llm_call_failed"
     return "llm_fallback"
+
+
+def is_retryable_rate_limit(text: Any) -> bool:
+    """429 降级响应可重新入队,不得当成功 JSON。"""
+    ok, reason = is_llm_fallback(text)
+    if not ok:
+        return False
+    if reason == "rate_limited_429":
+        return True
+    data = text if isinstance(text, dict) else parse_llm_json(str(text))
+    if isinstance(data, dict) and data.get("retryable") and data.get("error_type") == "rate_limited_429":
+        return True
+    return False
 
 
 def budget_exhausted() -> bool:

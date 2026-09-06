@@ -5,12 +5,15 @@ aiosqlite>=0.20,<1        # 测试/本地模式 (sqlite+aiosqlite)
 asyncpg>=0.30,<1
 pgvector>=0.3,<1
 qdrant-client>=1.9,<2      # Qdrant 向量数据库 (RAG 检索)
+# fastembed>=0.4,<0.6        # 可选: SHARED_MEMORY_RAG_BM25_BACKEND=fastembed 时用 Qdrant/bm25
 redis>=5.2,<6
 PyJWT>=2.8,<3
 pydantic>=2.10,<3
 pydantic-settings>=2.7,<3
 httpx>=0.28,<1
 numpy>=2.0,<3
+scipy>=1.11,<2             # 因果链 PC: G² / chi2 条件独立
+networkx>=3.2,<4           # 因果 DAG 工具(路径/可选可视化)
 sse-starlette>=2.2,<3
 aiokafka>=0.12,<1
 jsonschema>=4.23,<5         # Flink↔Python 跨运行时 Schema 校验

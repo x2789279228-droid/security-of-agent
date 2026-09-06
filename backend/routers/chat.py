@@ -57,7 +57,11 @@ async def events_stream(request: Request):
         return JSONResponse(
             status_code=503,
             headers={"Retry-After": "3"},
-            content={"detail": "event stream subscriber slots full, retry later"},
+            content={
+                "detail": "event stream subscriber slots full, retry later",
+                "subscribers": event_bus.subscriber_count,
+                "max": event_bus.max_subscribers,
+            },
         )
     # 浏览器自动重连经 Last-Event-ID 头携带断点；手动重建连接无法设头，允许用同名查询参数兜底
     last_id_raw = (

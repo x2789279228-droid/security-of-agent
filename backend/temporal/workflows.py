@@ -62,7 +62,7 @@ class AuditPipelineWorkflow:
             rd = await workflow.execute_activity(
                 "audit_round",
                 args=[round_input],
-                start_to_close_timeout=timedelta(seconds=300),
+                start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=retry_round,
             )
             all_rounds.append(rd)
@@ -150,3 +150,69 @@ class AuditPipelineWorkflow:
 
         return {"event_id": event_id, "session_id": session_id,
                 "rounds": len(all_rounds), "merged": merged}
+
+
+@dataclass
+class SelfPlayWorkflowInput:
+    """红蓝自博弈 Workflow 入参。"""
+    match_id: str = ""
+    rounds: int = 8
+    curriculum: bool = True
+    start_level: int = 0
+    inject: bool = False
+    wait_audit: bool = False
+    wait_audit_s: float = 8.0
+    use_llm: bool = False
+    decoy_ratio: float = 0.2
+    persist: bool = True
+    persist_kb: bool = False
+
+
+@workflow.defn
+class SelfPlayWorkflow:
+    """红队规划 → 仿真物化 → 蓝队观察 → 学习,循环 N 回合。"""
+
+    @workflow.run
+    async def run(self, inp: SelfPlayWorkflowInput) -> Dict[str, Any]:
+        retry = RetryPolicy(
+            initial_interval=timedelta(seconds=2),
+            maximum_interval=timedelta(seconds=20),
+            maximum_attempts=2,
+        )
+        cfg = {
+            "match_id": inp.match_id,
+            "rounds": int(inp.rounds or 8),
+            "curriculum": bool(inp.curriculum),
+            "start_level": int(inp.start_level or 0),
+            "inject": bool(inp.inject),
+            "wait_audit": bool(inp.wait_audit),
+            "wait_audit_s": float(inp.wait_audit_s or 8.0),
+            "use_llm": bool(inp.use_llm),
+            "decoy_ratio": float(inp.decoy_ratio or 0.0),
+            "persist": bool(inp.persist),
+            "persist_kb": bool(inp.persist_kb),
+        }
+        state = await workflow.execute_activity(
+            "selfplay_init",
+            args=[cfg],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=retry,
+        )
+        total = max(1, int(inp.rounds or 8))
+        for _ in range(total):
+            state = await workflow.execute_activity(
+                "selfplay_round",
+                args=[state],
+                start_to_close_timeout=timedelta(
+                    seconds=180 if (inp.wait_audit or inp.use_llm) else 60
+                ),
+                retry_policy=retry,
+            )
+            if state.get("stopped"):
+                break
+        return await workflow.execute_activity(
+            "selfplay_finalize",
+            args=[state],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=retry,
+        )

@@ -119,10 +119,13 @@ multidict==6.7.1
     #   yarl
 nexus-rpc==1.4.0
     # via temporalio
+networkx==3.6.1
+    # via -r requirements.txt
 numpy==2.4.6
     # via
     #   -r requirements.txt
     #   qdrant-client
+    #   scipy
 opentelemetry-api==1.44.0
     # via
     #   -r requirements.txt
@@ -236,6 +239,8 @@ rpds-py==2026.6.3
     #   jsonschema
     #   referencing
 scapy==2.7.0
+    # via -r requirements.txt
+scipy==1.17.1
     # via -r requirements.txt
 sqlalchemy==2.0.52
     # via -r requirements.txt

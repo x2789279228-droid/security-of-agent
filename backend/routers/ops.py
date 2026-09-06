@@ -185,6 +185,66 @@ async def observability_active_pipelines(
     return {"pipelines": pipelines, "count": len(pipelines)}
 
 
+@router.get("/observability/thought-chain/{event_id}")
+async def observability_thought_chain(
+    event_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """组装一条事件的思维链 DAG（live 缓冲 / 落库 / 存量投影）。"""
+    from observability.thought_events import assemble_thought_chain, snapshot
+    from event_store import event_store
+
+    evt = await event_store.get_by_id(session, event_id, prefer_db=True)
+    audit = None
+    cad = None
+    status = "running"
+    session_id = ""
+    if evt:
+        raw = evt.raw_data or {}
+        audit = raw.get("_audit_llm") or {}
+        cad = raw.get("_cad_audit") or None
+        session_id = getattr(evt, "session_id", "") or ""
+        st = (audit or {}).get("status") or ""
+        if st in ("completed", "failed", "fallback"):
+            status = st
+        elif getattr(evt, "analyzed", False) and audit:
+            status = "completed"
+        elif raw.get("_audit_llm_error"):
+            status = "failed"
+    elif not snapshot(event_id):
+        raise HTTPException(404, "Event not found")
+
+    return assemble_thought_chain(
+        event_id, audit=audit, cad=cad, session_id=session_id, status=status,
+    )
+
+
+@router.get("/observability/recent-thought-chains")
+async def observability_recent_thought_chains(
+    limit: int = Query(8, ge=1, le=40),
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """最近可展示思维链的事件（不含 prompt / completion）。"""
+    from observability.thought_events import list_recent_thought_chains
+
+    chains = await list_recent_thought_chains(session, limit=limit)
+    return {"chains": chains, "count": len(chains)}
+
+
+@router.get("/observability/recent-pipelines")
+async def observability_recent_pipelines(
+    limit: int = Query(8, ge=1, le=40),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """最近已结束的 Agent 接力（Monitor「最近完成」hydration）。"""
+    from observability.pipeline_tracer import pipeline_tracer
+
+    pipelines = pipeline_tracer.get_recent_completed_pipelines(limit=limit)
+    return {"pipelines": pipelines, "count": len(pipelines)}
+
+
 @router.get("/observability/traces")
 async def observability_trace_list(
     limit: int = Query(20, ge=1, le=100),
@@ -956,21 +1016,40 @@ async def list_chains(
     result = await correlation_engine.analyze(
         session, session_id, time_window_minutes=1440
     )
+    chains = [
+        {
+            "chain_id": c.chain_id,
+            "pattern_name": c.pattern_name,
+            "confidence": c.confidence,
+            "event_ids": [e["id"] for e in c.events],
+            "events": [{"id": e["id"], "event_type": e.get("event_type")} for e in c.events],
+            "src_ips": list(c.src_ips),
+            "dst_ips": list(c.dst_ips),
+            "time_span_minutes": c.time_span_minutes,
+            "alert": c.alert,
+        }
+        for c in result.chains
+    ]
+    causal_graph = None
+    try:
+        from causal_chain.store import latest_graph
+        from causal_chain.learn import annotate_chains
+        g = await latest_graph(session)
+        if g:
+            causal_graph = {
+                "id": g.get("id"),
+                "ok": g.get("ok"),
+                "directed": g.get("directed") or [],
+                "agree_rate": g.get("agree_rate"),
+                "n": g.get("n"),
+            }
+            chains = annotate_chains(chains, g, data=None)
+    except Exception as e:
+        logger.debug("[chains] causal annotate skipped: %s", e)
     return {
         "session_id": session_id,
-        "chains": [
-            {
-                "chain_id": c.chain_id,
-                "pattern_name": c.pattern_name,
-                "confidence": c.confidence,
-                "event_ids": [e["id"] for e in c.events],
-                "src_ips": list(c.src_ips),
-                "dst_ips": list(c.dst_ips),
-                "time_span_minutes": c.time_span_minutes,
-                "alert": c.alert,
-            }
-            for c in result.chains
-        ],
+        "causal_graph": causal_graph,
+        "chains": chains,
         "temporal_groups": [
             {
                 "src_ip": g["src_ip"],

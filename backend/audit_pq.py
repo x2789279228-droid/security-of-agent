@@ -20,6 +20,19 @@ PQ_KEY = "soc:audit:pq"
 PQ_PAYLOAD_PREFIX = "soc:audit:pq:payload:"  # event_id → JSON payload
 
 
+def _payload_is_temporal_agent(payload: dict) -> bool:
+    """payload 是否 Temporal Agent 车道 (llm_agent/llm_deep) — 用真实 triage 推断。"""
+    try:
+        from audit_triage import score_event, uses_temporal
+        tri = score_event(
+            dict(payload.get("log_data") or {}),
+            float(payload.get("anomaly_score") or 0),
+        )
+        return bool(uses_temporal(tri.lane))
+    except Exception:
+        return False
+
+
 class AuditPriorityQueue:
     def __init__(self):
         self._redis = None
@@ -68,6 +81,7 @@ class AuditPriorityQueue:
                 "priority": int(priority),
                 "tier": tier,
                 "enqueued_at_ms": now_ms,
+                "retry_count": int((log_data or {}).get("_pq_retry") or 0),
             }
             pipe = self._redis.pipeline()
             pipe.set(
@@ -128,6 +142,91 @@ class AuditPriorityQueue:
         except Exception:
             return 0
 
+    async def peek_highest(self) -> Optional[dict]:
+        """窥视最高优任务 (ZRANGE 0 0 + 读 payload), 不弹出; 空队列返回 None。"""
+        if self._redis is None:
+            return None
+        try:
+            try:
+                items = await self._redis.zrange(PQ_KEY, 0, 0, withscores=True)
+                member = items[0][0] if items else None
+            except TypeError:
+                # fake/旧客户端不支持 withscores kwarg
+                members = await self._redis.zrange(PQ_KEY, 0, 0)
+                member = members[0] if members else None
+            if member is None:
+                return None
+            if isinstance(member, bytes):
+                member = member.decode()
+            raw = await self._redis.get(f"{PQ_PAYLOAD_PREFIX}{member}")
+            if not raw:
+                return None
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            return json.loads(raw)
+        except Exception as e:
+            logger.warning(f"[AuditPQ] peek failed: {e}")
+            return None
+
+    async def pop_matching(self, predicate=None, *, window: int = 50) -> Optional[dict]:
+        """按 ZSET 顺序扫描窗口内第一个满足 predicate 的成员并弹出。
+
+        predicate=None → 等价 pop_highest (ZPOPMIN)。
+        弹出成功时计 inc_audit_pq_dequeue(tier); 无匹配返回 None(不弹队头)。
+        """
+        if self._redis is None:
+            return None
+        if predicate is None:
+            return await self.pop_highest()
+        try:
+            members = await self._redis.zrange(PQ_KEY, 0, max(0, int(window) - 1))
+            for m in members or []:
+                if isinstance(m, bytes):
+                    m = m.decode()
+                raw = await self._redis.get(f"{PQ_PAYLOAD_PREFIX}{m}")
+                if not raw:
+                    continue  # 幽灵成员; purge_stale 兜底清理
+                if isinstance(raw, bytes):
+                    raw = raw.decode()
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
+                try:
+                    ok = bool(predicate(payload))
+                except Exception:
+                    ok = False
+                if not ok:
+                    continue
+                removed = await self._redis.zrem(PQ_KEY, m)
+                if not removed:
+                    continue  # 并发被抢, 继续扫
+                await self._redis.delete(f"{PQ_PAYLOAD_PREFIX}{m}")
+                try:
+                    from metrics import inc_audit_pq_dequeue
+                    inc_audit_pq_dequeue(str(payload.get("tier") or "?"))
+                except Exception:
+                    pass
+                return payload
+            return None
+        except Exception as e:
+            logger.warning(f"[AuditPQ] pop_matching failed: {e}")
+            return None
+
+    async def pop_first_runnable(self, agent_full: bool = False, *, window: int = 50) -> Optional[dict]:
+        """D-D: Agent 槽满时跳过队头 Temporal-agent 任务, 弹出第一个可运行任务。
+
+        agent_full=False → 等价 pop_highest。
+        agent_full=True  → 弹出窗口内第一个非 agent 车道 (llm_single/tools) 任务;
+                            全是 agent 任务时返回 None, 队头 P0 留在队列不弹出。
+        """
+        if not agent_full:
+            return await self.pop_highest()
+        return await self.pop_matching(
+            lambda payload: not _payload_is_temporal_agent(payload),
+            window=window,
+        )
+
     async def purge_stale(self, max_age_s: int = 900) -> int:
         """清理过期 payload 已消失但仍在 ZSET 的幽灵成员。"""
         if self._redis is None:
@@ -145,6 +244,12 @@ class AuditPriorityQueue:
         except Exception as e:
             logger.debug(f"[AuditPQ] purge skipped: {e}")
         return n
+
+
+def pq_ttl_for_tier(tier: str) -> int:
+    """分档 PQ TTL; 实现放 audit_triage,这里 re-export 避免循环 import 调用点分散。"""
+    from audit_triage import pq_ttl_for_tier as _impl
+    return _impl(tier)
 
 
 audit_pq = AuditPriorityQueue()

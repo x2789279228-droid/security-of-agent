@@ -157,6 +157,12 @@ class PipelineTracer:
             except Exception as e:
                 logger.debug(f"OTel start_span failed: {e}")
                 otel_span = None
+        if not trace_id:
+            try:
+                from trace_hook import get_trace_context
+                trace_id = str((get_trace_context() or {}).get("trace_id") or "")[:32]
+            except Exception:
+                trace_id = ""
         span = Span(
             span_id=uuid.uuid4().hex[:12],
             event_id=event_id,
@@ -306,6 +312,43 @@ class PipelineTracer:
             {**s.to_dict(), "running_seconds": round(now - s.start_time, 1)}
             for s in self._active.values()
         ]
+
+    def get_recent_completed_pipelines(self, limit: int = 8) -> list[dict]:
+        """按 event_id 聚合已结束的审计接力（Monitor「最近完成」hydration）。"""
+        from observability.stage_events import DEFAULT_SSE_STAGES, STAGE_LABELS
+
+        active_ids = {s.event_id for s in self._active.values() if s.event_id}
+        by_event: dict[int, list[Span]] = {}
+        for s in self._buffer:
+            eid = int(s.event_id or 0)
+            if not eid or eid in active_ids:
+                continue
+            if s.stage not in DEFAULT_SSE_STAGES:
+                continue
+            by_event.setdefault(eid, []).append(s)
+
+        stage_order = {st: i for i, st in enumerate(STAGES)}
+        pipelines: list[dict] = []
+        for eid, spans in by_event.items():
+            by_time = sorted(spans, key=lambda x: x.start_time)
+            last = by_time[-1]
+            completed: list[str] = []
+            for s in sorted(spans, key=lambda x: stage_order.get(x.stage, 99)):
+                if s.status == STATUS_SUCCESS and s.stage not in completed:
+                    completed.append(s.stage)
+            pipelines.append({
+                "event_id": eid,
+                "session_id": last.session_id,
+                "trace_id": last.trace_id,
+                "current_stage": last.stage,
+                "agent_label": STAGE_LABELS.get(last.stage, last.stage),
+                "completed_stages": completed,
+                "started_at": by_time[0].start_time,
+                "running_seconds": 0,
+                "done": True,
+            })
+        pipelines.sort(key=lambda p: p.get("started_at") or 0, reverse=True)
+        return pipelines[: max(1, min(int(limit or 8), 40))]
 
     def get_stage_stats(self, window: int = 50) -> dict[str, dict]:
         """

@@ -39,6 +39,7 @@ PARAM_SCHEMAS = {
         "depth":       {"type": "int", "required": False, "default": 3},
         "time_range":  {"type": "str", "required": False, "default": "1h"},
     },
+    "causal.graph": {},
     "correlation.temporal": {
         "event_ids":   {"type": "list", "required": False, "default": None},
         "entity":      {"type": "str", "required": False, "default": None},

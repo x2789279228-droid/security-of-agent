@@ -38,6 +38,20 @@ class Settings(BaseSettings):
     qdrant_enabled: bool = True              # True=优先用 Qdrant 检索, 不可用时回退 pgvector
     qdrant_timeout: float = 5.0
 
+    # RAG 混合检索 (dense + BM25 sparse + RRF + cross-encoder)
+    rag_hybrid_enabled: bool = True
+    rag_hybrid_collection: str = ""          # 空则用 {qdrant_collection}_v2
+    rag_rrf_k: int = 60
+    rag_prefetch: int = 20                   # 每路召回条数，融合后再截 top_k
+    rag_bm25_backend: str = "builtin"        # builtin | fastembed
+    rag_query_rewrite: str = "rules"         # off | rules | llm
+    rag_hyde: str = "empty_only"             # off | empty_only | always
+    rag_rerank_enabled: bool = True
+    rag_rerank_url: str = ""                 # 空=不用 Infinity/CE，走特征重排；例 http://soc-bge-rerank:7997/rerank
+    rag_rerank_api_key: str = ""             # 空且目标为本地 Infinity 时不带 Bearer
+    rag_rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    rag_rerank_top_n: int = 20
+
     # Log Ingestion
     log_batch_size: int = 20                 # 累积多少条触发自动分析
     log_batch_interval: int = 300            # 或间隔多少秒触发（5分钟）
@@ -76,6 +90,8 @@ class Settings(BaseSettings):
     python_process_ingest_queue: bool = True
     # 旧 Flink enriched handler 不再补排 LLM 审计(Python 主导权威时关闭双 LLM 成本与双审计)
     kafka_flink_secondary_llm: bool = False
+    # 审计溢出 topic：内存队列满且 Redis PQ 失败时，P0/P1 持久化到此，禁止静默丢弃
+    kafka_topic_audit_overflow: str = "security-audit-overflow"
     kafka_consumer_group: str = "soc-backend"
     kafka_enabled: bool = False              # True=Kafka 模式, False=兼容旧 HTTP 直连模式
     # Confluent Schema Registry (跨运行时 Schema 契约, 见 schema_registry.py)
@@ -95,11 +111,14 @@ class Settings(BaseSettings):
     temporal_task_queue: str = "audit-pipeline"
     # r6: 单 workflow 执行硬上限(秒); 超时由 Temporal 终止,避免永久 RUNNING
     temporal_workflow_execution_timeout_s: int = 900
-    # 全局 in-flight 审计上限(Temporal start + async 共用 Redis 计数);
-    # 超限时 P0/P1 入队、P2/P3 降级,避免 1100 火忘把 20 槽堵死。0=不限制
-    audit_inflight_max: int = 30
+    # Temporal llm_agent 在飞上限(只计 Agent 工作流, 不含 llm_single)
+    audit_inflight_max: int = 4
+    # 兼容旧名: Agent 工作流槽; 默认等于 audit_inflight_max
+    audit_llm_agent_inflight_max: int = 4
+    # start_workflow 墙钟超时, 防止 worker 卡在 Temporal 任务分发
+    audit_temporal_start_timeout_s: float = 5.0
     # 运行中 stuck 收口阈值(分钟); analyzed=false 超过该时长 → fallback reap
-    stuck_audit_reap_minutes: int = 15
+    stuck_audit_reap_minutes: int = 5
     # LLM 通道分层: 软/硬预算水位(%); 硬水位下仍保留 P0 最小 LLM hop
     audit_soft_budget_pct: float = 70.0
     audit_hard_budget_pct: float = 95.0
@@ -107,10 +126,57 @@ class Settings(BaseSettings):
     audit_p0_reserve_pct: float = 0.25
     # FastPath 强信号后是否降为复盘轻车道
     audit_fastpath_demote: bool = True
-    # 优先级队列: inflight 满时 P0/P1 等待时长(秒)
+    # 优先级队列: inflight 满时 P0/P1 等待时长(秒); 分档 TTL 见下方
     audit_pq_ttl_s: int = 900
-    # PQ 拉取间隔(秒)
-    audit_pq_drain_interval_s: float = 1.0
+    audit_pq_ttl_p0_s: int = 3600
+    audit_pq_ttl_p1_s: int = 1800
+    audit_pq_ttl_p2_s: int = 300
+    # PQ 拉取间隔(秒) / 每轮条数 — 入站 ~12 ev/s 时 5/s 会净堆积
+    audit_pq_drain_interval_s: float = 0.2
+    audit_pq_drain_batch: int = 20
+    # Agent 槽满时跳过队头 P0, 继续抽 P1 llm_single, 避免 P1 dequeue=0
+    audit_pq_skip_blocked_agent: bool = True
+    # P1 默认不走 Temporal
+    audit_p1_use_temporal: bool = False
+    # 结论缓存 (同签名短期内复用)
+    audit_cache_ttl_s: int = 600
+    # 流量型事件(DDOS/PORT_SCAN)默认规则收口, 不进 LLM
+    audit_volumetric_skip_llm: bool = True
+    audit_llm_single_timeout_s: float = 15.0
+    audit_max_rounds_agent: int = 1
+    # 有界审计 worker(取代无界 create_task + 双 Semaphore)
+    audit_workers: int = 12
+    audit_queue_max: int = 2000
+    # P0/P1 内存队列满时永不 overflow 丢弃：Redis PQ → Kafka overflow → 进程内 P0 兜底 deque
+    audit_p0_never_drop: bool = True
+    audit_p1_never_drop: bool = True
+    # ── Ingest 事件驱动 Phase 1（同进程分层，不拆微服务）──
+    ingest_http_queued_status: int = 202          # Kafka 入队成功返回码；同步回退仍 200
+    ingest_parallel_detect: bool = True           # anomaly + sigma 并行；失败隔离
+    ingest_store_batch_size: int = 50             # Kafka 消费批落库条数
+    ingest_store_batch_flush_ms: int = 100        # 未满批也按墙钟 flush
+    ingest_fastpath_retries: int = 2              # FastPath on_threat_detected 失败重试次数
+    audit_timeout_p0_s: float = 90.0
+    audit_timeout_p1_s: float = 45.0
+    audit_timeout_p2_s: float = 20.0
+    audit_timeout_p3_s: float = 10.0
+    audit_max_rounds_deep: int = 2
+    audit_max_rounds_standard: int = 1
+    # DB 双池: OLTP 短租(ingest/API/audit SQL); BG 给索引/调度
+    db_pool_oltp_size: int = 24
+    db_pool_oltp_overflow: int = 8
+    db_pool_oltp_timeout_s: float = 5.0
+    db_pool_bg_size: int = 8
+    db_pool_bg_overflow: int = 4
+    db_pool_bg_timeout_s: float = 10.0
+    # 全平台 LLM HTTP 并发(Audit + enhancer + RAG); 每进程
+    llm_global_concurrency: int = 8
+    llm_p0_reserve: int = 2
+    llm_slot_timeout_s: float = 30.0
+    llm_429_retry_s: float = 1.0
+    # EventBus SSE
+    event_bus_max_subscribers: int = 256
+    event_bus_queue_max: int = 500
 
     # Sigma 检测引擎: pySigma=真 Sigma(pySigma+SQLite backend 读 rules/*.yml), legacy=原纯 dict 匹配
     sigma_engine: str = "pySigma"
@@ -128,6 +194,18 @@ class Settings(BaseSettings):
     # MCP Guard 网关
     mcp_guard_enabled: bool = True       # 启用 4 层 Guard 检查
     security_guard_enabled: bool = True  # 启用 SecurityGuard (意图/频率/序列)
+
+    # ── Tool 行为签名 (UEBA-for-AI) ──
+    # persist=写 PG；enabled=检测器；mode=confirm(enforce) 偏离需确认，deny=拒绝，shadow=只告警
+    tool_call_log_persist: bool = True
+    tool_signature_enabled: bool = True
+    tool_signature_mode: str = "confirm"         # confirm|enforce | deny | shadow
+    tool_signature_min_samples: int = 30
+    tool_signature_warn_threshold: float = 0.6
+    tool_signature_confirm_threshold: float = 0.8
+    tool_signature_deny_threshold: float = 0.95
+    tool_signature_log_retention_days: int = 180
+    tool_signature_weights: str = "param:0.35,seq:0.25,time:0.15,caller:0.25"
 
     # ── 案例自动派单 ──
     # 命中这些 priority 的自动聚合案例 → 自动派生工单并推进到 responding (逗号分隔)
@@ -223,10 +301,43 @@ class Settings(BaseSettings):
     llm_edr_budget_jpy_per_day: int = 5
     llm_intel_budget_jpy_per_day: int = 3
     llm_sandbox_budget_jpy_per_day: int = 5
-    # 全局 LLM 增强器并发上限 (保护 LLM API)
-    llm_enhancer_concurrency: int = 5
+    # 全局 LLM 增强器并发上限 — 已并入 llm_global_concurrency; 保留作 alias
+    llm_enhancer_concurrency: int = 8
     # LLM 增强器单次超时 (秒)
     llm_enhancer_timeout_sec: int = 15
+
+    # ── Red vs Blue Self-Play ──
+    self_play_enabled: bool = True
+    self_play_default_rounds: int = 8
+    self_play_inject: bool = False          # True=把仿真事件送进生产 ingest(打上 _self_play)
+    self_play_use_llm: bool = False         # False=课程目录规划,不烧 LLM
+    self_play_wait_audit: bool = False      # True=等待 Audit-LLM 结论(演示/论文 full 模式)
+    self_play_wait_audit_s: float = 8.0
+    self_play_decoy_ratio: float = 0.2
+    self_play_max_inflight: int = 1
+    self_play_rag_top_k: int = 8
+    self_play_llm_timeout_s: float = 20.0
+    self_play_review_enabled: bool = True
+    self_play_review_fp_max: float = 0.05
+    self_play_review_llm: bool = True
+    self_play_review_replay: bool = True
+    self_play_shadow_hours: float = 24.0
+    self_play_review_interval_s: int = 900
+    self_play_review_batch: int = 20
+    self_play_diverse_env: bool = False     # True=随机拓扑,默认仍 10 主机固定
+    self_play_background_traffic: bool = False
+
+    # ── 因果攻击链 (PC / GES, 批式, 不进 Flink 热路径) ──
+    causal_enabled: bool = True
+    causal_bin_minutes: int = 30
+    causal_alpha: float = 0.05
+    causal_min_windows: int = 40
+    causal_learn_interval_s: int = 900
+    causal_lookback_hours: int = 48
+
+    # ── 演示流量（默认关；仅仿真事件打 _demo，不写生产 Sigma）──
+    demo_traffic_enabled: bool = False
+    demo_traffic_interval_s: int = 300
 
     # ── LLM 成本控制 (P0.T 引入) ──
     # 上不封顶: 0 = 无上限(默认, LLM审计永不因预算降级); >0 = 日预算额(设备回退时)

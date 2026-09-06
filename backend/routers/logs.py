@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,18 +80,32 @@ def _sanitize_value(v):
     return v
 
 
+def _queued_status_code() -> int:
+    return int(getattr(settings, "ingest_http_queued_status", 202) or 202)
+
+
+async def _session_unless_queued():
+    """Kafka producer 活跃时网关不借 OLTP session (yield None), 否则透传 get_session。"""
+    if _ingest_producer_active():
+        yield None
+        return
+    from models import get_session
+    async for s in get_session():
+        yield s
+
+
 @router.post("/logs/ingest")
 async def ingest_log(
     req: LogIngestRequest,
     request: Request,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(_session_unless_queued)
 ):
     """
     接入单条安全日志
 
     安全增强: 支持 X-API-Key 头认证。
-    - Kafka 模式下: 此端点仅用于兼容测试，生产数据应走 Kafka
-    - HTTP 模式下: 建议携带 X-API-Key 头
+    - Kafka 模式下: 入队 security-events-ingest 后立即返回 202 (不借 DB session)
+    - HTTP 模式下: 建议携带 X-API-Key 头, 同步 ingest 后返回 200
     """
     # 数据源认证检查
     api_key = request.headers.get("X-API-Key", "")
@@ -108,8 +123,12 @@ async def ingest_log(
         log_data["message"] = _sanitize_value(log_data["message"])
     if _ingest_producer_active():
         produced = await _enqueue_ingest(session_id, api_key, [log_data])
-        return {"session_id": session_id, "status": "queued", "produced": produced,
-                "event_type": _peek_type(log_data), "severity": log_data.get("severity", "info")}
+        return JSONResponse(
+            status_code=_queued_status_code(),
+            content={"session_id": session_id, "status": "queued", "produced": produced,
+                     "event_type": _peek_type(log_data),
+                     "severity": log_data.get("severity", "info")},
+        )
 
     result = await log_ingestor.ingest(session, session_id, log_data)
     return {"session_id": session_id, **result}
@@ -117,11 +136,13 @@ async def ingest_log(
 @router.post("/logs/ingest/batch")
 async def ingest_log_batch(
     req: LogBatchRequest,
-    session: AsyncSession = Depends(get_session)
+    request: Request,
+    session: AsyncSession = Depends(_session_unless_queued)
 ):
     """Fast Path: 批量接入安全日志"""
     if len(req.logs) > 1000:
         raise HTTPException(413, "Batch size exceeds limit of 1000")
+    api_key = request.headers.get("X-API-Key", "")
     session_id = req.session_id or str(uuid.uuid4())
     parsed = [d if isinstance(d, dict) else json.loads(d) for d in req.logs]
     # 输入 sanitization
@@ -129,9 +150,12 @@ async def ingest_log_batch(
         if isinstance(d.get("message"), str):
             d["message"] = _sanitize_value(d["message"])
     if _ingest_producer_active():
-        produced = await _enqueue_ingest(session_id, "", parsed)
-        return {"session_id": session_id, "status": "queued", "produced": produced,
-                "count": len(parsed)}
+        produced = await _enqueue_ingest(session_id, api_key, parsed)
+        return JSONResponse(
+            status_code=_queued_status_code(),
+            content={"session_id": session_id, "status": "queued",
+                     "produced": produced, "count": len(parsed)},
+        )
 
     result = await log_ingestor.ingest_batch(session, session_id, parsed)
     return {"session_id": session_id, **result}
@@ -283,6 +307,12 @@ async def list_events(
             "message": e.message, "analyzed": e.analyzed,
             "anomaly_score": e.anomaly_score or 0.0,
             "is_anomaly": bool((e.anomaly_score or 0.0) >= 0.6),
+            "audit_quality": (
+                ((e.raw_data or {}).get("_audit_llm") or {}).get("quality")
+                or ("fallback" if ((e.raw_data or {}).get("_audit_llm") or {}).get("fallback") else (
+                    "llm" if e.analyzed else None
+                ))
+            ),
             "created_at": e.created_at.isoformat(),
         }
         for e in rows

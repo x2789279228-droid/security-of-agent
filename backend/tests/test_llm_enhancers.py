@@ -402,30 +402,31 @@ class TestPerformanceGates:
             used = llm_enhancer.get_module_budget_status().get(m, {}).get("used_jpy", 0)
             assert used == 0, f"意外消耗 {m} 预算: {used}"
 
-    def test_concurrency_semaphore_capped_at_5(self):
-        """5 并发上限:开 100 并发 enhance 任务,允许并行的最多 5"""
+    def test_concurrency_uses_global_llm_limiter(self):
+        """全平台 LLM 闸: 超过 llm_global_concurrency 的调用必须排队。"""
         async def t():
-            import llm_enhancer
             from config import settings
-            settings.llm_traffic_enabled = True
+            from llm_limiter import reset_llm_limiter
+            old = settings.llm_global_concurrency
+            settings.llm_global_concurrency = 3
+            settings.llm_p0_reserve = 0
+            limiter = reset_llm_limiter()
             try:
                 current_parallel = 0
                 max_parallel = 0
 
                 async def slow_task():
                     nonlocal current_parallel, max_parallel
-                    # _get_semaphore 内部已 limit 5
-                    sem = llm_enhancer._get_semaphore()
-                    async with sem:
+                    async with limiter.acquire(tier="P2", timeout=5):
                         current_parallel += 1
                         max_parallel = max(max_parallel, current_parallel)
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.05)
                         current_parallel -= 1
 
-                await asyncio.gather(*[slow_task() for _ in range(20)])
-                assert max_parallel <= 5, f"并发超 5 上限: {max_parallel}"
+                await asyncio.gather(*[slow_task() for _ in range(12)])
+                assert max_parallel <= 3, f"并发超全局上限: {max_parallel}"
             finally:
-                settings.llm_traffic_enabled = False
+                settings.llm_global_concurrency = old
         _run(t())
 
 

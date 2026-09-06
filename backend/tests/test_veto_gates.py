@@ -131,6 +131,16 @@ def test_cep_chain_from_tool_results():
     assert signals.cep_chain is True
 
 
+def test_causal_tool_does_not_count_as_cep_block_signal():
+    class TR:
+        tool = "causal.graph"
+        success = True
+        data = [{"cause": "PORT_SCAN", "effect": "C2_BEACON", "confidence": "high_confidence"}]
+    signals = extract_non_llm_signals({}, tool_results=[TR()])
+    assert signals.cep_chain is False
+    assert signals.has_signal is False
+
+
 # ── P0-4 禁止 OR 合并 ──
 
 def test_merge_or_does_not_confirm_without_signal():

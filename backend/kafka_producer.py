@@ -8,6 +8,7 @@ Kafka 生产者 — 将审计结果回写到 Kafka 消息总线
   - 所有消息携带 trace_id header，支持全链路追踪
   - 敏感字段加密（apiKey 等）在发送前自动处理
 """
+import asyncio
 import json
 import logging
 import uuid
@@ -124,14 +125,20 @@ class KafkaProducerWrapper:
     # 采用"批量 send + 一次性 await delivery"保证吞吐与 acks=all 持久化, 同时不阻塞上游。
 
     async def _deliver_batch(self, futures: list, label: str) -> int:
-        """统一等待一批 send future 落盘(DeliveryGuarantee), 返回成功条数; 失败条记日志。"""
+        """统一等待一批 send future 落盘(DeliveryGuarantee), 返回成功条数; 失败条记日志。
+
+        P1: asyncio.gather(*futures, return_exceptions=True) 并发等待 ——
+        禁止 for+await 串行。异常条目计入失败并打日志, 成功条目计数返回。
+        """
+        if not futures:
+            return 0
+        results = await asyncio.gather(*futures, return_exceptions=True)
         ok = 0
-        for fut in futures:
-            try:
-                await fut
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning(f"Kafka {label} message delivery failed: {r}")
+            else:
                 ok += 1
-            except Exception as e:
-                logger.warning(f"Kafka {label} message delivery failed: {e}")
         return ok
 
     async def produce_raw_batch(

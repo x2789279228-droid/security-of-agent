@@ -28,6 +28,7 @@ PLATFORM_TOOLS: List[str] = [
     "correlation.chains",
     "correlation.temporal",
     "correlation.entity_link",
+    "causal.graph",
     "vector.search",
     "knowledge.search",
     "memory_tree.related",
@@ -64,6 +65,8 @@ TOOL_ALIASES = {
     "correlation_chains": "correlation.chains",
     "temporal":           "correlation.temporal",
     "entity_link":        "correlation.entity_link",
+    "causal_graph":       "causal.graph",
+    "causal":             "causal.graph",
     # 向量 / 知识检索（不用过短别名 "search"/"knowledge"，避免干扰工具误匹配）
     "vector_search":      "vector.search",
     "embedding_search":   "vector.search",

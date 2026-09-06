@@ -16,11 +16,15 @@ SecurityGuard 对动作进行多维度安全审查：
         ↓
     SecurityGuard.record()  ← 更新追踪器
 """
+import logging
+
 from .check_result import CheckResult
 from .intent_checker import IntentChecker
 from .sequence_guard import SequenceGuard
 from .rate_limiter import RateLimiter
 from .context_manager import ContextManager
+
+logger = logging.getLogger(__name__)
 
 
 class SecurityGuard:
@@ -70,9 +74,14 @@ class SecurityGuard:
         if failed:
             # 取第一个失败项作为主原因
             first_fail = failed[0]
+            reason = f"[{first_fail.check_name}] {first_fail.message}"
+            self._emit_telemetry(
+                action_name, threat_info, decision="deny",
+                reason=reason, checks=checks, exec_status="blocked",
+            )
             return {
                 "allowed": False,
-                "reason": f"[{first_fail.check_name}] {first_fail.message}",
+                "reason": reason,
                 "checks": checks,
                 "requires_approval": False,
             }
@@ -104,6 +113,36 @@ class SecurityGuard:
         self.sequence_guard.record(action_name)
         self.rate_limiter.record(action_name, success=success)
         self.context_manager.record(action_name, threat_info, result)
+        self._emit_telemetry(
+            action_name, threat_info,
+            decision="allow",
+            reason="response executed",
+            exec_status="success" if success else "error",
+            exec_result=result if isinstance(result, dict) else None,
+        )
+
+    def _emit_telemetry(
+        self, action_name: str, threat_info: dict, *,
+        decision: str, reason: str = "", checks: list = None,
+        exec_status: str = None, exec_result: dict = None,
+    ) -> None:
+        """写入统一 tool telemetry。失败不影响护栏。"""
+        try:
+            from mcp_guard.telemetry import args_from_threat, ingest_tool_call
+            ingest_tool_call(
+                tool_name=action_name,
+                arguments=args_from_threat(action_name, threat_info),
+                caller="response_engine",
+                source="response",
+                caller_role="security_operator",
+                decision=decision,
+                reason=reason,
+                checks=checks or [],
+                exec_status=exec_status,
+                exec_result=exec_result,
+            )
+        except Exception as e:
+            logger.warning("security_guard telemetry failed: %s", e)
 
     def reset(self):
         """重置所有有状态的检查器（用于测试）。"""

@@ -202,7 +202,7 @@ async def llm_enhancer_status(
             "data_security": is_module_enabled("data_security"),
         },
         "budgets": get_module_budget_status(),
-        "concurrency": settings.llm_enhancer_concurrency,
+        "concurrency": settings.llm_global_concurrency,
         "timeout_sec": settings.llm_enhancer_timeout_sec,
     }
 

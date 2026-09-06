@@ -48,7 +48,8 @@ except ImportError:
 # ── 常量 ──
 DLQ_TOPIC = "security-logs-dlq"
 MAX_RETRY = 3              # 单条消息最大重试次数
-AUDIT_SEMAPHORE_LIMIT = 5  # Audit-LLM 并发上限（背压）
+# 仅限制 Kafka audit-queue 的 store 并发(store 完成后立即释放,不限 LLM)。
+AUDIT_SEMAPHORE_LIMIT = int(__import__("os").environ.get("KAFKA_AUDIT_STORE_CONCURRENCY", "12") or "12")
 MAX_POLL_RECORDS = 50      # 每次 poll 最大消息数
 
 
@@ -81,6 +82,7 @@ class KafkaConsumerManager:
             "audit_consumed": 0,
             "alerts_consumed": 0,
             "python_ingest_consumed": 0,
+            "audit_overflow_consumed": 0,
             "behavior_alerts_consumed": 0,
             "rejected_consumed": 0,
             "errors": 0,
@@ -124,6 +126,7 @@ class KafkaConsumerManager:
         ]
         if settings.python_process_ingest_queue and settings.kafka_enabled:
             self._tasks.append(asyncio.create_task(self._consume_python_ingest()))
+        self._tasks.append(asyncio.create_task(self._consume_audit_overflow()))
         logger.info(
             f"Kafka consumer started: {settings.kafka_bootstrap}, "
             f"topics=[{settings.kafka_topic_enriched}, "
@@ -398,7 +401,6 @@ class KafkaConsumerManager:
             logger.info("Python ingest queue consumer disabled")
             return
         import os as _os
-        workers = max(1, int(_os.environ.get("KAFKA_INGEST_WORKERS", "8") or "8"))
         poll_ms = int(_os.environ.get("KAFKA_INGEST_POLL_MS", "500") or "500")
         consumer = AIOKafkaConsumer(
             settings.kafka_topic_ingest_process,
@@ -412,7 +414,7 @@ class KafkaConsumerManager:
         try:
             await consumer.start()
             logger.info(f"Consuming python-ingest {settings.kafka_topic_ingest_process} "
-                        f"(workers={workers}, poll={poll_ms}ms, batch-commit)")
+                        f"(poll={poll_ms}ms, batch-commit)")
             while self._running:
                 try:
                     fetched = await consumer.getmany(timeout_ms=poll_ms,
@@ -426,13 +428,28 @@ class KafkaConsumerManager:
                     continue
                 batch_failed = [False]
 
-                async def _exe(m):
-                    if not await self._safe_py_handle(m):
+                # P1: 整批解析 → 单个 async_session → ingest_pipeline.run_many
+                # (detect 全批并行 + store_batch 单事务, 按 ingest_store_batch_size 分块落库)。
+                # 任一条 persist/run_many 失败 → batch_failed → 本批不 commit, 回放重试
+                # (与旧语义一致: 只把整批成功才推进 offset)。
+                events = []
+                for m in msgs:
+                    try:
+                        wrapper = m.value if isinstance(m.value, dict) else json.loads(m.value)
+                        body = (wrapper or {}).get("body")
+                        if not isinstance(body, dict):
+                            raise ValueError("python ingest wrapper lacks dict body")
+                        session_id = str(
+                            (wrapper or {}).get("session_id")
+                            or ("http-" + str((wrapper or {}).get("uuid", "")))
+                        )
+                        events.append((session_id, body))
+                    except Exception as e:
                         batch_failed[0] = True
-
-                for i in range(0, len(msgs), workers):
-                    chunk = msgs[i:i + workers]
-                    await asyncio.gather(*[_exe(m) for m in chunk])
+                        logger.error(f"[Python-ingest] msg parse/session_id error: {e}")
+                if events and not batch_failed[0]:
+                    if not await self._ingest_python_batch(events):
+                        batch_failed[0] = True
                 # only advance offset when whole fetched batch processed OK;
                 # transient DB/LLM outage -> leave offset -> replay on reconnect (no loss)
                 if batch_failed[0]:
@@ -447,6 +464,30 @@ class KafkaConsumerManager:
         finally:
             await consumer.stop()
 
+
+    async def _ingest_python_batch(self, events: list) -> bool:
+        """detect+persist 一批 python-ingest 事件。成功 True; 失败 False (调用方不 commit)。"""
+        try:
+            from ingest_pipeline import run_many
+            from models import async_session as db_session
+            batch_size = max(
+                1, int(getattr(settings, "ingest_store_batch_size", 50) or 50)
+            )
+            async with db_session() as session:
+                for i in range(0, len(events), batch_size):
+                    await run_many(session, events[i:i + batch_size])
+            self._stats["python_ingest_consumed"] = self._stats.get(
+                "python_ingest_consumed", 0) + len(events)
+            self._stats["last_message_at"] = time.time()
+            try:
+                for _ in events:
+                    inc_kafka_consumed(getattr(settings, "kafka_topic_ingest_process", ""))
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logger.error(f"[Python-ingest] batch ingest failed: {e}")
+            return False
 
     async def _safe_py_handle(self, msg) -> bool:
         try:
@@ -516,6 +557,43 @@ class KafkaConsumerManager:
             group_suffix="rejected",
             handler=self._handle_rejected,
             stat_key="rejected_consumed",
+        )
+
+    async def _consume_audit_overflow(self):
+        """P0/P1 审计 overflow topic → 回灌 AuditWorker (from_overflow 防环)。"""
+        await self._consume_loop(
+            topic=settings.kafka_topic_audit_overflow,
+            group_suffix="audit-overflow",
+            handler=self._handle_audit_overflow,
+            stat_key="audit_overflow_consumed",
+        )
+
+    async def _handle_audit_overflow(self, event: dict, trace_id: str):
+        """把 Kafka overflow 上的审计作业重新提交进 worker。
+
+        from_overflow=True: 队列仍满时只进 Redis PQ / 本地 deque, 不再二次 produce。
+        """
+        from audit_worker import audit_worker
+        from anomaly_detector import AnomalyReport
+
+        eid = int(event.get("event_id") or 0)
+        if eid <= 0:
+            logger.warning("[Audit-overflow] drop payload without event_id")
+            return
+        score = float(event.get("anomaly_score") or 0)
+        ar = AnomalyReport(
+            event_id=eid,
+            anomaly_score=score,
+            is_anomaly=score >= 0.6,
+            deviation_sigma=0.0,
+            reasons=list(event.get("reasons") or []),
+        )
+        await audit_worker.submit(
+            session_id=str(event.get("session_id") or ""),
+            event_id=eid,
+            log_data=event.get("log_data") or {},
+            anomaly_report=ar,
+            from_overflow=True,
         )
 
     async def _consume_cep_partial(self):
@@ -614,7 +692,7 @@ class KafkaConsumerManager:
         # 使高优先级问题进入审计闭环并标记为已分析。
         severity = log_data["severity"]
         if anomaly_score >= 0.6 or severity in ("critical", "high"):
-            self._queue_audit(
+            await self._queue_audit(
                 log_data=log_data,
                 anomaly_score=anomaly_score,
                 anomaly_reasons=anomaly_reasons,
@@ -623,7 +701,7 @@ class KafkaConsumerManager:
                 trace_id=trace_id,
             )
 
-    def _queue_audit(
+    async def _queue_audit(
         self,
         log_data: dict,
         anomaly_score: float,
@@ -643,8 +721,12 @@ class KafkaConsumerManager:
             deviation_sigma=anomaly_score * 5,
             reasons=anomaly_reasons,
         )
-        asyncio.create_task(
-            log_ingestor._audit_pipeline(session_id, stored_id, log_data, report)
+        from audit_worker import audit_worker
+        await audit_worker.submit(
+            session_id=session_id,
+            event_id=stored_id,
+            log_data=log_data,
+            anomaly_report=report,
         )
         logger.info(
             f"[Kafka-Enriched-Audit] Queued event #{stored_id} for Audit-LLM "
@@ -705,8 +787,12 @@ class KafkaConsumerManager:
                 anomaly_score=anomaly_score,
             )
 
-        asyncio.create_task(
-            log_ingestor._audit_pipeline(session_id, stored.id, log_data, report)
+        from audit_worker import audit_worker
+        await audit_worker.submit(
+            session_id=session_id,
+            event_id=stored.id,
+            log_data=log_data,
+            anomaly_report=report,
         )
 
         logger.info(

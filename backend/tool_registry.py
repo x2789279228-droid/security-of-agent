@@ -200,17 +200,33 @@ async def _correlation_chains(
     result = await correlation_engine.analyze(
         session, session_id, time_window_minutes=time_window_minutes
     )
-    return [
+    chains = [
         {
             "chain_id": c.chain_id,
             "pattern_name": c.pattern_name,
             "confidence": c.confidence,
             "event_ids": [e["id"] for e in c.events],
+            "events": [{"id": e["id"], "event_type": e.get("event_type")} for e in c.events],
             "time_span_minutes": c.time_span_minutes,
             "alert": c.alert,
         }
         for c in result.chains
     ]
+    try:
+        from causal_chain.store import latest_graph
+        from causal_chain.learn import annotate_chains
+        g = await latest_graph(session)
+        if g:
+            chains = annotate_chains(chains, g, data=None)
+    except Exception:
+        pass
+    return chains
+
+
+async def _causal_graph(session: AsyncSession, **_kw) -> dict:
+    from causal_chain.store import latest_graph
+    g = await latest_graph(session)
+    return g or {"ok": False, "reason": "no_graph", "directed": []}
 
 
 async def _correlation_temporal(
@@ -304,27 +320,20 @@ async def _knowledge_search(
     """检索安全知识库（knowledge_chunks 表，MITRE ATT&CK / CAPEC / 预置知识）"""
     from rag import retriever as rag_retriever
 
-    query_embedding = None
-    if query:
-        query_embedding = await embedder.embed(query, type_="query")  # 不对称检索: 查询查库
-
     result = await rag_retriever.retrieve(
         session,
         query=query,
-        query_embedding=query_embedding,
+        query_embedding=None,
         threat_type=threat_type,
         severity=severity,
         top_k=top_k,
         min_score=0.4,
     )
 
-    # LLM 重排（当结果 > 2 条时）
-    if len(result.chunks) > 2 and query:
-        result.chunks = await rag_retriever.rerank(query, result.chunks, top_k=top_k)
-
     return [
         {
             "id": c["id"],
+            "chunk_id": c.get("chunk_id") or c.get("id"),
             "title": c.get("title", ""),
             "content": c.get("content", ""),
             "source": c.get("source", ""),
@@ -392,6 +401,11 @@ def init_tool_registry():
         "correlation.chains", _correlation_chains,
         description="攻击链模式匹配（检测已知攻击路径）",
         category="analysis", estimated_ms=200,
+    )
+    tool_registry.register(
+        "causal.graph", _causal_graph,
+        description="最近一次 PC/GES 因果图(只读,不得作为封禁依据)",
+        category="analysis", estimated_ms=50,
     )
     tool_registry.register(
         "correlation.temporal", _correlation_temporal,

@@ -211,6 +211,7 @@ async def get_traces(
                         "model": t.model,
                         "event_id": t.event_id,
                         "session_id": t.session_id,
+                        "trace_id": getattr(t, "trace_id", "") or "",
                         "prompt_tokens": t.prompt_tokens,
                         "completion_tokens": t.completion_tokens,
                         "total_tokens": t.total_tokens,

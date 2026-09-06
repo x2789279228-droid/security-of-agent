@@ -38,6 +38,9 @@ class RAGSearchRequest(BaseModel):
     source: str = ""
     top_k: int = 5
     min_score: float = 0.0
+    rewrite: str | None = None          # off | rules | llm
+    hyde: str | None = None             # off | empty_only | always
+    rerank: bool | None = None
 
 @router.post("/rag/search")
 async def rag_search(
@@ -45,23 +48,25 @@ async def rag_search(
     session: AsyncSession = Depends(get_session)
 ):
     """检索安全知识库"""
-    query_embedding = None
-    if req.query:
-        query_embedding = await embedder.embed(req.query, type_="query")  # 不对称检索: 查询查库
     result = await retriever.retrieve(
         session,
         query=req.query,
-        query_embedding=query_embedding,
+        query_embedding=None,
         threat_type=req.threat_type,
         severity=req.severity,
         source=req.source,
         top_k=req.top_k,
         min_score=req.min_score,
+        rewrite=req.rewrite,
+        hyde=req.hyde,
+        rerank=req.rerank,
     )
     return {
         "total": result.total_found,
         "strategy": result.strategy_used,
+        "rerank_backend": result.rerank_backend or "none",
         "chunks": result.chunks,
+        "transform": result.transform or {},
     }
 
 @router.get("/rag/documents")
@@ -132,6 +137,7 @@ async def _materialize_doc_chunks(session, doc: dict) -> int:
     qdrant_batch = []
     for chunk_data in chunks:
         vec = await embedder.embed(chunk_data["content"][:1000])
+        from rag.lexical import build_search_lex
         chunk = KnowledgeChunk(
             doc_id=chunk_data["doc_id"],
             chunk_id=chunk_data["chunk_id"],
@@ -143,6 +149,7 @@ async def _materialize_doc_chunks(session, doc: dict) -> int:
             tags=tags,
             embedding=vec,
             token_count=chunk_data["token_count"],
+            search_lex=build_search_lex(title, chunk_data["content"], threat_types),
         )
         session.add(chunk)
         total_chunks += 1
@@ -415,15 +422,10 @@ async def eval_rag_auto(
     from rag.retriever import retriever
     from eval_service import evaluate_rag_retrieval
 
-    query_embedding = None
-    try:
-        query_embedding = await embedder.embed(req.query, type_="query")  # 不对称检索: 查询查库
-    except Exception:
-        pass
     result = await retriever.retrieve(
         session,
         query=req.query,
-        query_embedding=query_embedding,
+        query_embedding=None,
         threat_type=req.threat_type,
         severity=req.severity,
         top_k=req.top_k,
@@ -438,7 +440,7 @@ async def eval_rag_auto(
         contexts=contexts,
         ground_truth=req.ground_truth,
         retrieval_strategy=f"{result.strategy_used}:top{req.top_k}",
-        answer_embedding=query_embedding,
+        answer_embedding=None,
         context_embeddings=context_embeddings,
     )
     return {"search": {"total": result.total_found, "strategy": result.strategy_used, "chunks": result.chunks}, "eval": run}

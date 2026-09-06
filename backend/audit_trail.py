@@ -42,6 +42,73 @@ _fallback_buffer: list[dict] = []
 _FALLBACK_MAX = 500
 
 
+def _build_entry(
+    *,
+    actor: str,
+    action: str,
+    target_type: str = "",
+    target_id: str = "",
+    before: Optional[dict] = None,
+    after: Optional[dict] = None,
+    actor_role: str = "",
+    reason: str = "",
+    ip: str = "",
+    user_agent: str = "",
+) -> dict:
+    return {
+        "actor": actor or "anonymous",
+        "actor_role": actor_role or "",
+        "action": action,
+        "target_type": target_type,
+        "target_id": str(target_id) if target_id else "",
+        "before": _truncate(before or {}),
+        "after": _truncate(after or {}),
+        "ip": ip or "",
+        "user_agent": (user_agent or "")[:200],
+        "reason": (reason or "")[:2000],
+        "created_at": datetime.now(timezone.utc),
+    }
+
+
+def log_action_sync(
+    *,
+    actor: str,
+    action: str,
+    target_type: str = "",
+    target_id: str = "",
+    before: Optional[dict] = None,
+    after: Optional[dict] = None,
+    actor_role: str = "",
+    reason: str = "",
+    ip: str = "",
+    user_agent: str = "",
+) -> None:
+    """同步路径（MCP Guard 在 to_thread 中调用）。有事件循环则投递，否则进 fallback。"""
+    entry = _build_entry(
+        actor=actor, action=action, target_type=target_type, target_id=target_id,
+        before=before, after=after, actor_role=actor_role, reason=reason,
+        ip=ip, user_agent=user_agent,
+    )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        loop.create_task(_persist_entry_or_fallback(entry))
+        return
+    _enqueue_fallback(entry)
+
+
+async def _persist_entry_or_fallback(entry: dict) -> None:
+    try:
+        from models import async_session as db_session
+        async with db_session() as own:
+            await _persist_entry(own, entry)
+    except Exception as e:
+        logger.warning("[audit_trail] async persist failed: %s; enqueue fallback", e)
+        _enqueue_fallback(entry)
+
+
 async def log_action(
     session: Optional[AsyncSession],
     *,
@@ -60,7 +127,7 @@ async def log_action(
     记录一条操作审计 trail
 
     Args:
-        session: 可选 DB session；为 None 时进离线缓冲
+        session: 可选 DB session；为 None 时自行开库写入,失败才进离线缓冲(scheduler 冲刷)
         actor: 操作人（用户名/system/anonymous）
         action: 动作 key，命名空间.动作 (case.transition / order.approve / rule.publish / asset.update / source.revoke)
         target_type: case|work_order|rule|asset|playbook|source|...
@@ -68,46 +135,51 @@ async def log_action(
         before/after: 变更前后的字段快照（自动截断过长内容）
         reason: 操作理由（人工填写或自动生成）
     """
-    entry = {
-        "actor": actor or "anonymous",
-        "actor_role": actor_role or "",
-        "action": action,
-        "target_type": target_type,
-        "target_id": str(target_id) if target_id else "",
-        "before": _truncate(before or {}),
-        "after": _truncate(after or {}),
-        "ip": ip or "",
-        "user_agent": (user_agent or "")[:200],
-        "reason": (reason or "")[:2000],
-        "created_at": datetime.now(timezone.utc),
-    }
+    entry = _build_entry(
+        actor=actor, action=action, target_type=target_type, target_id=target_id,
+        before=before, after=after, actor_role=actor_role, reason=reason,
+        ip=ip, user_agent=user_agent,
+    )
 
     if session is None:
-        _enqueue_fallback(entry)
-        return
+        # 调用方未持有 session: 自行开库。失败才进内存缓冲(须由 flush_fallback 冲刷)。
+        try:
+            from models import async_session as db_session
+            async with db_session() as own:
+                await _persist_entry(own, entry)
+            return
+        except Exception as e:
+            logger.warning(f"[audit_trail] auto-session persist failed: {e}; enqueue fallback")
+            _enqueue_fallback(entry)
+            return
 
     try:
-        from models import AuditTrail
-        session.add(AuditTrail(
-            actor=entry["actor"],
-            actor_role=entry["actor_role"],
-            action=entry["action"],
-            target_type=entry["target_type"],
-            target_id=entry["target_id"],
-            before=entry["before"],
-            after=entry["after"],
-            ip=entry["ip"],
-            user_agent=entry["user_agent"],
-            reason=entry["reason"],
-        ))
-        await session.commit()
+        await _persist_entry(session, entry)
     except Exception as e:
         logger.warning(f"[audit_trail] persist failed: {e}; enqueue fallback")
         _enqueue_fallback(entry)
 
 
+async def _persist_entry(session: AsyncSession, entry: dict) -> None:
+    from models import AuditTrail
+    session.add(AuditTrail(
+        actor=entry["actor"],
+        actor_role=entry["actor_role"],
+        action=entry["action"],
+        target_type=entry["target_type"],
+        target_id=entry["target_id"],
+        before=entry["before"],
+        after=entry["after"],
+        ip=entry["ip"],
+        user_agent=entry["user_agent"],
+        reason=entry["reason"],
+        created_at=entry.get("created_at") or datetime.now(timezone.utc),
+    ))
+    await session.commit()
+
+
 def _enqueue_fallback(entry: dict) -> None:
-    """离线缓冲 — 后续可由 watchdog 触发 flush"""
+    """离线缓冲。冲刷入口: scheduler._audit_trail_flush_loop (60s) 与 POST /audit-trail/flush。"""
     _fallback_buffer.append(entry)
     if len(_fallback_buffer) > _FALLBACK_MAX:
         del _fallback_buffer[: len(_fallback_buffer) - _FALLBACK_MAX]
@@ -153,27 +225,38 @@ async def log_from_request(
 
 
 async def flush_fallback(session: AsyncSession) -> int:
-    """冲刷离线缓冲到 DB（由 scheduler 周期调用 / watchdog 触发）"""
+    """冲刷离线缓冲到 DB。
+
+    调用方: scheduler._audit_trail_flush_loop (每 60s) 与 POST /audit-trail/flush。
+    提交成功后再出队; commit 失败则条目留在内存,下一轮重试。
+    """
     if not _fallback_buffer:
         return 0
+    batch = list(_fallback_buffer)
     n = 0
     try:
         from models import AuditTrail
-        while _fallback_buffer:
-            entry = _fallback_buffer.pop(0)
+        for entry in batch:
             session.add(AuditTrail(
                 actor=entry["actor"], actor_role=entry["actor_role"],
                 action=entry["action"], target_type=entry["target_type"],
                 target_id=entry["target_id"], before=entry["before"],
                 after=entry["after"], ip=entry["ip"],
                 user_agent=entry["user_agent"], reason=entry["reason"],
+                created_at=entry.get("created_at") or datetime.now(timezone.utc),
             ))
             n += 1
         await session.commit()
+        del _fallback_buffer[:n]
         logger.info(f"[audit_trail] flushed {n} fallback entries")
+        return n
     except Exception as e:
         logger.warning(f"[audit_trail] flush failed at #{n}: {e}")
-    return n
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        return 0
 
 
 def _truncate(obj, max_chars: int = 4000) -> dict:

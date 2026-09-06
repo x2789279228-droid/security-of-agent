@@ -16,6 +16,7 @@ import logging
 import os
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -46,9 +47,10 @@ class BusEvent:
 
 
 class EventBus:
-    def __init__(self, max_subscribers: int = 100):
+    def __init__(self, max_subscribers: int = 0):
+        from config import settings
         self._subscribers: list[asyncio.Queue] = []
-        self._max = max_subscribers
+        self._max = int(max_subscribers or getattr(settings, "event_bus_max_subscribers", 256) or 256)
         self._history: list[BusEvent] = []
         # agent_stage 使单事件约 +12 条，提高到 500 保证断线续传仍能看到接力过程
         self._history_max = 500
@@ -56,8 +58,27 @@ class EventBus:
         self._redis = None
         self._bridge_task: Optional[asyncio.Task] = None
         self._origin_id = uuid.uuid4().hex[:12]
-        # 订阅队列上限：慢消费者在此积压，满则被 publish 丢弃移除（由前端 ping-seq 检测兜底）
-        self._queue_max = int(os.environ.get("EVENT_BUS_QUEUE_MAX", "500"))
+        # 订阅队列上限：慢消费者积压时丢最旧事件,不踢订阅者
+        self._queue_max = int(
+            os.environ.get("EVENT_BUS_QUEUE_MAX")
+            or getattr(settings, "event_bus_queue_max", 500)
+            or 500
+        )
+        self._redis_seen: "OrderedDict[str, float]" = OrderedDict()
+        self._redis_seen_max = 4096
+        self._redis_seen_ttl = 60.0
+
+    def _redis_recently_seen(self, key: str) -> bool:
+        now = time.time()
+        ts = self._redis_seen.get(key)
+        if ts is not None and now - ts < self._redis_seen_ttl:
+            self._redis_seen.move_to_end(key)
+            return True
+        self._redis_seen[key] = now
+        self._redis_seen.move_to_end(key)
+        while len(self._redis_seen) > self._redis_seen_max:
+            self._redis_seen.popitem(last=False)
+        return False
 
     def set_redis(self, redis_client) -> None:
         """接入 Redis，启用跨进程事件广播(Temporal worker → backend SSE)。"""
@@ -69,14 +90,23 @@ class EventBus:
         self._history.append(evt)
         if len(self._history) > self._history_max:
             self._history = self._history[-self._history_max:]
-        dead = []
+        drops = 0
         for q in self._subscribers:
             try:
                 q.put_nowait(evt)
             except asyncio.QueueFull:
-                dead.append(q)
-        for q in dead:
-            self._subscribers.remove(q)
+                try:
+                    q.get_nowait()
+                    q.put_nowait(evt)
+                    drops += 1
+                except Exception:
+                    drops += 1
+        if drops:
+            try:
+                from metrics import inc_eventbus_drop
+                inc_eventbus_drop(drops)
+            except Exception:
+                pass
 
         # 本进程产生的事件广播到 Redis; 从 Redis 回流的不再二次广播
         if not _from_redis and self._redis is not None:
@@ -88,6 +118,7 @@ class EventBus:
                 {
                     "origin": self._origin_id,
                     "type": event_type,
+                    "event_id": (data or {}).get("event_id"),
                     "data": data,
                     "ts": time.time(),
                 },
@@ -133,6 +164,12 @@ class EventBus:
                     ed = envelope.get("data") or {}
                     if not isinstance(ed, dict):
                         ed = {"raw": ed}
+                    eid = envelope.get("event_id")
+                    if eid is None:
+                        eid = ed.get("event_id")
+                    dedup_key = f"{envelope.get('origin')}|{et}|{eid}"
+                    if eid is not None and self._redis_recently_seen(dedup_key):
+                        continue
                     self.publish(et, ed, _from_redis=True)
             except Exception as e:
                 logger.warning("EventBus redis bridge stopped: %s", e)
@@ -173,6 +210,10 @@ class EventBus:
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+    @property
+    def max_subscribers(self) -> int:
+        return self._max
 
     @property
     def last_seq(self) -> int:

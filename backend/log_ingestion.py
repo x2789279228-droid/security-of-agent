@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,44 +36,47 @@ logger = logging.getLogger(__name__)
 AUDIT_PROMPT_VERSION = "v2.2.0"
 
 
+def _quality_from_reason(reason: str, status: str = "") -> str:
+    r = (reason or "").lower()
+    if "rate_limited" in r or "429" in r:
+        return "rate_limited"
+    if "budget" in r:
+        return "budget"
+    if "shed" in r or "overflow" in r or "queue_overflow" in r:
+        return "shed"
+    if "tools_only" in r:
+        return "tools"
+    if "rule_close" in r:
+        return "rule"
+    if status == "completed" and not reason:
+        return "llm"
+    return "fallback"
+
+
 class LogIngestor:
     def __init__(self):
         self._last_analysis = {}
         self._analysis_lock = asyncio.Lock()
-        # v4 复现:5 并发下 200 events / 5 min 完成 0%(8-28 修复)
-        # 默认 20 满足 v4 压测场景,可由环境变量 AUDIT_REVIEW_CONCURRENCY 调优
         import os
-        self._review_semaphore = asyncio.Semaphore(
-            int(os.environ.get("AUDIT_REVIEW_CONCURRENCY", "20"))
-        )
-        # v4 复现:Temporal 挂掉时降级路径仍用上面的 Semaphore,200 events 卡 5 min
-        # 降级路径用独立的、宽松的 Semaphore,避免被 Temporal 异常拖累
-        # 可由环境变量 AUDIT_FALLBACK_CONCURRENCY 调优
-        self._review_semaphore_fallback = asyncio.Semaphore(
-            int(os.environ.get("AUDIT_FALLBACK_CONCURRENCY", "20"))
-        )
-        # v4 修复(2026-09-01):审计状态可观测性
-        # 之前 analyzed=False 黑洞:事件在 Semaphore 队列里永远 analyzed=False,看不到也排不到
-        # 内存 cache 追踪 pending/running/completed/failed,定期清理(只保留 running/pending)
-        self._audit_status_cache: dict[int, dict] = {}
-        # 上限:cache 不超过 10000 条,防止内存爆
+        # 审计状态: OrderedDict 真 LRU,满容逐条淘汰最旧,不再砍最早 20%
+        self._audit_status_cache: "OrderedDict[int, dict]" = OrderedDict()
         self._audit_status_cache_max = 10000
-        # FastPath 冷却去重:同 src_ip+threat_type 在冷却窗口内只编排一次响应链路,
-        # 防止大量高分事件涌入时同源事件重复挂起 N 条响应编排(策略+DB+webhook/SSH)
-        self._fastpath_cooldown: dict[str, float] = {}
+        # FastPath 冷却去重:同 src_ip+threat_type 在冷却窗口内只编排一次响应链路
+        self._fastpath_cooldown: "OrderedDict[str, float]" = OrderedDict()
         self._fastpath_cooldown_ttl = float(os.environ.get("FASTPATH_COOLDOWN_S", "60"))
-        self._fastpath_cooldown_max = 1000
+        self._fastpath_cooldown_max = 5000
 
     def _fastpath_allow(self, key: str) -> bool:
         """冷却窗口内首次调用返回 True 并记录时刻；窗口内重复调用返回 False。"""
         now = time.time()
-        if now - self._fastpath_cooldown.get(key, 0.0) < self._fastpath_cooldown_ttl:
+        prev = self._fastpath_cooldown.get(key)
+        if prev is not None and now - prev < self._fastpath_cooldown_ttl:
+            self._fastpath_cooldown.move_to_end(key)
             return False
-        if len(self._fastpath_cooldown) >= self._fastpath_cooldown_max:
-            # 简化清理:淘汰最早的一半
-            for k in list(self._fastpath_cooldown.keys())[: self._fastpath_cooldown_max // 2]:
-                self._fastpath_cooldown.pop(k, None)
         self._fastpath_cooldown[key] = now
+        self._fastpath_cooldown.move_to_end(key)
+        while len(self._fastpath_cooldown) > self._fastpath_cooldown_max:
+            self._fastpath_cooldown.popitem(last=False)
         return True
 
     async def _index_background(
@@ -83,7 +87,7 @@ class LogIngestor:
         与紧随其后的 Audit-LLM 流水线并行：流水线首轮有多次 LLM 调用，
         索引写入（毫秒级）几乎总是先于工具查询完成，竞态窗口可忽略。
         """
-        from models import async_session as db_session
+        from models import async_session_bg as db_session
         try:
             async with db_session() as s:
                 await memory_tree.add_leaf(
@@ -96,6 +100,18 @@ class LogIngestor:
             await sliding_window.add_message(session_id, "ingestor", "log", event_text)
         except Exception as win_err:
             logger.warning(f"[Index] sliding_window.add_message failed: {win_err}")
+
+    async def _auto_create_case_bg(self, event_id: int) -> None:
+        """入流水线前不再同步占用连接; 失败不影响审计。"""
+        try:
+            from models import async_session as db_session
+            from case_manager import case_manager
+            async with db_session() as case_session:
+                db_evt = await case_session.get(SecurityEvent, event_id)
+                if db_evt:
+                    await case_manager.auto_create_case(case_session, db_evt)
+        except Exception as e:
+            logger.debug(f"[Case] audit-pipeline case aggregation skipped: {e}")
 
     def _merge_rounds(self, all_rounds: list[dict], log_data: dict = None) -> dict:
         """
@@ -168,207 +184,21 @@ class LogIngestor:
     async def ingest(
         self, session: AsyncSession, session_id: str, log_data: dict
     ) -> dict:
-        """接入一条日志 → 异常检测 → 全量存储 → Audit-LLM 流水线"""
+        """接入一条日志 → 事件驱动流水线 (detect → persist_batch → dispatch)。
+
+        P1 facade: 保留字段归一化 + 数字 severity 映射, 检测/落库/FastPath/
+        审计提交收敛到 ingest_pipeline 单实现 (避免 HTTP 回退与 Kafka 双份逻辑)。
+        """
+        from ingest_pipeline import run_one
         log_data = self._normalize_fields(log_data)
-        event_type = log_data.get("event", log_data.get("type", "UNKNOWN"))
         severity = log_data.get("severity", "info")
         # 兼容数字 severity（如 50 → "medium"）
         if isinstance(severity, (int, float)):
             sev_map = {10: "info", 30: "low", 50: "medium", 70: "high", 90: "critical"}
             severity = sev_map.get(int(severity), "medium")
             log_data["severity"] = severity
-
-        # 1. 异常检测
-        with pipeline_tracer.span("anomaly_detect", session_id=session_id):
-            anomaly_report = await anomaly_detector.analyze(log_data)
-        log_data["_anomaly"] = {
-            "score": anomaly_report.anomaly_score,
-            "is_anomaly": anomaly_report.is_anomaly,
-            "reasons": anomaly_report.reasons,
-            "sigma": anomaly_report.deviation_sigma,
-        }
-
-        # 1b. Sigma 规则检测（与统计异常检测互补）
-        try:
-            from sigma_detector import sigma_detector
-            sigma_result = sigma_detector.detect_for_event(log_data)
-            log_data["_sigma"] = sigma_result
-            if sigma_result["detected"]:
-                logger.info(
-                    f"[Sigma] {event_type}: {sigma_result['rule_count']} rules hit, "
-                    f"types={sigma_result['attack_types']}, "
-                    f"severity={sigma_result['max_severity']}"
-                )
-                # Sigma 命中抬升异常分，避免「规则已命中但异常层全绿」
-                sev_floor = {
-                    "critical": 0.75, "high": 0.65, "medium": 0.55, "low": 0.45,
-                }.get(str(sigma_result.get("max_severity") or "").lower(), 0.55)
-                if anomaly_report.anomaly_score < sev_floor:
-                    anomaly_report.anomaly_score = sev_floor
-                anomaly_report.is_anomaly = True
-                if "sigma_hit" not in (anomaly_report.reasons or []):
-                    anomaly_report.reasons = list(anomaly_report.reasons or []) + [
-                        f"Sigma命中:{','.join(sigma_result.get('attack_types') or [])}"
-                    ]
-                log_data["_anomaly"] = {
-                    "score": anomaly_report.anomaly_score,
-                    "is_anomaly": True,
-                    "reasons": anomaly_report.reasons,
-                    "sigma": anomaly_report.deviation_sigma,
-                }
-        except Exception as e:
-            logger.warning(f"Sigma detection failed: {e}")
-            log_data["_sigma"] = {"detected": False}
-
-        # 2. 全量存储
-        stored = await event_store.store(
-            session, log_data, session_id,
-            anomaly_score=anomaly_report.anomaly_score,
-        )
-
-        # 2b. 记忆树索引 + 滑动窗口 → 后台执行（此前在 ingest 关键路径同步串行，
-        #     是单事件多 DB/Redis 往返的一部分；案例聚合已由 _audit_pipeline 覆盖）
-        event_text = json.dumps(log_data, ensure_ascii=False)
-        asyncio.create_task(self._index_background(
-            session_id, log_data, event_text, anomaly_report.is_anomaly,
-        ))
-
-        # 3. 快速响应：异常分数极高 或 严重度为 critical 或 Sigma 命中 critical 时立即触发
-        _sigma_critical = (
-            log_data.get("_sigma", {}).get("detected", False)
-            and log_data.get("_sigma", {}).get("max_severity") == "critical"
-        )
-        _fp_trigger = (
-            anomaly_report.anomaly_score >= 0.5
-            or anomaly_report.deviation_sigma >= 3
-            or severity == "critical"
-            or _sigma_critical
-        )
-        # 冷却去重：同源(源IP+威胁类型)事件在窗口内不重复编排响应链路
-        _fp_key = f"{log_data.get('src_ip', '')}|{log_data.get('threat_type') or event_type}"
-        if _fp_trigger and not self._fastpath_allow(_fp_key):
-            logger.debug(f"[FastPath] cooldown skip: {_fp_key}")
-            _fp_trigger = False
-        if _fp_trigger:
-            try:
-                from response_engine import get_orchestrator
-                _resp_orch = get_orchestrator()
-                sigma_info = log_data.get("_sigma") or {}
-                _sigma_conf_map = {"high": 0.85, "medium": 0.65, "low": 0.45}
-                _sigma_conf = 0.0
-                for hit in (sigma_info.get("hits") or []):
-                    _sigma_conf = max(
-                        _sigma_conf,
-                        _sigma_conf_map.get(str(hit.get("confidence") or "").lower(), 0.5),
-                    )
-                if sigma_info.get("detected") and sigma_info.get("max_severity") == "critical":
-                    _sigma_conf = max(_sigma_conf, 0.85)
-                _evt_conf = log_data.get("confidence", 0)
-                try:
-                    _evt_conf_f = float(_evt_conf)
-                    if _evt_conf_f > 1:
-                        _evt_conf_f = _evt_conf_f / 100.0
-                except (TypeError, ValueError):
-                    _evt_conf_f = 0.0
-                _fused_conf = min(1.0, max(
-                    float(anomaly_report.anomaly_score or 0) * 1.2,
-                    _sigma_conf,
-                    _evt_conf_f,
-                ))
-                # v5 修复(A):双轨封禁门槛
-                #   强信号(Sigma critical 命中 或 融合置信度>=0.7) → FastPath 可封禁
-                #   仅 severity=critical(无检测器佐证) → 仅告警，封禁等 Audit-LLM confirmed
-                # 此前 severity=critical 直接触发完整响应，152/152 事件绕过
-                # 审计与 veto 门控由 ANY 兜底策略封禁假事件。
-                _strong_signal = bool(
-                    (sigma_info.get("detected") and sigma_info.get("max_severity") == "critical")
-                    or _fused_conf >= 0.7
-                )
-                # v5 修复:不再把 low/info 抬成 high(此前良性低危事件被抬级后
-                # 通过护栏拿到封禁资格,误封正常用户)。未知级别下限取 medium
-                # (护栏下 medium 仍只允许告警/限速,不会封禁)。
-                _fp_sev = severity if severity in ("critical", "high", "medium") else "medium"
-                _fp_msg = log_data.get(
-                    "message",
-                    f"异常检测快速响应: {', '.join(anomaly_report.reasons)}",
-                )
-                fast_threat = {
-                    "threat_type": log_data.get("threat_type") or event_type,
-                    "event": event_type,
-                    "confidence": _fused_conf,
-                    "severity": _fp_sev,
-                    "threat_level": _fp_sev,
-                    "src_ip": log_data.get("src_ip", ""),
-                    "dst_ip": log_data.get("dst_ip", ""),
-                    "message": _fp_msg,
-                    "reason": (
-                        f"FastPath: {event_type} severity={_fp_sev} "
-                        f"confidence={_fused_conf:.2f} "
-                        f"sigma={bool(sigma_info.get('detected'))} "
-                        f"anomaly={float(anomaly_report.anomaly_score or 0):.2f}"
-                    ),
-                    "session_id": session_id,
-                    "event_id": stored.id,
-                    "anomaly_reasons": anomaly_report.reasons,
-                    # v5 修复(A):响应来源与双轨门槛标记（写入 policy_match 日志可追溯）
-                    "response_source": (
-                        "fastpath_strong" if _strong_signal else "fastpath_severity"
-                    ),
-                    "allow_blocking": _strong_signal,
-                }
-                # 独立 session 后台执行，避免与请求 session 并发冲突
-                async def _fast_response(threat_info: dict, evt_id: int, sid: str):
-                    from models import async_session as db_session
-                    async with db_session() as s:
-                        try:
-                            await _resp_orch.on_threat_detected(
-                                session=s, threat_info=threat_info,
-                                event_id=evt_id, session_id=sid,
-                                allow_blocking=bool(threat_info.get("allow_blocking", True)),
-                            )
-                        except Exception as fp_err:
-                            logger.warning(f"[FastPath] Quick response failed: {fp_err}")
-
-                asyncio.create_task(_fast_response(fast_threat, stored.id, session_id))
-                logger.warning(
-                    f"[FastPath] Quick response triggered for event #{stored.id}: "
-                    f"score={anomaly_report.anomaly_score:.2f} "
-                    f"mode={'strong(block-capable)' if _strong_signal else 'severity(alert-only)'}"
-                )
-            except Exception as fp_err:
-                logger.warning(f"[FastPath] Quick response setup failed: {fp_err}")
-
-        # 4. Audit-LLM 流水线（异步后台审核）
-        # v4 修复(2026-09-01):先标记 pending,避免事件在 Semaphore 队列里 analyzed=False 黑洞
-        self._track_audit_status(stored.id, "pending", event_type=event_type)
-        task = asyncio.create_task(self._audit_pipeline(
-            session_id, stored.id, log_data, anomaly_report
-        ))
-        task.add_done_callback(self._audit_task_done)
-
-        event_bus.publish("security_event", {
-            "event_id": stored.id,
-            "event_type": event_type,
-            "severity": severity,
-            "src_ip": log_data.get("src_ip", ""),
-            "dst_ip": log_data.get("dst_ip", ""),
-            "message": log_data.get("message", "")[:100],
-            "anomaly_score": anomaly_report.anomaly_score,
-            "is_anomaly": anomaly_report.is_anomaly,
-        })
-
-        return {
-            "status": "review_queued",
-            "event_id": stored.id,
-            "event_type": event_type,
-            "severity": severity,
-            "anomaly": {
-                "score": anomaly_report.anomaly_score,
-                "is_anomaly": anomaly_report.is_anomaly,
-                "reasons": anomaly_report.reasons,
-            },
-            "sigma": log_data.get("_sigma", {"detected": False}),
-        }
+        result = await run_one(session, session_id, log_data, ingestor=self)
+        return result.as_http_dict()
 
     def _track_audit_status(self, event_id: int, status: str, **extra):
         """v4 修复(2026-09-01):记录事件在审计流水线中的状态。
@@ -384,16 +214,22 @@ class LogIngestor:
         """
         if event_id is None:
             return
-        if len(self._audit_status_cache) >= self._audit_status_cache_max:
-            # LRU 简化:清掉最早的 20%
-            n = self._audit_status_cache_max // 5
-            for k in list(self._audit_status_cache.keys())[:n]:
-                self._audit_status_cache.pop(k, None)
         self._audit_status_cache[event_id] = {
             "status": status,
             "ts": time.time(),
             **extra,
         }
+        self._audit_status_cache.move_to_end(event_id)
+        while len(self._audit_status_cache) > self._audit_status_cache_max:
+            # 优先丢掉已完成/失败,尽量保住 pending/running 的可见性
+            dropped = False
+            for k, v in list(self._audit_status_cache.items()):
+                if v.get("status") not in ("pending", "running"):
+                    self._audit_status_cache.pop(k, None)
+                    dropped = True
+                    break
+            if not dropped:
+                self._audit_status_cache.popitem(last=False)
         # 每 100 条打印一次聚合,避免日志爆
         if event_id % 100 == 0:
             stats = self.get_audit_stats()
@@ -407,7 +243,10 @@ class LogIngestor:
 
     def get_audit_stats(self) -> dict:
         """v4 修复:对外暴露审计状态聚合,供 /api/logs/audit-stats 等查询使用"""
-        agg = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0, "total": 0}
+        agg = {
+            "pending": 0, "running": 0, "completed": 0, "failed": 0,
+            "skipped": 0, "fallback": 0, "shed": 0, "total": 0,
+        }
         for v in self._audit_status_cache.values():
             s = v.get("status", "unknown")
             if s in agg:
@@ -440,24 +279,14 @@ class LogIngestor:
         编排: 优先走 Temporal Workflow(AuditPipelineWorkflow) 获得可靠性/长任务/可视化;
         不可用/失败时降级回本进程 async 兜底(带 900s 整体超时)。
         """
-        # ── 案例自动聚合 (Kafka enriched/audit + HTTP 兜底共用入口) ──
-        # 此前 auto_create_case 仅在 ingest()(HTTP 直连) 被调用, Kafka 路径绕过→从不自动建 case。
-        # 在此调用覆盖全部非 ingest 审计路径; auto_create_case 幂等(同源聚合复用, 不重复建)。
-        try:
-            from models import async_session as db_session
-            from case_manager import case_manager
-            async with db_session() as case_session:
-                db_evt = await case_session.get(SecurityEvent, event_id)
-                if db_evt:
-                    await case_manager.auto_create_case(case_session, db_evt)
-        except Exception as e:
-            logger.debug(f"[Case] audit-pipeline case aggregation skipped: {e}")
+        # 案例自动聚合: 不挡 LLM 准入,后台短租 OLTP 连接
+        asyncio.create_task(self._auto_create_case_bg(event_id))
 
         # ── 审计分流 (LLM 通道分层) ──
         # 废除全局 budget 一刀切: P0 始终可走最小 LLM; 低优降级 tools_only/rule_close
         from audit_triage import (
-            score_event, admit, needs_llm,
-            LANE_RULE_CLOSE, LANE_TOOLS_ONLY,
+            score_event, admit, needs_llm, uses_llm_single, uses_temporal,
+            lane_max_rounds, lane_timeout_s,
         )
         from agents.llm_fallback import budget_usage_pct, budget_exhausted
         from config import settings as _cfg
@@ -491,18 +320,193 @@ class LogIngestor:
             f"reasons={triage.reasons[:4]}"
         )
 
+        max_rounds = lane_max_rounds(triage.lane, max_rounds)
+        timeout_s = lane_timeout_s(triage.tier)
+
+        # ── R-E: 结论缓存 — 同签名(事件类型|src_ip|Sigma规则|级别)命中 → 0 LLM / 0 Temporal ──
+        cached = None
+        try:
+            from audit_cache import get as _cache_get, inc_hit_metric as _cache_inc_hit
+            cached = await _cache_get(log_data)
+        except Exception as _cache_err:
+            logger.debug(f"[Audit-Cache] lookup failed for #{event_id}: {_cache_err}")
+        if cached:
+            _cache_inc_hit()
+            _cached_td = bool(cached.get("threat_detected"))
+            _cached_verdict = str(
+                cached.get("verdict") or ("suspicious" if _cached_td else "benign")
+            )
+            _cached_payload = {
+                "prompt_version": AUDIT_PROMPT_VERSION,
+                "status": "completed",
+                "quality": "cache",
+                "lane": "cache",
+                "completed_by": "cache",
+                "cache_hit": True,
+                "threat_detected": _cached_td,
+                "confidence": max(0.0, min(1.0, float(cached.get("confidence") or 0))),
+                "severity": str(
+                    cached.get("severity") or log_data.get("severity") or "info"
+                ),
+                "verdict": _cached_verdict,
+                "summary": "结论缓存命中: 复用同签名历史 LLM verdict (0 LLM 调用)",
+                "reviewer": {
+                    "conclusion": _cached_verdict,
+                    "agent": "cache",
+                    "notes": "cached verdict reuse",
+                },
+                "note": "同签名(事件类型|源IP|Sigma规则|级别)缓存命中, 直接复用结论",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            # 先经 _mark_analyzed 落 analyzed/status/metrics(quality=cache),
+            # 再合并轻量 verdict 载荷(它保留既有 quality/status)。
+            await self._mark_analyzed(event_id, status="completed", quality="cache")
+            try:
+                from models import async_session as _db_session
+                async with _db_session() as _session:
+                    _db_evt = await _session.get(SecurityEvent, event_id)
+                    if _db_evt:
+                        _db_evt.raw_data = {
+                            **(dict(_db_evt.raw_data or {})),
+                            "_audit_llm": {
+                                **(
+                                    dict(
+                                        (_db_evt.raw_data or {}).get("_audit_llm")
+                                        or {}
+                                    )
+                                ),
+                                **_cached_payload,
+                            },
+                        }
+                        await _session.commit()
+                        event_store.invalidate(event_id)
+            except Exception as _persist_err:
+                logger.warning(
+                    f"[Audit-Cache] payload persist failed for #{event_id}: {_persist_err}"
+                )
+            logger.info(
+                f"[Audit-Cache] HIT event #{event_id} tier={triage.tier} "
+                f"lane={triage.lane} verdict={_cached_verdict}"
+            )
+            try:
+                event_bus.publish("audit_complete", {
+                    "event_id": event_id,
+                    "quality": "cache",
+                    "cache": True,
+                    "threat_detected": _cached_td,
+                    "confidence": cached.get("confidence"),
+                    "severity": _cached_payload["severity"],
+                    "verdict": _cached_verdict,
+                })
+            except Exception:
+                pass
+            return
+
         if not needs_llm(triage.lane):
             # tools_only / rule_close: 规则+统计收口,不占 LLM 槽
+            reason = f"triage:{triage.lane}:{triage.tier}"
+            q = _quality_from_reason(reason, "fallback")
+            if any("budget" in str(r) for r in (triage.reasons or [])):
+                q = "budget"
+                try:
+                    event_bus.publish("audit_degraded", {
+                        "reason": "budget_exhausted",
+                        "event_id": event_id,
+                        "tier": triage.tier,
+                        "lane": triage.lane,
+                    })
+                except Exception:
+                    pass
             await self._fallback_analysis(
-                event_id, log_data, anomaly_report,
-                f"triage:{triage.lane}:{triage.tier}",
+                event_id, log_data, anomaly_report, reason,
             )
             await self._mark_analyzed(
-                event_id, error=f"triage_{triage.lane}", status="fallback"
+                event_id, error=reason, status="fallback", quality=q,
             )
             return
 
-        # ── Temporal 优先: 启动 4 层 Agent 编排 Workflow ──
+        # ── llm_single 车道: 本进程 1 次 LLM 快审, 禁止 start_audit_workflow (R-B) ──
+        # P1 默认单 hop; 硬预算下 P0 降级到 llm_single 也在此; 其余 needs_llm 但
+        # 非 llm_agent 的车道(如未来新增)同样收口到单次快审, 不进 Temporal。
+        if uses_llm_single(triage.lane) or (
+            needs_llm(triage.lane) and not uses_temporal(triage.lane)
+        ):
+            try:
+                from agents import audit_single
+                _single_timeout = float(
+                    getattr(_cfg, "audit_llm_single_timeout_s", 15.0) or 15.0
+                )
+                result = await audit_single.run(
+                    event_id=event_id,
+                    session_id=session_id,
+                    log_data=log_data,
+                    anomaly_report=anomaly_report,
+                    timeout_s=_single_timeout,
+                )
+                if not isinstance(result, dict) or result.get("fallback"):
+                    raise RuntimeError(
+                        str((result or {}).get("error") or "audit_single fallback")
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[Audit-LLM] llm_single failed for #{event_id} "
+                    f"tier={triage.tier} lane={triage.lane}: {e}"
+                )
+                await self._fallback_analysis(
+                    event_id, log_data, anomaly_report,
+                    f"llm_single:{e}",
+                )
+                await self._mark_analyzed(
+                    event_id, error=f"llm_single:{e}",
+                    status="fallback", quality="fallback",
+                )
+                return
+            # 成功: quality=llm / lane=llm_single 落库, 结论写缓存 (R-D)
+            await self._mark_analyzed(event_id, status="completed", quality="llm")
+            try:
+                from models import async_session as _db_session
+                async with _db_session() as _session:
+                    _db_evt = await _session.get(SecurityEvent, event_id)
+                    if _db_evt:
+                        _db_evt.raw_data = {
+                            **(dict(_db_evt.raw_data or {})),
+                            "_audit_llm": {
+                                **(dict((_db_evt.raw_data or {}).get("_audit_llm") or {})),
+                                **(result or {}),
+                            },
+                        }
+                        await _session.commit()
+                        event_store.invalidate(event_id)
+            except Exception as _persist_err:
+                logger.warning(
+                    f"[Audit-LLM] llm_single persist failed for #{event_id}: {_persist_err}"
+                )
+            try:
+                from audit_cache import put as _cache_put
+                await _cache_put(log_data, result)
+            except Exception as _put_err:
+                logger.debug(f"[Audit-Cache] put failed for #{event_id}: {_put_err}")
+            logger.info(
+                f"[Audit-LLM] llm_single completed #{event_id} "
+                f"tier={triage.tier} verdict={result.get('verdict')} "
+                f"threat={result.get('threat_detected')} conf={result.get('confidence')}"
+            )
+            try:
+                event_bus.publish("audit_complete", {
+                    "event_id": event_id,
+                    "quality": "llm",
+                    "lane": "llm_single",
+                    "threat_detected": result.get("threat_detected"),
+                    "confidence": result.get("confidence"),
+                    "severity": result.get("severity"),
+                    "verdict": result.get("verdict"),
+                    "fallback": False,
+                })
+            except Exception:
+                pass
+            return
+
+        # ── Temporal 优先(llm_agent 车道): 启动 4 层 Agent 编排 Workflow ──
         # 标志:本次调用是否走降级路径(决定 _audit_pipeline_inner 用哪个 Semaphore)
         # v4 复现:Temporal 容器持续 Restarting 时所有调用都走降级,降级路径仍用主 Semaphore=5
         #         → 200 events / 5 min 完成 0%。修复:降级走独立、宽松的 Semaphore。
@@ -522,8 +526,8 @@ class LogIngestor:
                 if started == "shed":
                     # Phase C: P0/P1 → 优先级队列等待槽位; P2/P3 → 立即降级收口
                     if triage.tier in ("P0", "P1"):
-                        from audit_pq import audit_pq
-                        ttl = int(getattr(_cfg, "audit_pq_ttl_s", 900) or 900)
+                        from audit_pq import audit_pq, pq_ttl_for_tier
+                        ttl = pq_ttl_for_tier(triage.tier)
                         ok = await audit_pq.enqueue(
                             event_id=event_id,
                             session_id=session_id,
@@ -554,7 +558,7 @@ class LogIngestor:
                         f"shed_load:{triage.tier}",
                     )
                     await self._mark_analyzed(
-                        event_id, error="shed_load", status="fallback"
+                        event_id, error="shed_load", status="fallback", quality="shed",
                     )
                     return
                 if started:
@@ -574,37 +578,47 @@ class LogIngestor:
                 logger.warning(f"[Audit-LLM] Temporal route failed, fallback async: {e}")
                 _fallback_routed = True  # ← 标记走降级,后续用 fallback Semaphore
 
-        # ── 降级兜底: 原 async 编排(整体 900s 超时) ──
+        # ── 降级兜底: 原 async 编排(按档位超时,不再空占 900s) ──
         try:
             await asyncio.wait_for(
                 self._audit_pipeline_inner(
                     session_id, event_id, log_data, anomaly_report, max_rounds,
                     use_fallback_semaphore=_fallback_routed,
                 ),
-                timeout=900,
+                timeout=max(8.0, timeout_s),
             )
         except asyncio.TimeoutError:
-            logger.error(f"[Audit-LLM] Pipeline TIMEOUT (900s) for event #{event_id}")
-            await self._mark_analyzed(event_id, error="pipeline_timeout_900s", status="failed")
+            logger.error(
+                f"[Audit-LLM] Pipeline TIMEOUT ({timeout_s:.0f}s) for event #{event_id}"
+            )
+            await self._mark_analyzed(
+                event_id, error="pipeline_timeout", status="failed", quality="fallback",
+            )
             await self._fallback_analysis(event_id, log_data, anomaly_report, "timeout")
         except Exception as e:
             logger.error(
                 f"[Audit-LLM] Pipeline crashed for event #{event_id}: {e}",
                 exc_info=True,
             )
-            await self._mark_analyzed(event_id, error=str(e), status="failed")
+            await self._mark_analyzed(
+                event_id, error=str(e), status="failed", quality="fallback",
+            )
             await self._fallback_analysis(event_id, log_data, anomaly_report, "crash")
 
-    async def _mark_analyzed(self, event_id: int, error: str = "", status: str = ""):
+    async def _mark_analyzed(
+        self, event_id: int, error: str = "", status: str = "", quality: str = "",
+    ):
         """确保事件被标记为已分析（即使管道失败）。
 
         status: completed | failed | fallback；失败时不得伪装成空成功结果。
+        quality: llm | tools | rule | fallback | shed | budget | rate_limited
         """
-        # v4 修复(2026-09-01):同步写内存 cache,让可观测性追上 DB
-        # 注意:即使 DB 写失败,cache 仍要更新,避免事件永远卡在 pending/running
-        cache_status = "failed" if error else (status or "completed")
+        cache_status = status or ("failed" if error else "completed")
+        if cache_status not in ("completed", "failed", "fallback", "pending", "running", "skipped"):
+            cache_status = "failed" if error else "completed"
+        q = quality or _quality_from_reason(error, cache_status)
         try:
-            self._track_audit_status(event_id, cache_status, error=error)
+            self._track_audit_status(event_id, cache_status, error=error, quality=q)
         except Exception as cache_err:
             logger.warning(f"[Audit-LLM] cache status update failed for #{event_id}: {cache_err}")
 
@@ -624,22 +638,28 @@ class LogIngestor:
                         except Exception:
                             pass
                     raw = dict(db_evt.raw_data or {})
+                    audit = dict(raw.get("_audit_llm") or {})
                     if error:
                         raw["_audit_llm_error"] = error
-                        audit = dict(raw.get("_audit_llm") or {})
                         audit.setdefault("status", status or "failed")
                         audit["error"] = error
-                        raw["_audit_llm"] = audit
                     elif status:
-                        audit = dict(raw.get("_audit_llm") or {})
                         audit["status"] = status
-                        raw["_audit_llm"] = audit
+                    audit["quality"] = q
+                    raw["_audit_llm"] = audit
                     db_evt.raw_data = raw
                     await session.commit()
                     event_store.invalidate(event_id)
+                    try:
+                        from metrics import inc_audit_complete
+                        _tier = str((audit.get("triage") or {}).get("tier") or "?")
+                        inc_audit_complete(q, _tier)
+                    except Exception:
+                        pass
                     logger.info(
                         f"[Audit-LLM] Event #{event_id} marked analyzed "
-                        f"(status={status or ('failed' if error else 'completed')}, error={error})"
+                        f"(status={status or ('failed' if error else 'completed')}, "
+                        f"quality={q}, error={error})"
                     )
         except Exception as e:
             logger.error(f"[Audit-LLM] Failed to mark event #{event_id} as analyzed: {e}")
@@ -664,10 +684,13 @@ class LogIngestor:
                 ),
                 4,
             )
+            q = _quality_from_reason(reason, "fallback")
             fallback_result = {
                 "prompt_version": AUDIT_PROMPT_VERSION,
                 "status": "fallback",
                 "fallback": True,
+                "quality": q,
+                "completed_by": "fallback",
                 "fallback_reason": reason,
                 "error": reason,
                 "threat_detected": threat_detected,
@@ -716,8 +739,18 @@ class LogIngestor:
                     event_store.invalidate(event_id)
             logger.info(
                 f"[Audit-LLM] Fallback analysis for #{event_id}: "
-                f"threat={threat_detected} reason={reason}"
+                f"threat={threat_detected} reason={reason} quality={q}"
             )
+            try:
+                event_bus.publish("audit_complete", {
+                    "event_id": event_id,
+                    "quality": q,
+                    "fallback": True,
+                    "reason": reason,
+                    "threat_detected": threat_detected,
+                })
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"[Audit-LLM] Fallback analysis failed for #{event_id}: {e}")
 
@@ -743,11 +776,9 @@ class LogIngestor:
           - 置信度取加权平均（轮次越大权重越低）
           - 所有轮的 evidence_trail 合并
         """
-        # v4 修复:Temporal 降级路径走独立 Semaphore(默认 20),避免被主 Semaphore 拥堵
-        _sem = self._review_semaphore_fallback if use_fallback_semaphore else self._review_semaphore
-        async with _sem:
-            # v4 修复:Semaphore 拿到后,状态从 pending → running
-            self._track_audit_status(event_id, "running", use_fallback=use_fallback_semaphore)
+        # Slot 由 AuditWorkerPool / Temporal activity 提供,不再叠 Semaphore。
+        self._track_audit_status(event_id, "running", use_fallback=use_fallback_semaphore)
+        if True:
             from agents import decomposer, tool_builder, executor, reviewer
             from agents.agent_cad import cad_agent
             from models import async_session as db_session
@@ -757,10 +788,23 @@ class LogIngestor:
                 caller="audit_pipeline",
                 event_id=event_id,
                 session_id=session_id,
+                log_data=log_data,
             )
+            from observability.thought_events import (
+                attach_to_audit,
+                emit_cad,
+                emit_executor,
+                emit_plan,
+                emit_rag_chunks,
+                emit_response,
+                emit_review,
+                emit_signals,
+                emit_tool_map,
+            )
+            emit_signals(log_data, event_id=event_id, session_id=session_id)
 
-            async with db_session() as session:
-                t_start = time.time()
+            t_start = time.time()
+            if True:
                 all_rounds = []        # 所有轮次结果
                 missed_threats = []    # 上轮的遗漏
                 final_verdict = None
@@ -769,6 +813,7 @@ class LogIngestor:
                 try:
                     for round_num in range(1, max_rounds + 1):
                         mode = "supplement" if round_num > 1 else "full"
+                        set_trace_context(round=round_num)
                         logger.info(
                             f"[Audit-LLM] Round {round_num}/{max_rounds} "
                             f"({mode}) for event #{event_id}"
@@ -784,6 +829,10 @@ class LogIngestor:
                                 mode=mode,
                                 missed_threats=missed_threats,
                             )
+                        emit_plan(
+                            decomp_output,
+                            event_id=event_id, session_id=session_id, round_num=round_num,
+                        )
                         depth = decomp_output.get("audit_depth", mode)
                         sub_tasks = decomp_output["sub_tasks"]
 
@@ -795,16 +844,28 @@ class LogIngestor:
                         # ── Layer 2: Tool Builder ──
                         with pipeline_tracer.span("tool_builder", event_id=event_id, session_id=session_id):
                             tool_calls = tool_builder.build(sub_tasks, session_id)
+                        emit_tool_map(
+                            sub_tasks, tool_calls,
+                            event_id=event_id, session_id=session_id, round_num=round_num,
+                        )
 
                         # ── Layer 3: Executor ──
                         with pipeline_tracer.span("executor", event_id=event_id, session_id=session_id):
                             audit_result = await executor.execute(
                                 tool_calls=tool_calls,
-                                session=session,
+                                session=None,
                                 session_id=session_id,
                                 raw_event=log_data,
                                 depth=depth,
                             )
+                        emit_rag_chunks(
+                            audit_result,
+                            event_id=event_id, session_id=session_id, round_num=round_num,
+                        )
+                        emit_executor(
+                            audit_result,
+                            event_id=event_id, session_id=session_id, round_num=round_num,
+                        )
 
                         tool_data_text = "\n".join(
                             f"[{tr.tool}] {'OK' if tr.success else 'FAIL'}: "
@@ -820,6 +881,10 @@ class LogIngestor:
                                 audit_result=audit_result,
                                 tool_data_raw=tool_data_text,
                             )
+                        emit_review(
+                            verdict,
+                            event_id=event_id, session_id=session_id, round_num=round_num,
+                        )
 
                         # 记录本轮结果
                         round_data = {
@@ -919,196 +984,250 @@ class LogIngestor:
                         non_llm_signals=_non_llm,
                     )
 
-                    # ── 写入 DB ──
-                    db_evt = await session.get(SecurityEvent, event_id)
-                    if db_evt:
-                        db_evt.analyzed = True
-                    try:
-                        from stats_counter import inc_analyzed_done
-                    except Exception:
-                        pass
-                    else:
-                        try:
-                            await inc_analyzed_done()
-                        except Exception:
-                            pass
-
-                        # 合并证据链
-                        all_evidence = []
-                        for rd in all_rounds:
-                            for claim in rd.get("audit", {}).get("evidence", []):
-                                if isinstance(claim, dict) and "threat_claims" in claim:
-                                    for c in claim.get("threat_claims", []):
-                                        all_evidence.append({
-                                            "claim": c.get("summary", "")[:100],
-                                            "type": c.get("type", ""),
-                                            "confidence": c.get("confidence", 0),
-                                            "evidence_ids": c.get("evidence_ids", []),
-                                            "evidence_quotes": c.get("evidence_quotes", [])[:3],
-                                            "severity": c.get("severity", ""),
-                                            "round": rd["round"],
-                                        })
-
-                        db_evt.raw_data = {
-                            **(db_evt.raw_data or {}),
-                            "_audit_llm": {
-                                "prompt_version": AUDIT_PROMPT_VERSION,
-                                "status": "completed",
-                                "rounds": len(all_rounds),
-                                "max_rounds": max_rounds,
-                                "merged": merged,
-                                "rounds_detail": [
-                                    {
-                                        "round": r["round"],
-                                        "mode": r["mode"],
-                                        "threat_detected": r["audit"].get("threat_detected"),
-                                        "confidence": r["audit"].get("confidence"),
-                                        "missed_count": len(r["missed_threats"]),
-                                        "hop_trace": r["audit"].get("hop_trace") or [],
-                                    }
-                                    for r in all_rounds
-                                ],
-                                "hop_trace": (
-                                    (final_audit.to_dict().get("hop_trace") if final_audit else None)
-                                    or []
-                                ),
-                                "final_verdict": final_verdict.to_dict() if final_verdict else {},
-                                "reviewer": final_verdict.to_dict() if final_verdict else {},
-                                "evidence_trail": all_evidence,
-                                "hallucination": {
-                                    "risk": merged.get("confidence", 0) < 0.3,
-                                    "rounds": len(all_rounds),
-                                    "needs_human": merged.get("needs_human", False),
-                                },
-                                "grounding": {
-                                    "score": final_audit.grounding_score if final_audit else 1.0,
-                                    "kb_verification": final_audit.kb_verification if final_audit else {},
-                                    "schema_valid": final_audit.schema_valid if final_audit else True,
-                                },
-                                "pipeline_duration_s": round(time.time() - t_start, 2),
-                                "completed_at": datetime.now(timezone.utc).isoformat(),
-                                "faithfulness": merged.get("faithfulness") or {},
-                                "response_blocked": bool(merged.get("response_blocked")),
-                            },
-                        }
-                        await session.commit()
-                        event_store.invalidate(event_id)
-
-                    duration = time.time() - t_start
-                    logger.info(
-                        f"[Audit-LLM] Pipeline complete for event #{event_id}: "
-                        f"{duration:.1f}s, {len(all_rounds)} rounds, "
-                        f"threat={merged.get('threat_detected')}, "
-                        f"confidence={merged.get('confidence', 0):.2f}"
+                    await self._persist_audit_result(
+                        event_id=event_id,
+                        session_id=session_id,
+                        log_data=log_data,
+                        all_rounds=all_rounds,
+                        merged=merged,
+                        final_audit=final_audit,
+                        final_verdict=final_verdict,
+                        max_rounds=max_rounds,
+                        t_start=t_start,
                     )
-
-                    event_bus.publish("audit_complete", {
-                        "event_id": event_id,
-                        "event_type": log_data.get("event", log_data.get("type", "UNKNOWN")),
-                        "threat_detected": merged.get("threat_detected", False),
-                        "confidence": merged.get("confidence", 0),
-                        "severity": merged.get("severity", "info"),
-                        "rounds": len(all_rounds),
-                        "duration_s": round(duration, 1),
-                        "src_ip": log_data.get("src_ip", ""),
-                        "stage": "pipeline_complete",
-                        "agent_id": "reviewer",
-                        "agents_completed": [
-                            "decomposer", "tool_builder", "executor", "reviewer",
-                        ],
-                    })
-
-                    # ── 触发响应引擎（独立 session，避免与流水线 session 并发）──
-                    # confirmed：完整自动响应；suspicious + 未 blocked：软降级后仍允许策略层处置
-                    _verdict = merged.get("verdict")
-                    if (
-                        merged.get("threat_detected")
-                        and _verdict in ("confirmed", "suspicious")
-                        and merged.get("confidence", 0) >= 0.4
-                        and not merged.get("response_blocked")
-                    ):
-                        try:
-                            from response_engine import get_orchestrator
-                            _resp_orch = get_orchestrator()
-                            _audit_event_name = log_data.get("event", log_data.get("type", "UNKNOWN"))
-                            threat_info = {
-                                "threat_type": (
-                                    merged.get("threat_type")
-                                    or log_data.get("threat_type")
-                                    or _audit_event_name
-                                ),
-                                "event": _audit_event_name,
-                                "confidence": merged.get("confidence", 0),
-                                "severity": merged.get("severity", "info"),
-                                "src_ip": log_data.get("src_ip", ""),
-                                "dst_ip": log_data.get("dst_ip", ""),
-                                "message": log_data.get("message", ""),
-                                "session_id": session_id,
-                                "event_id": event_id,
-                                "policy_name": f"audit_llm_rounds_{len(all_rounds)}",
-                                # v5 修复(A):响应来源标记
-                                "response_source": "audit_llm",
-                                "allow_blocking": True,
-                            }
-                            async def _audit_response(threat_info: dict, evt_id: int, sid: str):
-                                from models import async_session as db_session
-                                async with db_session() as s:
-                                    try:
-                                        with pipeline_tracer.span("response", event_id=evt_id, session_id=sid):
-                                            await _resp_orch.on_threat_detected(
-                                                session=s, threat_info=threat_info,
-                                                event_id=evt_id, session_id=sid,
-                                            )
-                                    except Exception as resp_err:
-                                        logger.warning(f"[Response] Trigger failed for event #{evt_id}: {resp_err}")
-
-                            asyncio.create_task(_audit_response(threat_info, event_id, session_id))
-                            logger.info(f"[Response] Triggered for event #{event_id}: {threat_info['threat_type']}")
-                            event_bus.publish("response_action", {
-                                "event_id": event_id,
-                                "threat_type": threat_info["threat_type"],
-                                "severity": threat_info["severity"],
-                                "src_ip": threat_info.get("src_ip", ""),
-                                "confidence": threat_info["confidence"],
-                                "status": "triggered",
-                                "stage": "response",
-                                "agent_id": "response",
-                            })
-                        except Exception as resp_err:
-                            logger.warning(f"[Response] Trigger setup failed for event #{event_id}: {resp_err}")
-
-                    # ── CAD 独立审计 ──
-                    try:
-                        with pipeline_tracer.span("cad_verify", event_id=event_id, session_id=session_id):
-                            cad_report = await cad_agent.audit_pipeline(
-                                session, event_id, db_evt.raw_data["_audit_llm"]
-                            )
-                        db_evt.raw_data["_cad_audit"] = {
-                            "penetrating_verification": cad_report["penetrating_verification"],
-                            "circuit_breaker": cad_report["circuit_breaker"],
-                            "audit_timestamp": cad_report["audit_timestamp"],
-                            "duration_ms": cad_report["duration_ms"],
-                        }
-                        await session.commit()
-                        if cad_report["circuit_breaker"]["tripped"]:
-                            logger.critical(
-                                f"[CAD] CIRCUIT BREAKER for event #{event_id}: "
-                                f"{cad_report['circuit_breaker']['reason']}"
-                            )
-                    except Exception as cad_err:
-                        logger.warning(f"[CAD] audit_pipeline failed: {cad_err}")
 
                 except Exception as e:
                     logger.error(
                         f"[Audit-LLM] Pipeline failed for event #{event_id}: {e}",
                         exc_info=True,
                     )
-                    await self._mark_analyzed(event_id, error=str(e), status="failed")
+                    await self._mark_analyzed(
+                        event_id, error=str(e), status="failed", quality="fallback",
+                    )
                     await self._fallback_analysis(event_id, log_data, anomaly_report, str(e))
                 finally:
                     # 防止 trace context 泄漏: 同任务内后续辅助 LLM 调用
                     # (watchdog/post_mortem/rerank 等) 不会继承本事件的 event_id
                     clear_trace_context()
+
+    async def _persist_audit_result(
+        self,
+        *,
+        event_id: int,
+        session_id: str,
+        log_data: dict,
+        all_rounds: list,
+        merged: dict,
+        final_audit,
+        final_verdict,
+        max_rounds: int,
+        t_start: float,
+    ) -> None:
+        """LLM 全部结束后短租连接写库 + CAD + 响应触发。"""
+        from agents.agent_cad import cad_agent
+        from models import async_session as db_session
+        from observability.thought_events import attach_to_audit, emit_cad, emit_response
+        from observability.thought_events import snapshot as thought_snapshot
+
+        all_evidence = []
+        for rd in all_rounds:
+            for claim in rd.get("audit", {}).get("evidence", []):
+                if isinstance(claim, dict) and "threat_claims" in claim:
+                    for c in claim.get("threat_claims", []):
+                        all_evidence.append({
+                            "claim": c.get("summary", "")[:100],
+                            "type": c.get("type", ""),
+                            "confidence": c.get("confidence", 0),
+                            "evidence_ids": c.get("evidence_ids", []),
+                            "evidence_quotes": c.get("evidence_quotes", [])[:3],
+                            "severity": c.get("severity", ""),
+                            "round": rd["round"],
+                        })
+        payload = attach_to_audit({
+            "prompt_version": AUDIT_PROMPT_VERSION,
+            "status": "completed",
+            "quality": "llm",
+            "completed_by": "worker",
+            "rounds": len(all_rounds),
+            "max_rounds": max_rounds,
+            "merged": merged,
+            "rounds_detail": [
+                {
+                    "round": r["round"],
+                    "mode": r["mode"],
+                    "threat_detected": r["audit"].get("threat_detected"),
+                    "confidence": r["audit"].get("confidence"),
+                    "missed_count": len(r["missed_threats"]),
+                    "hop_trace": r["audit"].get("hop_trace") or [],
+                }
+                for r in all_rounds
+            ],
+            "hop_trace": (
+                (final_audit.to_dict().get("hop_trace") if final_audit else None) or []
+            ),
+            "final_verdict": final_verdict.to_dict() if final_verdict else {},
+            "reviewer": final_verdict.to_dict() if final_verdict else {},
+            "evidence_trail": all_evidence,
+            "hallucination": {
+                "risk": merged.get("confidence", 0) < 0.3,
+                "rounds": len(all_rounds),
+                "needs_human": merged.get("needs_human", False),
+            },
+            "grounding": {
+                "score": final_audit.grounding_score if final_audit else 1.0,
+                "kb_verification": final_audit.kb_verification if final_audit else {},
+                "schema_valid": final_audit.schema_valid if final_audit else True,
+            },
+            "pipeline_duration_s": round(time.time() - t_start, 2),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "faithfulness": merged.get("faithfulness") or {},
+            "response_blocked": bool(merged.get("response_blocked")),
+        }, event_id)
+
+        async with db_session() as session:
+            db_evt = await session.get(SecurityEvent, event_id)
+            if db_evt:
+                db_evt.analyzed = True
+                try:
+                    from stats_counter import inc_analyzed_done
+                    await inc_analyzed_done()
+                except Exception:
+                    pass
+                db_evt.raw_data = {**(db_evt.raw_data or {}), "_audit_llm": payload}
+                await session.commit()
+                event_store.invalidate(event_id)
+                try:
+                    with pipeline_tracer.span("cad_verify", event_id=event_id, session_id=session_id):
+                        cad_report = await cad_agent.audit_pipeline(
+                            session, event_id, db_evt.raw_data["_audit_llm"]
+                        )
+                    emit_cad(cad_report, event_id=event_id, session_id=session_id)
+                    from observability.thought_events import merge_thought_into_raw, snapshot
+                    db_evt.raw_data = merge_thought_into_raw({
+                        **(db_evt.raw_data or {}),
+                        "_cad_audit": {
+                            "penetrating_verification": cad_report["penetrating_verification"],
+                            "circuit_breaker": cad_report["circuit_breaker"],
+                            "audit_timestamp": cad_report["audit_timestamp"],
+                            "duration_ms": cad_report["duration_ms"],
+                        },
+                    }, snapshot(event_id))
+                    await session.commit()
+                    if cad_report["circuit_breaker"]["tripped"]:
+                        logger.critical(
+                            f"[CAD] CIRCUIT BREAKER for event #{event_id}: "
+                            f"{cad_report['circuit_breaker']['reason']}"
+                        )
+                except Exception as cad_err:
+                    logger.warning(f"[CAD] audit_pipeline failed: {cad_err}")
+
+        self._track_audit_status(event_id, "completed", quality="llm")
+        try:
+            from metrics import inc_audit_complete
+            _tier = str(((log_data or {}).get("_audit_triage") or {}).get("tier") or "?")
+            inc_audit_complete("llm", _tier)
+        except Exception:
+            pass
+
+        duration = time.time() - t_start
+        logger.info(
+            f"[Audit-LLM] Pipeline complete for event #{event_id}: "
+            f"{duration:.1f}s, {len(all_rounds)} rounds, "
+            f"threat={merged.get('threat_detected')}, "
+            f"confidence={merged.get('confidence', 0):.2f}"
+        )
+        event_bus.publish("audit_complete", {
+            "event_id": event_id,
+            "event_type": log_data.get("event", log_data.get("type", "UNKNOWN")),
+            "threat_detected": merged.get("threat_detected", False),
+            "confidence": merged.get("confidence", 0),
+            "thought_count": len(thought_snapshot(event_id)),
+            "severity": merged.get("severity", "info"),
+            "rounds": len(all_rounds),
+            "duration_s": round(duration, 1),
+            "src_ip": log_data.get("src_ip", ""),
+            "quality": "llm",
+            "stage": "pipeline_complete",
+            "agent_id": "reviewer",
+            "agents_completed": ["decomposer", "tool_builder", "executor", "reviewer"],
+        })
+
+        _verdict = merged.get("verdict")
+        if merged.get("response_blocked"):
+            emit_response(
+                {
+                    "event_id": event_id,
+                    "status": "blocked",
+                    "reason": "faithfulness / 否决闸阻止自动响应",
+                    "threat_type": merged.get("threat_type") or "",
+                    "confidence": merged.get("confidence", 0),
+                },
+                event_id=event_id, session_id=session_id,
+            )
+        if (
+            merged.get("threat_detected")
+            and _verdict in ("confirmed", "suspicious")
+            and merged.get("confidence", 0) >= 0.4
+            and not merged.get("response_blocked")
+        ):
+            try:
+                from response_engine import get_orchestrator
+                _resp_orch = get_orchestrator()
+                _audit_event_name = log_data.get("event", log_data.get("type", "UNKNOWN"))
+                threat_info = {
+                    "threat_type": (
+                        merged.get("threat_type")
+                        or log_data.get("threat_type")
+                        or _audit_event_name
+                    ),
+                    "event": _audit_event_name,
+                    "confidence": merged.get("confidence", 0),
+                    "severity": merged.get("severity", "info"),
+                    "src_ip": log_data.get("src_ip", ""),
+                    "dst_ip": log_data.get("dst_ip", ""),
+                    "message": log_data.get("message", ""),
+                    "session_id": session_id,
+                    "event_id": event_id,
+                    "policy_name": f"audit_llm_rounds_{len(all_rounds)}",
+                    "response_source": "audit_llm",
+                    "allow_blocking": True,
+                }
+
+                async def _audit_response(threat_info: dict, evt_id: int, sid: str):
+                    from models import async_session as db_s
+                    async with db_s() as s:
+                        try:
+                            with pipeline_tracer.span("response", event_id=evt_id, session_id=sid):
+                                await _resp_orch.on_threat_detected(
+                                    session=s, threat_info=threat_info,
+                                    event_id=evt_id, session_id=sid,
+                                )
+                        except Exception as resp_err:
+                            logger.warning(f"[Response] Trigger failed for event #{evt_id}: {resp_err}")
+
+                asyncio.create_task(_audit_response(threat_info, event_id, session_id))
+                logger.info(f"[Response] Triggered for event #{event_id}: {threat_info['threat_type']}")
+                event_bus.publish("response_action", {
+                    "event_id": event_id,
+                    "threat_type": threat_info["threat_type"],
+                    "severity": threat_info["severity"],
+                    "src_ip": threat_info.get("src_ip", ""),
+                    "confidence": threat_info["confidence"],
+                    "status": "triggered",
+                    "stage": "response",
+                    "agent_id": "response",
+                })
+                emit_response(
+                    {
+                        "event_id": event_id,
+                        "status": "triggered",
+                        "threat_type": threat_info["threat_type"],
+                        "confidence": threat_info["confidence"],
+                    },
+                    event_id=event_id, session_id=session_id,
+                )
+            except Exception as resp_err:
+                logger.warning(f"[Response] Trigger setup failed for event #{event_id}: {resp_err}")
 
     async def _run_batch_analysis(self, session_id: str):
         """批量分析未处理的安全事件（使用 Audit-LLM 流水线）"""
@@ -1151,18 +1270,10 @@ class LogIngestor:
     async def ingest_batch(
         self, session: AsyncSession, session_id: str, logs: list[dict]
     ) -> dict:
-        """Batch ingest with bounded concurrency.
+        """Batch ingest.
 
-        Each item runs on its own async DB session (independent transaction/connection)
-        so asyncio.gather cannot interleave SQL on a single shared connection.
-        Concurrency is capped by asyncio.Semaphore. limit = env BATCH_INGEST_CONCURRENCY
-        (default 12). Default stays conservative: the asyncpg pool is pool_size=10 +
-        max_overflow=20 (~30 ceiling) and must leave headroom for the Kafka authoritative
-        workers (default 8) and other API/audit clients; bump the env var to go higher.
-
-        Exception: when the DB URL is sqlite (:memory: makes every new connection an
-        isolated empty DB) or the batch has a single item, fall back to serial and reuse
-        the caller-provided session so in-memory/tests semantics are preserved.
+        sqlite / 单条: 串行 ingest, 复用调用方 session (内存库测试语义)。
+        其它: ingest_pipeline.run_many (detect 并行 + store_batch 单事务)。
         """
         _url = str(getattr(settings, "database_url", "") or "")
         _sqlite = _url.startswith("sqlite")
@@ -1173,19 +1284,10 @@ class LogIngestor:
             return {"status": "batch_ingested", "count": len(results),
                     "session_id": session_id}
 
-        import os as _os
-        limit = max(1, int(_os.environ.get("BATCH_INGEST_CONCURRENCY", "12") or "12"))
-        sem = asyncio.Semaphore(limit)
-        from models import async_session as db_session
-
-        async def _one(d: dict):
-            async with sem:
-                async with db_session() as own:
-                    return await self.ingest(own, session_id, d)
-
-        # gather without return_exceptions keeps serial semantics: first failure raises
-        # (does not silently drop events) while still parallelizing the happy path.
-        await asyncio.gather(*[_one(d) for d in logs])
+        # P1: 非 sqlite 多事件 → 事件驱动流水线 (detect 全批并行 + store_batch 单事务,
+        # 单 session 单 commit); sqlite/单条路径走串行 ingest 保留测试语义
+        from ingest_pipeline import run_many
+        await run_many(session, [(session_id, d) for d in logs], ingestor=self)
         return {"status": "batch_ingested", "count": len(logs),
                 "session_id": session_id}
 

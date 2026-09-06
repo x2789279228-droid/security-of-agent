@@ -259,13 +259,30 @@ class LLMClient:
         effort = (getattr(settings, "llm_reasoning_effort", "") or "").strip()
         if effort:
             payload["reasoning_effort"] = effort
+        from llm_limiter import LlmSlotTimeout, get_llm_limiter
+        _triage = (ctx.get("log_data") or {}).get("_audit_triage") or {}
+        _tier = str(_triage.get("tier") or ctx.get("tier") or "P2")
+        try:
+            async with get_llm_limiter().acquire(tier=_tier):
+                return await self._chat_http(
+                    payload, prompt_tokens, t_start, event_id, cache_key,
+                )
+        except LlmSlotTimeout as e:
+            logger.warning("LLM slot timeout: %s", e)
+            emit_trace(
+                status="degraded", error_type="llm_slot_timeout",
+                prompt_tokens=prompt_tokens,
+                latency_ms=(time.time() - t_start) * 1000,
+            )
+            return json.dumps({
+                "error": "LLM slot timeout", "fallback": True,
+                "error_type": "llm_slot_timeout", "retryable": True,
+            }, ensure_ascii=False)
+
+    async def _chat_http(self, payload, prompt_tokens, t_start, event_id, cache_key) -> str:
+        from trace_hook import emit_trace
         last_error = None
         retries = 0
-        # v5 修复(D):LLM 韧性 — 429 指数退避重试(2s/8s) +
-        # reasoning_split 空 content 提取失败时关闭该参数降级重试。
-        # 今日日志实测: MiniMax-M3 偶发 429 Too Many Requests 与
-        # "无法从 LLM 响应提取文本"(choices[].message.content 为空)。
-        _backoff_sec = (2.0, 8.0)
         _no_reasoning_split = False
         for attempt in range(3):
             try:
@@ -284,30 +301,41 @@ class LLMClient:
                     payload.pop("reasoning_effort", None)
                     continue
                 if resp.status_code == 429:
-                    wait_s = _backoff_sec[min(retries, len(_backoff_sec) - 1)]
+                    try:
+                        from metrics import inc_llm_429
+                        inc_llm_429()
+                    except Exception:
+                        pass
                     retry_after = (resp.headers.get("retry-after") or "").strip()
+                    wait_cap = float(getattr(settings, "llm_429_retry_s", 1.0) or 1.0)
+                    wait_s = wait_cap
                     if retry_after:
                         try:
-                            wait_s = max(wait_s, float(retry_after))
+                            wait_s = min(wait_cap, max(0.05, float(retry_after)))
                         except ValueError:
                             pass
-                    # v5 修复:加随机抖动,避免大量并发调用同一时刻集体重试(惊群)
-                    import random
-                    wait_s *= random.uniform(0.8, 1.5)
                     retries += 1
                     last_error = f"HTTP 429 Too Many Requests (attempt {attempt+1})"
-                    logger.warning(
-                        f"LLM rate-limited (429), backoff {wait_s:.0f}s "
-                        f"then retry (attempt {attempt+1})"
-                    )
                     emit_trace(
                         status="degraded", error_type="rate_limited_429",
                         prompt_tokens=prompt_tokens,
                         latency_ms=(time.time() - t_start) * 1000,
                         retry_count=retries,
                     )
-                    await asyncio.sleep(wait_s)
-                    continue
+                    if retries <= 1:
+                        logger.warning(
+                            "LLM rate-limited (429), short retry %.2fs (attempt %s)",
+                            wait_s, attempt + 1,
+                        )
+                        await asyncio.sleep(wait_s)
+                        continue
+                    logger.warning("LLM 429 after short retry — releasing slot")
+                    return json.dumps({
+                        "error": "LLM rate-limited",
+                        "fallback": True,
+                        "error_type": "rate_limited_429",
+                        "retryable": True,
+                    }, ensure_ascii=False)
                 resp.raise_for_status()
                 data = resp.json()
                 try:

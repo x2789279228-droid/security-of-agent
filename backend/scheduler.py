@@ -66,6 +66,11 @@ class Scheduler:
             asyncio.create_task(self._llm_budget_reset_loop()),
             asyncio.create_task(self._stuck_audit_reap_loop(db_session_factory)),
             asyncio.create_task(self._audit_pq_drain_loop()),
+            asyncio.create_task(self._selfplay_review_loop()),
+            asyncio.create_task(self._audit_trail_flush_loop(db_session_factory)),
+            asyncio.create_task(self._tool_call_log_flush_loop(db_session_factory)),
+            asyncio.create_task(self._causal_learn_loop(db_session_factory)),
+            asyncio.create_task(self._demo_traffic_loop(db_session_factory)),
         ]
         # embedding 回填巡检(延迟到启动自检之后再进入周期, 避免与启动回填抢占)
         self._embed_patrol_task = asyncio.create_task(self._embedding_backfill_patrol())
@@ -496,9 +501,10 @@ class Scheduler:
     # ── 9b. 审计优先级队列拉取 (Phase C) ──
 
     async def _audit_pq_drain_loop(self):
-        """从 Redis ZSET 弹出最高优任务并 start Temporal workflow。
+        """从 Redis ZSET 弹出任务并路由: P0 agent → Temporal start, 其余 → audit_worker。
 
-        inflight 仍满则把任务重新入队(短暂退避),避免忙等。
+        Agent 槽满时跳过队头 P0 agent 先抽 P1/llm_single (D-D);
+        Temporal shed 仅 P0 agent 重入队, P1 永不回 PQ 空转 (D-F)。
         """
         from config import settings as _cfg
         interval = float(getattr(_cfg, "audit_pq_drain_interval_s", 1.0) or 1.0)
@@ -517,74 +523,157 @@ class Scheduler:
         from audit_pq import audit_pq
         from temporal.client import start_audit_workflow, inflight_stats
         from config import settings as _cfg
+        from audit_triage import pq_ttl_for_tier, score_event, uses_temporal
 
         if not audit_pq.available:
             return 0
-        # 每次最多拉一批,避免一次占满
-        batch = 5
+        # D-C: 批量/间隔走 settings(入站 ~12 ev/s 时旧的 5/s 会净堆积)
+        batch = int(getattr(_cfg, "audit_pq_drain_batch", 20) or 20)
+        skip_blocked = bool(getattr(_cfg, "audit_pq_skip_blocked_agent", True))
         n = 0
         for _ in range(batch):
             stats = await inflight_stats()
             limit = int(stats.get("limit") or 0)
             total = int(stats.get("total") or 0)
-            if limit > 0 and total >= limit:
-                break
-            job = await audit_pq.pop_highest()
+            agent_full = limit > 0 and total >= limit
+            if agent_full and skip_blocked:
+                # D-D: Agent 槽满 → 跳过队头 P0 agent, 抽可运行的 P1/llm_single
+                job = await audit_pq.pop_first_runnable(agent_full=True)
+            else:
+                job = await audit_pq.pop_highest()
             if not job:
                 break
             eid = int(job.get("event_id") or 0)
             if not eid:
                 continue
-            started = await start_audit_workflow(
-                session_id=str(job.get("session_id") or ""),
-                event_id=eid,
-                log_data=job.get("log_data") or {},
-                anomaly_score=float(job.get("anomaly_score") or 0),
-                anomaly_reasons=list(job.get("anomaly_reasons") or []),
-                max_rounds=int(job.get("max_rounds") or 3),
-                tier=str(job.get("tier") or "P1"),
-            )
-            if started is True:
-                n += 1
-                continue
-            if started == "shed":
-                # 槽又满了 — 重新入队
-                ttl = int(getattr(_cfg, "audit_pq_ttl_s", 900) or 900)
-                await audit_pq.enqueue(
-                    event_id=eid,
+            tier = str(job.get("tier") or "P1")
+            ld = job.get("log_data") or {}
+            # 逻辑 TTL: payload 故意活得更久,过期 P0/P1 重入队一次
+            try:
+                import time as _t
+                age_s = max(0.0, _t.time() - float(job.get("enqueued_at_ms") or 0) / 1000.0)
+                ttl_logical = pq_ttl_for_tier(tier)
+                retries = int(job.get("retry_count") or 0)
+                if age_s > ttl_logical:
+                    if retries < 2 and tier in ("P0", "P1"):
+                        ld2 = dict(ld)
+                        ld2["_pq_retry"] = retries + 1
+                        await audit_pq.enqueue(
+                            event_id=eid,
+                            session_id=str(job.get("session_id") or ""),
+                            log_data=ld2,
+                            anomaly_score=float(job.get("anomaly_score") or 0),
+                            anomaly_reasons=list(job.get("anomaly_reasons") or []),
+                            max_rounds=int(job.get("max_rounds") or 3),
+                            priority=int(job.get("priority") or 50),
+                            tier=tier,
+                            ttl_s=ttl_logical,
+                        )
+                        continue
+                    from log_ingestion import log_ingestor
+                    from anomaly_detector import AnomalyReport
+                    _score = float(job.get("anomaly_score") or 0)
+                    _ar = AnomalyReport(
+                        event_id=eid, anomaly_score=_score, is_anomaly=_score >= 0.6,
+                        deviation_sigma=0.0, reasons=list(job.get("anomaly_reasons") or []),
+                    )
+                    await log_ingestor._fallback_analysis(
+                        eid, ld, _ar, "pq_ttl_expired",
+                    )
+                    await log_ingestor._mark_analyzed(
+                        eid, error="pq_ttl_expired", status="fallback", quality="shed",
+                    )
+                    continue
+            except Exception as te:
+                logger.debug("[AuditPQ] ttl check skipped: %s", te)
+
+            # 车道推断: drain 只做路由 submit/start, 绝不 await LLM 管线 (D-E)
+            temporal_lane = False
+            try:
+                temporal_lane = bool(uses_temporal(
+                    score_event(ld, float(job.get("anomaly_score") or 0)).lane
+                ))
+            except Exception:
+                temporal_lane = False
+            # 仅 P0 agent 走 Temporal; P1 (audit_p1_use_temporal=False) 降级 llm_single
+            go_temporal = temporal_lane and tier == "P0"
+
+            if go_temporal:
+                started = await start_audit_workflow(
                     session_id=str(job.get("session_id") or ""),
-                    log_data=job.get("log_data") or {},
+                    event_id=eid,
+                    log_data=ld,
                     anomaly_score=float(job.get("anomaly_score") or 0),
                     anomaly_reasons=list(job.get("anomaly_reasons") or []),
                     max_rounds=int(job.get("max_rounds") or 3),
-                    priority=int(job.get("priority") or 50),
-                    tier=str(job.get("tier") or "P1"),
-                    ttl_s=ttl,
+                    tier=tier,
                 )
+                if started is True:
+                    n += 1
+                    continue
+                if started == "shed":
+                    # D-F: 只有 Temporal agent (P0) 允许 shed 重入队; P1 永不回 PQ 空转
+                    if temporal_lane:
+                        await self._reenqueue_pq(job)
+                        break
+                    # P1 shed → 落到本进程 worker 兜底
+                # started is False (Temporal 不可用/start 超时) → worker 兜底
+
+            # llm_single / tools / Temporal 失败兜底 — 只 submit, 不跑 LLM 管线
+            from audit_worker import audit_worker
+            if audit_worker.queue_depth() >= audit_worker._queue_max() * 0.9:
+                # 背压: 内存队列将满, 回 PQ 等下一轮, 不在 drain 循环里塞爆 worker
+                await self._reenqueue_pq(job)
                 break
-            # Temporal 不可用: 标记 fallback,避免永远挂在 PQ
             try:
-                from log_ingestion import log_ingestor
+                from anomaly_detector import AnomalyReport
                 _score = float(job.get("anomaly_score") or 0)
-
-                class _AR:
-                    anomaly_score = _score
-                    reasons = list(job.get("anomaly_reasons") or [])
-                    is_anomaly = _score >= 0.6
-                    deviation_sigma = 0.0
-
+                report = AnomalyReport(
+                    event_id=eid,
+                    anomaly_score=_score,
+                    is_anomaly=_score >= 0.6,
+                    deviation_sigma=_score * 5,
+                    reasons=list(job.get("anomaly_reasons") or []),
+                )
+                accepted = await audit_worker.submit(
+                    session_id=str(job.get("session_id") or ""),
+                    event_id=eid,
+                    log_data=ld,
+                    anomaly_report=report,
+                )
+                if accepted in ("queued", "direct", "shed", "deferred"):
+                    n += 1
+                    continue
+                from log_ingestion import log_ingestor
                 await log_ingestor._fallback_analysis(
-                    eid, job.get("log_data") or {}, _AR(), "pq_temporal_unavailable"
+                    eid, ld, report, "pq_worker_overflow",
                 )
                 await log_ingestor._mark_analyzed(
-                    eid, error="pq_temporal_unavailable", status="fallback"
+                    eid, error="pq_worker_overflow", status="fallback", quality="shed",
                 )
             except Exception as fe:
-                logger.warning(f"[AuditPQ] fallback for #{eid} failed: {fe}")
+                logger.warning(f"[AuditPQ] worker submit for #{eid} failed: {fe}")
         # 偶尔清理幽灵成员
         if n == 0:
             await audit_pq.purge_stale()
         return n
+
+    async def _reenqueue_pq(self, job: dict) -> None:
+        """任务放回 PQ(Temporal shed 的 P0 agent / worker 背压), 保留分档 TTL。"""
+        from audit_pq import audit_pq
+        from audit_triage import pq_ttl_for_tier
+        tier = str(job.get("tier") or "P1")
+        await audit_pq.enqueue(
+            event_id=int(job.get("event_id") or 0),
+            session_id=str(job.get("session_id") or ""),
+            log_data=dict(job.get("log_data") or {}),
+            anomaly_score=float(job.get("anomaly_score") or 0),
+            anomaly_reasons=list(job.get("anomaly_reasons") or []),
+            max_rounds=int(job.get("max_rounds") or 3),
+            priority=int(job.get("priority") or 50),
+            tier=tier,
+            ttl_s=int(pq_ttl_for_tier(tier) or 900),
+        )
 
     # ── 9. 卡住未分析事件运行时收口 (r6) ──
 
@@ -630,7 +719,16 @@ class Scheduler:
             client = None
 
         n = 0
+        try:
+            from audit_worker import audit_worker
+        except Exception:
+            audit_worker = None
         for e in rows:
+            if audit_worker is not None:
+                try:
+                    audit_worker.cancel(e.id)
+                except Exception:
+                    pass
             if client is not None:
                 try:
                     handle = client.get_workflow_handle(f"audit-{e.id}")
@@ -665,6 +763,100 @@ class Scheduler:
             except Exception:
                 pass
         return n
+
+    async def _audit_trail_flush_loop(self, db_factory):
+        """冲刷 audit_trail 离线缓冲,避免 session=None 记录永远停在内存。"""
+        while self._running:
+            try:
+                await asyncio.sleep(60)
+                async with db_factory() as session:
+                    from audit_trail import flush_fallback
+                    n = await flush_fallback(session)
+                    if n:
+                        logger.info("[audit_trail] scheduler flushed %s fallback rows", n)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("[audit_trail] scheduler flush failed: %s", e)
+
+    async def _tool_call_log_flush_loop(self, db_factory):
+        """冲刷 tool_call_log 离线缓冲（CallLogger 无事件循环或写库失败时入队）。"""
+        while self._running:
+            try:
+                await asyncio.sleep(60)
+                from mcp_guard.call_logger import flush_fallback
+                async with db_factory() as session:
+                    n = await flush_fallback(session)
+                    if n:
+                        logger.info("[tool_call_log] scheduler flushed %s fallback rows", n)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("[tool_call_log] scheduler flush failed: %s", e)
+
+    async def _selfplay_review_loop(self):
+        """周期审核 Self-Play candidate → shadow / dismissed,并到期 promote。"""
+        from config import settings
+        while self._running:
+            try:
+                interval = int(getattr(settings, "self_play_review_interval_s", 900) or 900)
+                await asyncio.sleep(max(60, interval))
+                if not getattr(settings, "self_play_review_enabled", True):
+                    continue
+                from self_play.reviewer import drain
+                batch = int(getattr(settings, "self_play_review_batch", 20) or 20)
+                result = await drain(limit=batch)
+                logger.info(
+                    "[SelfPlayReview] reviewed=%s shadowed=%s dismissed=%s promoted=%s",
+                    result.get("reviewed"), result.get("shadowed"),
+                    result.get("dismissed"), len(result.get("promoted") or []),
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("[SelfPlayReview] drain failed: %s", e)
+
+    async def _causal_learn_loop(self, db_factory):
+        """周期 PC+GES 结构学习。失败不影响 CEP / ingest。"""
+        from config import settings
+        while self._running:
+            try:
+                interval = int(getattr(settings, "causal_learn_interval_s", 900) or 900)
+                await asyncio.sleep(max(60, interval))
+                if not getattr(settings, "causal_enabled", True):
+                    continue
+                async with db_factory() as session:
+                    from causal_chain.store import learn_and_save
+                    result = await learn_and_save(session)
+                logger.info(
+                    "[Causal] ok=%s n=%s agree=%.2f reason=%s",
+                    result.get("ok"), result.get("n"),
+                    float(result.get("agree_rate") or 0),
+                    result.get("reason") or "",
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("[Causal] learn failed: %s", e)
+
+    async def _demo_traffic_loop(self, db_factory):
+        """可选心跳：默认关。打开后每 N 秒 ingest 1 条 _demo 仿真事件。"""
+        from config import settings
+        while self._running:
+            try:
+                enabled = bool(getattr(settings, "demo_traffic_enabled", False))
+                interval = int(getattr(settings, "demo_traffic_interval_s", 300) or 300)
+                await asyncio.sleep(60 if not enabled else max(60, interval))
+                if not getattr(settings, "demo_traffic_enabled", False):
+                    continue
+                async with db_factory() as session:
+                    from demo_traffic import inject_demo_event
+                    result = await inject_demo_event(session)
+                logger.info("[DemoTraffic] event_id=%s", result.get("event_id"))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("[DemoTraffic] ingest failed: %s", e)
 
 
 scheduler = Scheduler()

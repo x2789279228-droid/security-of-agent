@@ -7,7 +7,13 @@ lazy 连接 Temporal, 提供 start_audit_workflow 供触发边界调用(替换 a
 r6 修复:
   - execution_timeout 防止 workflow 永久 RUNNING
   - AUDIT_INFLIGHT_MAX(Redis) 准入,超限返回 "shed" 让调用方写 fallback
+
+P3 (2026-q3 D-A/D-B):
+  - inflight 只计 Agent 工作流: 上限 audit_llm_agent_inflight_max, llm_single 不占槽
+  - start_workflow 包 asyncio.wait_for(audit_temporal_start_timeout_s);
+    超时归还 inflight 并返回 False(调用方 async/llm_single 兜底), 不卡 worker 30s+
 """
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any, Dict, Optional, Union
@@ -15,6 +21,11 @@ from typing import Any, Dict, Optional, Union
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+try:
+    from temporal.workflows import AuditWorkflowInput
+except Exception:  # temporalio 未安装(测试/降级环境) — start 走 dict 参数
+    AuditWorkflowInput = None  # type: ignore[assignment,misc]
 
 _client = None
 _client_lock = None  # 惰性 asyncio.Lock
@@ -27,6 +38,15 @@ def set_redis(redis_client) -> None:
     """由 app/worker 启动时注入,用于跨进程 in-flight 计数。"""
     global _redis
     _redis = redis_client
+
+
+def _agent_inflight_limit() -> int:
+    """Agent-only in-flight 上限 (D-B): 只计 Agent 工作流, llm_single 不占槽。"""
+    return int(
+        getattr(settings, "audit_llm_agent_inflight_max", 0)
+        or getattr(settings, "audit_inflight_max", 0)
+        or 4
+    )
 
 
 def _reserved_p0_slots(limit: int) -> int:
@@ -42,11 +62,11 @@ def _reserved_p0_slots(limit: int) -> int:
 async def _inflight_try_acquire(*, tier: str = "P2") -> bool:
     """尝试占一个 in-flight 名额。
 
-    总上限 = audit_inflight_max。
+    总上限 = _agent_inflight_limit() (audit_llm_agent_inflight_max, D-B)。
     reserved_p0 槽优先留给 P0: 非 P0 最多占用 (limit - reserved)。
     P0 可占用任意空闲槽(含 reserved)。
     """
-    limit = int(getattr(settings, "audit_inflight_max", 0) or 0)
+    limit = _agent_inflight_limit()
     if limit <= 0 or _redis is None:
         return True
     is_p0 = str(tier or "").upper() == "P0"
@@ -77,7 +97,7 @@ async def _inflight_try_acquire(*, tier: str = "P2") -> bool:
 
 async def inflight_release(*, tier: str = "") -> None:
     """workflow/activity 结束或 shed 时归还名额。"""
-    if _redis is None or int(getattr(settings, "audit_inflight_max", 0) or 0) <= 0:
+    if _redis is None or _agent_inflight_limit() <= 0:
         return
     try:
         n = await _redis.decr(_INFLIGHT_KEY)
@@ -107,12 +127,12 @@ async def pop_workflow_tier(event_id: int) -> str:
 
 
 async def inflight_stats() -> dict:
+    limit = _agent_inflight_limit()
     if _redis is None:
-        return {"total": 0, "p0": 0, "limit": int(getattr(settings, "audit_inflight_max", 0) or 0)}
+        return {"total": 0, "p0": 0, "limit": limit}
     try:
         total = int(await _redis.get(_INFLIGHT_KEY) or 0)
         p0 = int(await _redis.get(_INFLIGHT_P0_KEY) or 0)
-        limit = int(getattr(settings, "audit_inflight_max", 0) or 0)
         return {
             "total": total,
             "p0": p0,
@@ -131,7 +151,6 @@ async def get_client():
     if _client is not None:
         return _client
     if _client_lock is None:
-        import asyncio
         _client_lock = asyncio.Lock()
     async with _client_lock:
         if _client is not None:
@@ -172,26 +191,41 @@ async def start_audit_workflow(
     if not await _inflight_try_acquire(tier=_tier):
         logger.warning(
             f"[Temporal] shed event #{event_id} tier={_tier}: "
-            f"inflight>={settings.audit_inflight_max}"
+            f"inflight>={_agent_inflight_limit()} (agent slots full)"
         )
         return "shed"
     try:
-        from temporal.workflows import AuditWorkflowInput
-        inp = AuditWorkflowInput(
-            session_id=session_id,
-            event_id=event_id,
-            log_data=log_data,
-            anomaly_score=float(anomaly_score or 0.0),
-            anomaly_reasons=list(anomaly_reasons or []),
-            max_rounds=int(max_rounds or 3),
-        )
+        if AuditWorkflowInput is not None:
+            inp: Any = AuditWorkflowInput(
+                session_id=session_id,
+                event_id=event_id,
+                log_data=log_data,
+                anomaly_score=float(anomaly_score or 0.0),
+                anomaly_reasons=list(anomaly_reasons or []),
+                max_rounds=int(max_rounds or 3),
+            )
+        else:
+            # temporalio 缺失(测试/降级): 参数原样透传给注入的 client
+            inp = {
+                "session_id": session_id,
+                "event_id": event_id,
+                "log_data": log_data,
+                "anomaly_score": float(anomaly_score or 0.0),
+                "anomaly_reasons": list(anomaly_reasons or []),
+                "max_rounds": int(max_rounds or 3),
+            }
         exec_to = int(getattr(settings, "temporal_workflow_execution_timeout_s", 900) or 900)
-        await client.start_workflow(
-            "AuditPipelineWorkflow",
-            args=[inp],
-            id=f"audit-{event_id}",
-            task_queue=settings.temporal_task_queue,
-            execution_timeout=timedelta(seconds=max(120, exec_to)),
+        start_to = float(getattr(settings, "audit_temporal_start_timeout_s", 5.0) or 5.0)
+        # D-A: start 墙钟超时 — worker 不允许卡在 Temporal 任务分发 30s+
+        await asyncio.wait_for(
+            client.start_workflow(
+                "AuditPipelineWorkflow",
+                args=[inp],
+                id=f"audit-{event_id}",
+                task_queue=settings.temporal_task_queue,
+                execution_timeout=timedelta(seconds=max(120, exec_to)),
+            ),
+            timeout=start_to,
         )
         # 供 save_result 归还时区分 P0 槽
         try:
@@ -206,7 +240,58 @@ async def start_audit_workflow(
             f"tier={_tier} (rounds<={max_rounds})"
         )
         return True
+    except asyncio.TimeoutError:
+        # D-A: start 超时 → 立即归还槽位, 调用方走 async/llm_single 兜底
+        await inflight_release(tier=_tier)
+        try:
+            from metrics import inc_temporal_start_timeout
+            inc_temporal_start_timeout()
+        except Exception:
+            pass
+        logger.warning(
+            f"[Temporal] start_workflow timeout after {start_to}s "
+            f"(fallback async): audit-{event_id}"
+        )
+        return False
     except Exception as e:
         await inflight_release(tier=_tier)
         logger.warning(f"[Temporal] start_workflow failed (fallback async): {e}")
+        return False
+
+
+async def start_selfplay_workflow(cfg: dict) -> Union[bool, str]:
+    """启动红蓝自博弈 Workflow。失败返回 False 让调用方走 asyncio 兜底。"""
+    client = await get_client()
+    if client is None:
+        return False
+    match_id = str((cfg or {}).get("match_id") or "")
+    if not match_id:
+        return False
+    try:
+        from temporal.workflows import SelfPlayWorkflowInput
+        rounds = int((cfg or {}).get("rounds") or 8)
+        inp = SelfPlayWorkflowInput(
+            match_id=match_id,
+            rounds=rounds,
+            curriculum=bool((cfg or {}).get("curriculum", True)),
+            start_level=int((cfg or {}).get("start_level") or 0),
+            inject=bool((cfg or {}).get("inject")),
+            wait_audit=bool((cfg or {}).get("wait_audit")),
+            wait_audit_s=float((cfg or {}).get("wait_audit_s") or 8.0),
+            use_llm=bool((cfg or {}).get("use_llm")),
+            decoy_ratio=float((cfg or {}).get("decoy_ratio") or 0.0),
+            persist=bool((cfg or {}).get("persist", True)),
+            persist_kb=bool((cfg or {}).get("persist_kb")),
+        )
+        await client.start_workflow(
+            "SelfPlayWorkflow",
+            args=[inp],
+            id=f"selfplay-{match_id}",
+            task_queue=settings.temporal_task_queue,
+            execution_timeout=timedelta(seconds=max(120, rounds * 90)),
+        )
+        logger.info("[Temporal] started SelfPlayWorkflow selfplay-%s rounds=%s", match_id, rounds)
+        return True
+    except Exception as e:
+        logger.warning("[Temporal] start SelfPlayWorkflow failed (fallback async): %s", e)
         return False

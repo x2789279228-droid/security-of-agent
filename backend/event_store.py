@@ -284,6 +284,156 @@ class EventStore:
 
         return stored
 
+    async def store_batch(
+        self,
+        session: AsyncSession,
+        rows: list[tuple[dict, str, float, str]],
+    ) -> list[StoredEvent]:
+        """批量落库 (P1 事件驱动流水线 persist 阶段) — 一批一次 commit。
+
+        rows: list of (event_data, session_id, anomaly_score, correlation_id)
+        幂等性与 store() 一致: 已存在的 eventId 复用旧行不重复插入。
+
+        行为:
+          - 一次 SELECT(event_id IN ...) 找已存在行, 只 insert 新行, 一次 commit;
+          - IntegrityError(并发/批内重复 eventId) → rollback 后逐条回退 self.store(),
+            不丢已成功行 (store() 幂等, 重复 eventId 自然收敛到一行);
+          - 返回与 rows 等长同序的 StoredEvent 列表;
+          - inc_insert 只按真实 insert 条数计数; 每条结果写热缓存。
+
+        store() 本身保持逐条 commit 语义不变(既有单测依赖)。
+        """
+        if not rows:
+            return []
+
+        parsed = []          # 每行预处理信息, 与 rows 平行
+        eids = []
+        for event_data, session_id, anomaly_score, correlation_id in rows:
+            event_id = event_data.get("eventId", "") or None
+            eid = str(event_id) if event_id is not None else None
+            if eid:
+                eids.append(eid)
+            parsed.append({
+                "event_data": event_data,
+                "session_id": session_id,
+                "anomaly_score": anomaly_score,
+                "correlation_id": correlation_id,
+                "event_id": eid,
+                "event_type": event_data.get("event", event_data.get("type", "UNKNOWN")),
+                "severity": event_data.get("severity", "info"),
+            })
+
+        # 幂等检查: 一次查出本批已存在的 eventId → 旧行复用
+        existing_by_eid: dict[str, SecurityEvent] = {}
+        if eids:
+            result = await session.execute(
+                select(SecurityEvent).where(SecurityEvent.event_id.in_(eids))
+            )
+            for evt in result.scalars().all():
+                if evt.event_id is not None:
+                    existing_by_eid[str(evt.event_id)] = evt
+
+        new_evts = []
+        new_idx = []
+        for i, p in enumerate(parsed):
+            if p["event_id"] is not None and p["event_id"] in existing_by_eid:
+                continue  # 已存在 → 复用旧行, 不重复插入
+            evt = SecurityEvent(
+                event_id=p["event_id"],
+                session_id=p["session_id"],
+                event_type=p["event_type"],
+                severity=p["severity"],
+                src_ip=p["event_data"].get("src_ip", ""),
+                dst_ip=p["event_data"].get("dst_ip", ""),
+                protocol=p["event_data"].get("protocol", ""),
+                action=p["event_data"].get("action", ""),
+                message=p["event_data"].get("message", ""),
+                raw_data={
+                    **p["event_data"],
+                    "_anomaly_score": p["anomaly_score"],
+                    "_correlation_id": p["correlation_id"],
+                },
+                # 同步独立 anomaly_score 列 (与 store() 字段映射一致)
+                anomaly_score=p["anomaly_score"],
+                analyzed=False,
+            )
+            session.add(evt)
+            new_evts.append(evt)
+            new_idx.append(i)
+
+        if new_evts:
+            try:
+                await session.commit()  # ← 单事务, 一批一次 commit
+            except IntegrityError:
+                # 并发/批内重复 eventId → 回滚整批, 逐条回退 store() (幂等兜底)
+                await session.rollback()
+                logger.warning(
+                    f"[Idempotent] store_batch unique-constraint conflict "
+                    f"({len(rows)} rows) — falling back to per-item store()"
+                )
+                out = []
+                for event_data, session_id, anomaly_score, correlation_id in rows:
+                    out.append(await self.store(
+                        session, event_data, session_id,
+                        anomaly_score=anomaly_score,
+                        correlation_id=correlation_id,
+                    ))
+                return out
+            # 与 store() 一致: commit 后 refresh 填充 server/python 默认值
+            for evt in new_evts:
+                await session.refresh(evt)
+            # 真实 insert 条数才计数 (计数器语义与 store() 一致)
+            await self._maybe_inc_insert(len(new_evts))
+
+        results: list[StoredEvent] = []
+        for i, p in enumerate(parsed):
+            if i in new_idx:
+                evt = new_evts[new_idx.index(i)]
+                stored = StoredEvent(
+                    id=evt.id,
+                    session_id=evt.session_id,
+                    event_type=evt.event_type,
+                    severity=evt.severity,
+                    src_ip=evt.src_ip or "",
+                    dst_ip=evt.dst_ip or "",
+                    message=evt.message or "",
+                    raw_data=p["event_data"],
+                    anomaly_score=p["anomaly_score"],
+                    correlation_id=p["correlation_id"],
+                    created_at=evt.created_at.isoformat() if evt.created_at else "",
+                    analyzed=bool(evt.analyzed),
+                )
+                self._cache_put(evt.id, asdict(stored))
+            else:
+                db_evt = existing_by_eid[p["event_id"]]
+                if new_evts:
+                    # commit 后旧查询对象属性过期(async session) → 重建前 refresh
+                    await session.refresh(db_evt)
+                stored = self._to_stored(db_evt)
+                self._cache_put(stored.id, asdict(stored))
+            results.append(stored)
+
+        logger.info(
+            f"Stored batch {len(rows)} events "
+            f"(inserted={len(new_evts)}, idempotent={len(rows) - len(new_evts)}, "
+            f"commit=1)"
+        )
+        return results
+
+    async def _maybe_inc_insert(self, n: int) -> None:
+        """real-time approx counter (Redis; no-op when unavailable) — 真实 insert 计数。"""
+        if n <= 0:
+            return
+        try:
+            from stats_counter import inc_insert
+        except Exception:
+            return
+        for _ in range(n):
+            try:
+                await inc_insert()
+            except Exception:
+                pass
+
     async def get_by_upstream_id(
         self,
         session: AsyncSession,

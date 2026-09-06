@@ -26,7 +26,6 @@ async def audit_round(inp: dict) -> dict:
     anomaly_reasons, missed_threats, round_num, mode} → round dict"""
     from agents import decomposer, tool_builder, executor, reviewer
     from observability.pipeline_tracer import pipeline_tracer
-    from models import async_session as db_session
     from trace_hook import set_trace_context
 
     event_id = int(inp["event_id"])
@@ -38,7 +37,16 @@ async def audit_round(inp: dict) -> dict:
     round_num = int(inp.get("round_num", 1))
     mode = inp.get("mode", "full")
 
-    set_trace_context(caller="audit_pipeline", event_id=event_id, session_id=session_id)
+    set_trace_context(
+        caller="audit_pipeline", event_id=event_id, session_id=session_id,
+        round=round_num, log_data=log_data,
+    )
+    from observability.thought_events import (
+        emit_executor, emit_plan, emit_rag_chunks, emit_review, emit_signals, emit_tool_map,
+    )
+    thought_steps: list[dict] = []
+    if round_num <= 1:
+        thought_steps.extend(emit_signals(log_data, event_id=event_id, session_id=session_id, round_num=round_num))
 
     # 分层预算: 仅非 P0 在硬预算下 short-circuit; P0 保留最小 LLM hop
     from agents.llm_fallback import should_short_circuit_for_tier
@@ -75,6 +83,7 @@ async def audit_round(inp: dict) -> dict:
                 "final_summary": f"硬预算短路(tier={_tier}),非P0不占LLM槽",
             },
             "evidence": [],
+            "thought_steps": thought_steps,
         }
 
     # decompose 不需要 DB session; execute 需要 → 内部开 session
@@ -87,6 +96,9 @@ async def audit_round(inp: dict) -> dict:
             mode=mode,
             missed_threats=missed_threats,
         )
+    thought_steps.extend(emit_plan(
+        decomp_output, event_id=event_id, session_id=session_id, round_num=round_num,
+    ))
     depth = decomp_output.get("audit_depth", mode)
     sub_tasks = decomp_output["sub_tasks"]
 
@@ -94,32 +106,45 @@ async def audit_round(inp: dict) -> dict:
         logger.info(f"[Temporal-audit_round] event#{event_id} round{round_num}: no sub-tasks")
         return {"round": round_num, "mode": mode, "depth": depth, "sub_tasks": 0,
                 "tool_calls": 0, "audit": {}, "verdict": {}, "missed_threats": [],
-                "audit_full": None, "verdict_full": None, "evidence": []}
+                "audit_full": None, "verdict_full": None, "evidence": [],
+                "thought_steps": thought_steps}
 
     with pipeline_tracer.span("tool_builder", event_id=event_id, session_id=session_id):
         tool_calls = tool_builder.build(sub_tasks, session_id)
+    thought_steps.extend(emit_tool_map(
+        sub_tasks, tool_calls, event_id=event_id, session_id=session_id, round_num=round_num,
+    ))
 
-    async with db_session() as session:
-        with pipeline_tracer.span("executor", event_id=event_id, session_id=session_id):
-            audit_result = await executor.execute(
-                tool_calls=tool_calls,
-                session=session,
-                session_id=session_id,
-                raw_event=log_data,
-                depth=depth,
-            )
-        tool_data_text = "\n".join(
-            f"[{tr.tool}] {'OK' if tr.success else 'FAIL'}: "
-            f"{str(tr.data)[:200] if tr.data else tr.error}"
-            for tr in audit_result.tool_results
+    # Executor 内部自开短租 session; Reviewer 纯 LLM,不得空持连接。
+    with pipeline_tracer.span("executor", event_id=event_id, session_id=session_id):
+        audit_result = await executor.execute(
+            tool_calls=tool_calls,
+            session=None,
+            session_id=session_id,
+            raw_event=log_data,
+            depth=depth,
         )
-        with pipeline_tracer.span("reviewer", event_id=event_id, session_id=session_id):
-            verdict = await reviewer.review(
-                raw_event=log_data,
-                decomposer_output=decomp_output,
-                audit_result=audit_result,
-                tool_data_raw=tool_data_text,
-            )
+    thought_steps.extend(emit_rag_chunks(
+        audit_result, event_id=event_id, session_id=session_id, round_num=round_num,
+    ))
+    thought_steps.extend(emit_executor(
+        audit_result, event_id=event_id, session_id=session_id, round_num=round_num,
+    ))
+    tool_data_text = "\n".join(
+        f"[{tr.tool}] {'OK' if tr.success else 'FAIL'}: "
+        f"{str(tr.data)[:200] if tr.data else tr.error}"
+        for tr in audit_result.tool_results
+    )
+    with pipeline_tracer.span("reviewer", event_id=event_id, session_id=session_id):
+        verdict = await reviewer.review(
+            raw_event=log_data,
+            decomposer_output=decomp_output,
+            audit_result=audit_result,
+            tool_data_raw=tool_data_text,
+        )
+    thought_steps.extend(emit_review(
+        verdict, event_id=event_id, session_id=session_id, round_num=round_num,
+    ))
 
     missed = [
         {
@@ -147,6 +172,7 @@ async def audit_round(inp: dict) -> dict:
         "audit": audit_result.to_dict(),
         "verdict": verdict.to_dict(),
         "missed_threats": missed,
+        "hop_trace": list(hop_trace) if isinstance(hop_trace, list) else [],
         # 供 save_result 落库的完整字段(dict 可序列化)
         "audit_full": {
             "grounding_score": float(getattr(audit_result, "grounding_score", 1.0) or 1.0),
@@ -164,6 +190,7 @@ async def audit_round(inp: dict) -> dict:
             "final_summary": getattr(verdict, "final_summary", ""),
         },
         "evidence": audit_result.evidence,
+        "thought_steps": thought_steps,
     }
 
 
@@ -301,8 +328,12 @@ async def save_result(inp: dict) -> dict:
                 "threat_detected": r.get("audit", {}).get("threat_detected"),
                 "confidence": r.get("audit", {}).get("confidence"),
                 "missed_count": len(r.get("missed_threats", [])),
+                "hop_trace": r.get("hop_trace") or [],
             }
             for r in all_rounds
+        ],
+        "hop_trace": [
+            h for r in all_rounds for h in (r.get("hop_trace") or [])
         ],
         "final_verdict": final_verdict,
         "evidence_trail": all_evidence,
@@ -318,6 +349,28 @@ async def save_result(inp: dict) -> dict:
         },
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
+    thought_chain = []
+    for r in all_rounds:
+        thought_chain.extend(r.get("thought_steps") or [])
+    if thought_chain:
+        audit_payload["thought_chain"] = thought_chain
+    if merged.get("response_blocked"):
+        try:
+            from observability.thought_events import emit_response
+            blocked = emit_response(
+                {
+                    "event_id": event_id,
+                    "status": "blocked",
+                    "reason": "faithfulness / 否决闸阻止自动响应",
+                    "threat_type": merged.get("threat_type") or "",
+                    "confidence": merged.get("confidence", 0),
+                },
+                event_id=event_id,
+            )
+            if blocked:
+                audit_payload.setdefault("thought_chain", []).extend(blocked)
+        except Exception:
+            pass
 
     async with db_session() as session:
         db_evt = await session.get(SecurityEvent, event_id)
@@ -351,6 +404,7 @@ async def save_result(inp: dict) -> dict:
         "event_type": log_data.get("event", log_data.get("type", "UNKNOWN")),
         "threat_detected": merged.get("threat_detected", False),
         "confidence": merged.get("confidence", 0),
+        "thought_count": len(audit_payload.get("thought_chain") or []),
         "severity": merged.get("severity", "info"),
         "rounds": len(all_rounds),
         "duration_s": round(time.time() - (inp.get("t_start") or time.time()), 1),
@@ -405,6 +459,25 @@ async def trigger_response(inp: dict) -> dict:
             "stage": "response",
             "agent_id": "response",
         })
+        try:
+            from observability.thought_events import emit_response, merge_thought_into_raw
+            from models import SecurityEvent
+            resp_steps = emit_response(
+                {
+                    "event_id": event_id,
+                    "status": "triggered",
+                    "threat_type": threat_info.get("threat_type", ""),
+                    "confidence": threat_info.get("confidence", merged.get("confidence", 0)),
+                },
+                event_id=event_id, session_id=session_id,
+            )
+            async with db_session() as s:
+                db_evt = await s.get(SecurityEvent, event_id)
+                if db_evt and resp_steps:
+                    db_evt.raw_data = merge_thought_into_raw(db_evt.raw_data or {}, resp_steps)
+                    await s.commit()
+        except Exception:
+            pass
         return {"triggered": True}
     except Exception as e:
         logger.warning(f"[Temporal-response] failed for event#{event_id}: {e}")
@@ -440,8 +513,14 @@ async def cad_verify(inp: dict) -> dict:
 
             with pipeline_tracer.span("cad_verify", event_id=event_id, session_id=session_id):
                 cad_report = await cad_agent.audit_pipeline(session, event_id, audit_llm_data)
+            from observability.thought_events import emit_cad, merge_thought_into_raw
+            cad_steps = []
+            try:
+                cad_steps = emit_cad(cad_report, event_id=event_id, session_id=session_id)
+            except Exception:
+                cad_steps = []
             if db_evt:
-                db_evt.raw_data = {
+                raw = {
                     **(db_evt.raw_data or {}),
                     "_cad_audit": {
                         "penetrating_verification": cad_report["penetrating_verification"],
@@ -450,6 +529,7 @@ async def cad_verify(inp: dict) -> dict:
                         "duration_ms": cad_report["duration_ms"],
                     },
                 }
+                db_evt.raw_data = merge_thought_into_raw(raw, cad_steps)
                 await session.commit()
                 try:
                     from event_store import event_store
@@ -463,3 +543,25 @@ async def cad_verify(inp: dict) -> dict:
     except Exception as e:
         logger.warning(f"[Temporal-cad] failed for event#{event_id}: {e}")
         return {"circuit_tripped": False, "error": str(e)}
+
+
+# ── Red vs Blue Self-Play ──
+
+@activity.defn
+async def selfplay_init(cfg: dict) -> dict:
+    from self_play.orchestrator import orchestrator
+    from self_play.types import MatchConfig
+    return await orchestrator.init_match(MatchConfig.from_dict(cfg or {}))
+
+
+@activity.defn
+async def selfplay_round(state: dict) -> dict:
+    from self_play.orchestrator import orchestrator
+    return await orchestrator.play_round(state or {})
+
+
+@activity.defn
+async def selfplay_finalize(state: dict) -> dict:
+    from self_play.orchestrator import orchestrator
+    status = "stopped" if (state or {}).get("stopped") else "completed"
+    return await orchestrator.finalize(state or {}, status=status)

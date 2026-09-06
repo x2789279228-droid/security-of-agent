@@ -12,6 +12,18 @@ def test_is_llm_fallback_budget_json():
     assert reason == "budget_exhausted"
 
 
+def test_is_llm_fallback_429_retryable():
+    from agents.llm_fallback import is_retryable_rate_limit
+    text = json.dumps({
+        "error": "LLM rate-limited", "fallback": True,
+        "error_type": "rate_limited_429", "retryable": True,
+    })
+    ok, reason = is_llm_fallback(text)
+    assert ok is True
+    assert reason == "rate_limited_429"
+    assert is_retryable_rate_limit(text) is True
+
+
 def test_is_llm_fallback_call_failed():
     text = json.dumps({"error": "LLM调用失败", "fallback": True}, ensure_ascii=False)
     ok, reason = is_llm_fallback(text)

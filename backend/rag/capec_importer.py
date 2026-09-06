@@ -239,6 +239,7 @@ async def import_capec(
                 severity=severity,
                 tags=tags,
             )
+            from rag.lexical import build_search_lex
             for chunk_data in chunks:
                 chunk = KnowledgeChunk(
                     doc_id=chunk_data["doc_id"],
@@ -251,6 +252,7 @@ async def import_capec(
                     tags=tags,
                     embedding=None,  # 占位不由这里写入(None → 由后台回填按实际维度算)
                     token_count=chunk_data["token_count"],
+                    search_lex=build_search_lex(title, chunk_data["content"], threat_types),
                 )
                 session.add(chunk)
 

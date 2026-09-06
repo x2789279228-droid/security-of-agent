@@ -261,6 +261,8 @@ def extract_non_llm_signals(
                 data = r.get("data")
             if not success or not data:
                 continue
+            if str(tool).startswith("causal"):
+                continue
             if tool == "correlation.chains" and isinstance(data, list) and data:
                 signals.cep_chain = True
                 signals.reasons.append(f"cep_tool:{len(data)}")

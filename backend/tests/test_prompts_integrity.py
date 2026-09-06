@@ -167,6 +167,8 @@ _TEMPLATE_VARS: dict[str, dict] = {
     # ── rag ──
     "rag/evidence_verify": {"claim": "断言", "context": "上下文"},
     "rag/rerank": {"query": "q", "items_text": "items", "top_k": 5},
+    "rag/query_rewrite": {"query": "q"},
+    "rag/hyde": {"query": "q"},
     # ── security ──
     "security/data_security_classifier_user": {"m": "{}", "body_snippet": "b", "url": "u", "src_ip": "s",
                                                "dst_ip": "d", "rule_hit": "r", "response_size": 1,
@@ -187,6 +189,21 @@ _TEMPLATE_VARS: dict[str, dict] = {
     "security/zeroday_sandbox": {"sample_hash": "h", "verdict": "v", "score": 5.0,
                                  "behavior_summary": "b", "signatures": [], "process_str": "p",
                                  "network_str": "n", "techniques_str": "t"},
+    "security/red_plan": {
+        "level": 0, "coverage": "PORT_SCAN", "catalog": "[]",
+        "rag_hints": "(none)", "last_outcome": "blue_win",
+        "blue_view": "{}",
+    },
+    "security/blue_learn": {
+        "event_type": "SYN_ENUM", "severity": "medium", "protocol": "tcp",
+        "message": "x", "mitre_id": "T1046", "url": "",
+    },
+    "security/blue_review": {
+        "rule_id": "SP-1", "title": "t", "mitre_id": "T1046",
+        "attack_type": "SYN_ENUM", "severity": "medium",
+        "condition_mode": "or", "event_contains": ["SYN_ENUM"],
+        "message_contains": ["半开"], "gates": [],
+    },
     # ── tooling ──
     "tooling/post_mortem_review": {"title": "t", "case_number": "c", "threat_type": "th",
                                    "severity": "high", "timeline_text": "tl", "src_ips": [],

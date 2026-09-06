@@ -50,26 +50,143 @@ async def sigma_detect(req: SigmaDetectRequest, user: UserInfo = Depends(get_cur
 # ── MCP Guard 网关端点 ──
 
 @router.get("/guard/status")
-async def guard_status(user: UserInfo = Depends(get_current_user)):
-    """MCP Guard 网关状态"""
+async def guard_status(
+    user: UserInfo = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """MCP Guard 网关状态。recent_calls 优先读 PG，失败回退内存 ring。"""
     try:
         from mcp_guard import mcp_guard
         # 初始化失败时单例为 None (不抛 ImportError), 需显式判空
         if mcp_guard is None:
             return {"enabled": False, "error": "mcp_guard init failed (singleton is None)"}
+        recent = []
+        log = getattr(mcp_guard, "logger", None)
+        if log is not None:
+            try:
+                recent = await log.query(session, limit=20)
+            except Exception:
+                recent = log.recent(20)
+            if not recent:
+                recent = log.recent(20)
+        det = getattr(mcp_guard, "detector", None)
+        sig_stats = det.stats() if det is not None else {}
+        approvals = getattr(mcp_guard, "approvals", None)
         return {
             "enabled": settings.mcp_guard_enabled,
             "tools": mcp_guard.list_tools(),
-            "recent_calls": mcp_guard.logger.recent(20) if hasattr(mcp_guard, 'logger') else [],
+            "recent_calls": recent,
+            "call_log": log.stats() if log is not None else {},
+            "signature": {
+                "enabled": getattr(settings, "tool_signature_enabled", False),
+                "mode": getattr(settings, "tool_signature_mode", "confirm"),
+                "persist": getattr(settings, "tool_call_log_persist", True),
+                **sig_stats,
+                "recent_anomalies": det.recent_anomalies(5) if det is not None else [],
+            },
+            "approvals_pending": len(approvals.list_pending()) if approvals is not None else 0,
         }
     except ImportError:
         return {"enabled": False, "error": "mcp_guard module not available"}
+
+
+@router.get("/guard/calls")
+async def guard_calls(
+    limit: int = Query(50, ge=1, le=500),
+    source: str = Query(""),
+    tool_name: str = Query(""),
+    caller: str = Query(""),
+    persisted: bool = Query(True),
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(get_current_user),
+):
+    """工具调用审计。默认读 PG（跨重启）；persisted=false 只看本进程内存 ring。"""
+    try:
+        from mcp_guard import mcp_guard
+    except ImportError:
+        raise HTTPException(500, "mcp_guard module not available")
+    if mcp_guard is None or not hasattr(mcp_guard, "logger"):
+        raise HTTPException(500, "mcp_guard init failed (singleton is None)")
+    log = mcp_guard.logger
+    if persisted:
+        items = await log.query(
+            session, limit=limit, source=source, tool_name=tool_name, caller=caller,
+        )
+    else:
+        items = log.recent(limit)
+        if source:
+            items = [r for r in items if r.get("source") == source]
+        if tool_name:
+            items = [r for r in items if r.get("tool_name") == tool_name]
+        if caller:
+            items = [r for r in items if r.get("caller") == caller]
+    return {"items": items, "count": len(items), "persisted": persisted}
+
+
+@router.post("/guard/calls/flush")
+async def guard_calls_flush(
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """冲刷 tool_call_log 离线缓冲到 DB（DB 故障恢复后调用）。"""
+    from mcp_guard.call_logger import flush_fallback
+    n = await flush_fallback(session)
+    return {"flushed": n}
+
+
+def _require_detector():
+    try:
+        from mcp_guard import mcp_guard
+    except ImportError:
+        raise HTTPException(500, "mcp_guard module not available")
+    if mcp_guard is None or not hasattr(mcp_guard, "detector"):
+        raise HTTPException(500, "mcp_guard init failed (singleton is None)")
+    return mcp_guard.detector
+
+
+@router.get("/guard/signatures")
+async def guard_signatures(user: UserInfo = Depends(get_current_user)):
+    """当前进程内的 tool 行为指纹（PR2 内存；重启后需重新学习）。"""
+    det = _require_detector()
+    items = det.list_signatures()
+    return {"items": items, "count": len(items), "stats": det.stats()}
+
+
+@router.get("/guard/anomalies")
+async def guard_anomalies(
+    limit: int = Query(50, ge=1, le=200),
+    user: UserInfo = Depends(get_current_user),
+):
+    """最近的工具调用偏离告警（shadow 下只记录不拦截）。"""
+    det = _require_detector()
+    items = det.recent_anomalies(limit)
+    return {"items": items, "count": len(items), "stats": det.stats()}
+
+
+@router.get("/guard/approvals")
+async def guard_approvals(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    user: UserInfo = Depends(get_current_user),
+):
+    """MCP Guard 人工确认工单（policy 或行为签名 trigger）。"""
+    try:
+        from mcp_guard import mcp_guard
+    except ImportError:
+        raise HTTPException(500, "mcp_guard module not available")
+    if mcp_guard is None or not hasattr(mcp_guard, "approvals"):
+        raise HTTPException(500, "mcp_guard init failed (singleton is None)")
+    return mcp_guard.approvals.list_all(page=page, page_size=page_size)
 
 class GuardCallRequest(BaseModel):
     tool_name: str
     arguments: dict = {}
     user_role: str = "security_operator"
     reason: str = ""
+    caller: str = ""
+    session_id: str = ""
+    trace_id: str = ""
+    event_id: int = 0
 
 @router.post("/guard/call")
 async def guard_call(req: GuardCallRequest, user: UserInfo = Depends(get_current_user)):
@@ -88,6 +205,11 @@ async def guard_call(req: GuardCallRequest, user: UserInfo = Depends(get_current
                 arguments=req.arguments,
                 user_role=req.user_role,
                 reason=req.reason,
+                caller=req.caller or getattr(user, "username", "") or "human_api",
+                source="api",
+                session_id=req.session_id,
+                trace_id=req.trace_id,
+                event_id=req.event_id,
             )
         )
         return result
@@ -129,10 +251,25 @@ async def run_audit_llm_pipeline(
     await session.refresh(evt)
     event_id = evt.id
 
-    set_trace_context(caller="audit_pipeline", event_id=event_id, session_id=session_id)
+    set_trace_context(
+        caller="audit_pipeline", event_id=event_id, session_id=session_id,
+        log_data=req.event,
+    )
     try:
+        from observability.thought_events import (
+            attach_to_audit, emit_executor, emit_plan, emit_rag_chunks,
+            emit_review, emit_signals, emit_tool_map,
+        )
         # 异常检测
         anomaly_report = await ad.analyze(req.event)
+        log_data = {
+            **req.event,
+            "_anomaly": {
+                "score": anomaly_report.anomaly_score,
+                "reasons": anomaly_report.reasons,
+            },
+        }
+        emit_signals(log_data, event_id=event_id, session_id=session_id)
 
         # Decomposer
         decomp_output = await decomposer.decompose(
@@ -141,11 +278,13 @@ async def run_audit_llm_pipeline(
             anomaly_score=anomaly_report.anomaly_score,
             anomaly_reasons=anomaly_report.reasons,
         )
+        emit_plan(decomp_output, event_id=event_id, session_id=session_id)
 
         # Tool Builder
         tool_calls = tool_builder.build(
             decomp_output["sub_tasks"], session_id
         )
+        emit_tool_map(decomp_output["sub_tasks"], tool_calls, event_id=event_id, session_id=session_id)
 
         # Executor
         audit_result = await executor.execute(
@@ -155,6 +294,8 @@ async def run_audit_llm_pipeline(
             raw_event=req.event,
             depth=decomp_output["audit_depth"],
         )
+        emit_rag_chunks(audit_result, event_id=event_id, session_id=session_id)
+        emit_executor(audit_result, event_id=event_id, session_id=session_id)
 
         # Reviewer
         tool_data = "\n".join(
@@ -167,6 +308,7 @@ async def run_audit_llm_pipeline(
             audit_result=audit_result,
             tool_data_raw=tool_data,
         )
+        emit_review(verdict, event_id=event_id, session_id=session_id)
 
         # 回写审计结果到事件 (与自动流水线保持一致)
         db_evt = await session.get(SecurityEvent, event_id)
@@ -174,14 +316,15 @@ async def run_audit_llm_pipeline(
             db_evt.analyzed = True
             db_evt.raw_data = {
                 **(db_evt.raw_data or {}),
-                "_audit_llm": {
+                "_audit_llm": attach_to_audit({
                     "manual_run": True,
+                    "status": "completed",
                     "threat_detected": audit_result.threat_detected,
                     "confidence": audit_result.confidence,
                     "verdict": verdict.to_dict(),
                     "pipeline_duration_s": 0,
                     "completed_at": datetime.now(timezone.utc).isoformat(),
-                },
+                }, event_id),
             }
             await session.commit()
 

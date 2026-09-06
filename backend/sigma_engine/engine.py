@@ -87,59 +87,120 @@ class PySigmaDetector:
 
     # ── 加载与编译 ──
     def reload(self):
-        """重载 rules 目录(CRUD 写回 YAML 后调用)。"""
-        self._rules = []
-        self._compiled = []
-        self._field_index = set()
-        if self._conn:
-            try: self._conn.close()
-            except Exception: pass
-            self._conn = None
-        if PY_SIGMA_AVAILABLE:
+        """重载 rules 目录(CRUD 写回 YAML 后调用)。
+
+        先编到临时结构,成功后再替换;失败保留上一份编译,避免一条坏 yml 把 SIG-001..011 清掉。
+        """
+        if not PY_SIGMA_AVAILABLE:
+            return 0
+        try:
+            compiled, rules, field_index, conn = self._build_compiled()
+        except Exception as e:
+            logger.error(f"[Sigma/pySigma] reload failed: {e}")
+            if self._enforce:
+                raise
+            return len(self._compiled)
+        old_conn = self._conn
+        self._compiled = compiled
+        self._rules = rules
+        self._field_index = field_index
+        self._conn = conn
+        if old_conn is not None and old_conn is not conn:
             try:
-                return self._load_and_compile()
-            except Exception as e:
-                logger.error(f"[Sigma/pySigma] reload failed: {e}")
-        return 0
+                old_conn.close()
+            except Exception:
+                pass
+        return len(compiled)
 
     def _load_and_compile(self):
-        import pathlib
-        p = pathlib.Path(self.rules_dir)
-        if not p.exists() or not list(p.glob("*.yml")):
-            logger.warning(f"[Sigma/pySigma] no rules under {self.rules_dir}; using legacy fallback")
-            return
-        # 主规则 + 社区子集(rules_community_active, 仅 shadow 灰度) 一并加载
-        load_dirs = [str(p)]
-        active = os.path.join(os.path.dirname(self.rules_dir), "rules_community_active")
-        if os.path.isdir(active) and list(os.scandir(active)):
-            load_dirs.append(active)
-        col = SigmaCollection.load_ruleset(load_dirs, recursion_pattern="*.yml")
-        be = _BACKEND_FACTORY()
-        for rule in col.rules:
-            meta = self._rule_meta(rule)
-            try:
-                sql_list = be.convert_rule(rule)
-            except Exception as e:
-                logger.warning(f"[Sigma/pySigma] compile {meta['rule_id']} failed: {e}; skipped")
-                continue
-            sql = (sql_list[0] if isinstance(sql_list, list) and sql_list else str(sql_list))
-            sql = sql.replace("<TABLE_NAME>", self.TABLE)
-            # 收集 SQL 引用的字段名（反引号 / 裸标识符），供 detect 建表补齐列
-            for m in re.finditer(r"`([^`]+)`", sql):
-                self._field_index.add(m.group(1))
-            for m in re.finditer(r"(?i)(?:\bWHERE\b|\bAND\b|\bOR\b|\()\s*([A-Za-z_][\w.\-]*)\s*(?:=|LIKE|IN|!=|<>)", sql):
-                col = m.group(1)
-                if col.upper() not in {"SELECT", "FROM", "WHERE", "AND", "OR", "LIKE", "IN", "NOT", "NULL"}:
-                    self._field_index.add(col)
-            self._compiled.append((meta, sql))
-            self._rules.append(meta)
-        self._conn = sqlite3.connect(":memory:")
-        logger.info(f"[Sigma/pySigma] compiled {len(self._compiled)} rules from {self.rules_dir}")
+        compiled, rules, field_index, conn = self._build_compiled()
+        self._compiled = compiled
+        self._rules = rules
+        self._field_index = field_index
+        self._conn = conn
+        return len(compiled)
 
-    def _rule_meta(self, sigmarule: Any) -> dict:
+    def _rule_files(self) -> list:
+        import pathlib
+        files: list = []
+        p = pathlib.Path(self.rules_dir)
+        if p.exists():
+            files.extend(sorted(p.glob("*.yml")))
+        parent = os.path.dirname(self.rules_dir)
+        for extra in ("rules_community_active", "rules_selfplay_shadow"):
+            d = os.path.join(parent, extra)
+            if extra == "rules_selfplay_shadow":
+                try:
+                    from self_play.sigma_export import repair_selfplay_yaml
+                    n = repair_selfplay_yaml(d)
+                    if n:
+                        logger.info(f"[Sigma/pySigma] repaired {n} self-play YAML ids under {d}")
+                except Exception as e:
+                    logger.warning(f"[Sigma/pySigma] self-play YAML repair skipped: {e}")
+            if os.path.isdir(d):
+                files.extend(sorted(pathlib.Path(d).glob("*.yml")))
+        return files
+
+    def _build_compiled(self):
+        """按文件加载并编译。单文件失败只 skip,不拖垮整库。不改 self._compiled。"""
+        files = self._rule_files()
+        if not files:
+            logger.warning(f"[Sigma/pySigma] no rules under {self.rules_dir}; using legacy fallback")
+            return [], [], set(), None
+        compiled: list = []
+        rules: list = []
+        field_index: set = set()
+        be = _BACKEND_FACTORY()
+        for fp in files:
+            loaded = self._load_file(fp)
+            if not loaded:
+                continue
+            for rule in loaded:
+                meta = self._rule_meta(rule, fallback_n=len(compiled) + 1)
+                try:
+                    sql_list = be.convert_rule(rule)
+                except Exception as e:
+                    logger.warning(f"[Sigma/pySigma] compile {meta['rule_id']} failed: {e}; skipped")
+                    continue
+                sql = (sql_list[0] if isinstance(sql_list, list) and sql_list else str(sql_list))
+                sql = sql.replace("<TABLE_NAME>", self.TABLE)
+                for m in re.finditer(r"`([^`]+)`", sql):
+                    field_index.add(m.group(1))
+                for m in re.finditer(r"(?i)(?:\bWHERE\b|\bAND\b|\bOR\b|\()\s*([A-Za-z_][\w.\-]*)\s*(?:=|LIKE|IN|!=|<>)", sql):
+                    col_name = m.group(1)
+                    if col_name.upper() not in {"SELECT", "FROM", "WHERE", "AND", "OR", "LIKE", "IN", "NOT", "NULL"}:
+                        field_index.add(col_name)
+                compiled.append((meta, sql))
+                rules.append(meta)
+        conn = sqlite3.connect(":memory:") if compiled else None
+        logger.info(f"[Sigma/pySigma] compiled {len(compiled)} rules from {self.rules_dir}")
+        return compiled, rules, field_index, conn
+
+    def _load_file(self, fp) -> list:
+        try:
+            with open(fp, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except Exception as e:
+            logger.warning(f"[Sigma/pySigma] read {fp} failed: {e}; skipped")
+            return []
+        try:
+            col = SigmaCollection.from_yaml(text, collect_errors=True)
+        except Exception as e:
+            logger.warning(f"[Sigma/pySigma] parse {fp} failed: {e}; skipped")
+            return []
+        out = []
+        for rule in getattr(col, "rules", None) or []:
+            errs = [e for e in (getattr(rule, "errors", None) or []) if e]
+            if errs:
+                logger.warning(f"[Sigma/pySigma] skip {fp}: {errs[0]}")
+                continue
+            out.append(rule)
+        return out
+
+    def _rule_meta(self, sigmarule: Any, fallback_n: int = 1) -> dict:
         title = getattr(sigmarule, "title", "") or ""
         rid = _ext(sigmarule, "id") or getattr(getattr(sigmarule, "id", None) or None, "value", None) or \
-              f"SIG-{len(self._compiled) + 1:03d}"
+              f"SIG-{fallback_n:03d}"
         lvl = getattr(sigmarule, "level", None)
         lvl_str = getattr(lvl, "name", str(lvl)).lower() if lvl else "low"
         return {

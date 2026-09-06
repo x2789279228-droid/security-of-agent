@@ -20,6 +20,22 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+def hybrid_enabled() -> bool:
+    return bool(getattr(settings, "rag_hybrid_enabled", False))
+
+
+def hybrid_collection_name() -> str:
+    name = (getattr(settings, "rag_hybrid_collection", "") or "").strip()
+    return name or f"{settings.qdrant_collection}_v2"
+
+
+def _sparse_vector(indices: list, values: list):
+    from qdrant_client.http import models as m
+    if not indices or not values:
+        return None
+    return m.SparseVector(indices=[int(i) for i in indices], values=[float(v) for v in values])
+
+
 def chunk_point_id(chunk_id: str) -> str:
     """由 chunk_id 派生稳定 UUID point id (幂等 upsert/delete)"""
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"soc-knowledge-chunk:{chunk_id}"))
@@ -70,15 +86,29 @@ class QdrantStore:
         from qdrant_client.http import models as m
 
         def _ensure(client):
+            size = settings.qdrant_vector_size or settings.embedding_dim
             if not client.collection_exists(settings.qdrant_collection):
                 client.create_collection(
                     collection_name=settings.qdrant_collection,
                     vectors_config=m.VectorParams(
-                        size=settings.qdrant_vector_size or settings.embedding_dim,
+                        size=size,
                         distance=m.Distance.COSINE,
                     ),
                 )
                 logger.info(f"[Qdrant] 已创建 collection={settings.qdrant_collection}")
+            if hybrid_enabled():
+                v2 = hybrid_collection_name()
+                if not client.collection_exists(v2):
+                    client.create_collection(
+                        collection_name=v2,
+                        vectors_config={
+                            "dense": m.VectorParams(size=size, distance=m.Distance.COSINE),
+                        },
+                        sparse_vectors_config={
+                            "bm25": m.SparseVectorParams(modifier=m.Modifier.IDF),
+                        },
+                    )
+                    logger.info(f"[Qdrant] 已创建 hybrid collection={v2}")
             return True
 
         return await self._call(_ensure)
@@ -110,9 +140,26 @@ class QdrantStore:
         doc_id: int,
         vector: list,
         payload: Optional[dict] = None,
+        sparse_indices: Optional[list] = None,
+        sparse_values: Optional[list] = None,
     ) -> Optional[bool]:
         """写入/覆盖一个 knowledge chunk 的向量与过滤 payload。"""
         from qdrant_client.http import models as m
+
+        pl = {
+            "chunk_id": chunk_id,
+            "doc_id": doc_id,
+            **(payload or {}),
+        }
+        if sparse_indices is None and hybrid_enabled():
+            try:
+                from rag.lexical import encode_sparse
+                text = f"{pl.get('title','')} {pl.get('content','')}"
+                backend = getattr(settings, "rag_bm25_backend", "builtin")
+                sparse_indices, sparse_values = encode_sparse(text, backend=backend)
+            except Exception as e:
+                logger.debug(f"[Qdrant] sparse encode skipped: {e}")
+                sparse_indices, sparse_values = [], []
 
         def _upsert(client):
             client.upsert(
@@ -120,14 +167,26 @@ class QdrantStore:
                 points=[m.PointStruct(
                     id=chunk_point_id(chunk_id),
                     vector=vector,
-                    payload={
-                        "chunk_id": chunk_id,
-                        "doc_id": doc_id,
-                        **(payload or {}),
-                    },
+                    payload=pl,
                 )],
                 wait=True,
             )
+            if hybrid_enabled():
+                v2 = hybrid_collection_name()
+                if client.collection_exists(v2):
+                    named = {"dense": vector}
+                    sv = _sparse_vector(sparse_indices or [], sparse_values or [])
+                    if sv is not None:
+                        named["bm25"] = sv
+                    client.upsert(
+                        collection_name=v2,
+                        points=[m.PointStruct(
+                            id=chunk_point_id(chunk_id),
+                            vector=named,
+                            payload=pl,
+                        )],
+                        wait=True,
+                    )
             return True
 
         return await self._call(_upsert)
@@ -140,22 +199,48 @@ class QdrantStore:
         from qdrant_client.http import models as m
 
         def _batch(client):
+            dense_points = []
+            hybrid_points = []
+            for c in chunks:
+                pl = {
+                    "chunk_id": c["chunk_id"],
+                    "doc_id": c["doc_id"],
+                    **(c.get("payload") or {}),
+                }
+                dense_points.append(m.PointStruct(
+                    id=chunk_point_id(c["chunk_id"]),
+                    vector=c["vector"],
+                    payload=pl,
+                ))
+                if hybrid_enabled():
+                    named = {"dense": c["vector"]}
+                    si, sv = c.get("sparse_indices"), c.get("sparse_values")
+                    if not si:
+                        try:
+                            from rag.lexical import encode_sparse
+                            text = f"{pl.get('title','')} {pl.get('content','')}"
+                            si, sv = encode_sparse(
+                                text, backend=getattr(settings, "rag_bm25_backend", "builtin"),
+                            )
+                        except Exception:
+                            si, sv = [], []
+                    sparse = _sparse_vector(si or [], sv or [])
+                    if sparse is not None:
+                        named["bm25"] = sparse
+                    hybrid_points.append(m.PointStruct(
+                        id=chunk_point_id(c["chunk_id"]),
+                        vector=named,
+                        payload=pl,
+                    ))
             client.upsert(
                 collection_name=settings.qdrant_collection,
-                points=[
-                    m.PointStruct(
-                        id=chunk_point_id(c["chunk_id"]),
-                        vector=c["vector"],
-                        payload={
-                            "chunk_id": c["chunk_id"],
-                            "doc_id": c["doc_id"],
-                            **(c.get("payload") or {}),
-                        },
-                    )
-                    for c in chunks
-                ],
+                points=dense_points,
                 wait=True,
             )
+            if hybrid_points:
+                v2 = hybrid_collection_name()
+                if client.collection_exists(v2):
+                    client.upsert(collection_name=v2, points=hybrid_points, wait=True)
             return True
 
         return await self._call(_batch)
@@ -246,6 +331,138 @@ class QdrantStore:
             return out
 
         result = await self._call(_search)
+        return result if result is not None else []
+
+    def _filter(self, m, threat_type: str, severity: str, source: str):
+        must = []
+        if threat_type:
+            must.append(m.FieldCondition(key="threat_types", match=m.MatchValue(value=threat_type)))
+        if severity:
+            must.append(m.FieldCondition(key="severity", match=m.MatchValue(value=severity)))
+        if source:
+            must.append(m.FieldCondition(key="source", match=m.MatchValue(value=source)))
+        return m.Filter(must=must) if must else None
+
+    async def query_hybrid(
+        self,
+        dense_vector: list,
+        sparse_indices: list,
+        sparse_values: list,
+        *,
+        top_k: int = 5,
+        prefetch: int = 20,
+        threat_type: str = "",
+        severity: str = "",
+        source: str = "",
+        min_score: float = 0.0,
+    ) -> list[dict]:
+        """Dense + BM25 Prefetch → RRF。collection 未就绪时返回空，由调用方降级。"""
+        from qdrant_client.http import models as m
+
+        if not hybrid_enabled() or not dense_vector:
+            return []
+
+        def _hybrid(client):
+            v2 = hybrid_collection_name()
+            if not client.collection_exists(v2):
+                return []
+            qfilter = self._filter(m, threat_type, severity, source)
+            prefetch_n = max(int(prefetch or 20), int(top_k or 5))
+            sv = _sparse_vector(sparse_indices, sparse_values)
+            try:
+                from qdrant_client.http.models import Fusion, FusionQuery, Prefetch
+                pre = [
+                    Prefetch(
+                        query=dense_vector,
+                        using="dense",
+                        limit=prefetch_n,
+                        filter=qfilter,
+                    ),
+                ]
+                if sv is not None:
+                    pre.append(Prefetch(
+                        query=sv,
+                        using="bm25",
+                        limit=prefetch_n,
+                        filter=qfilter,
+                    ))
+                resp = client.query_points(
+                    collection_name=v2,
+                    prefetch=pre,
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=top_k,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                points = resp.points
+            except Exception as e:
+                logger.info(f"[Qdrant] native RRF 不可用, 双路查询后进程内融合: {e}")
+                dense_resp = client.query_points(
+                    collection_name=v2,
+                    query=dense_vector,
+                    using="dense",
+                    query_filter=qfilter,
+                    limit=prefetch_n,
+                    with_payload=True,
+                )
+                bm25_ids = []
+                sp_resp = None
+                if sv is not None:
+                    try:
+                        sp_resp = client.query_points(
+                            collection_name=v2,
+                            query=sv,
+                            using="bm25",
+                            query_filter=qfilter,
+                            limit=prefetch_n,
+                            with_payload=True,
+                        )
+                        bm25_ids = [
+                            (p.payload or {}).get("chunk_id", "") for p in sp_resp.points
+                        ]
+                    except Exception:
+                        bm25_ids = []
+                        sp_resp = None
+                dense_ids = [(p.payload or {}).get("chunk_id", "") for p in dense_resp.points]
+                from rag.lexical import rrf_fuse
+                fused = rrf_fuse(
+                    {"dense": dense_ids, "bm25": bm25_ids},
+                    k=int(getattr(settings, "rag_rrf_k", 60) or 60),
+                )
+                by_id = {}
+                extra_pts = list(getattr(sp_resp, "points", []) or []) if sv is not None else []
+                for p in list(dense_resp.points) + extra_pts:
+                    cid = (p.payload or {}).get("chunk_id", "")
+                    if cid and cid not in by_id:
+                        by_id[cid] = p
+                points = []
+                for row in fused[:top_k]:
+                    p = by_id.get(row["id"])
+                    if p is not None:
+                        p._rrf = row  # type: ignore[attr-defined]
+                        points.append(p)
+            out = []
+            for p in points:
+                pl = p.payload or {}
+                score = round(float(getattr(p, "_rrf", {}).get("rrf_score", p.score) if hasattr(p, "_rrf") else p.score), 4)
+                if min_score and score < min_score and not hasattr(p, "_rrf"):
+                    continue
+                extra = getattr(p, "_rrf", None)
+                item = {
+                    "chunk_id": pl.get("chunk_id", ""),
+                    "doc_id": pl.get("doc_id"),
+                    "score": score,
+                    "rrf_score": extra.get("rrf_score") if extra else score,
+                    "payload": pl,
+                    "strategy": "rrf",
+                }
+                if extra:
+                    item["dense_rank"] = (extra.get("ranks") or {}).get("dense")
+                    item["bm25_rank"] = (extra.get("ranks") or {}).get("bm25")
+                out.append(item)
+            return out
+
+        result = await self._call(_hybrid)
         return result if result is not None else []
 
     async def count(self) -> Optional[int]:

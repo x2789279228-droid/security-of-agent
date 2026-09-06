@@ -5,7 +5,7 @@
 职责:
   - 应用生命周期管理 (lifespan: 初始化 / 关闭)
   - 中间件注册 (CORS / 速率限制)
-  - 路由挂载 (13 个业务域 Router)
+  - 路由挂载 (15 个业务域 Router)
 
 所有 API 端点已拆分到 routers/ 子模块，本文件不再定义端点。
 """
@@ -191,6 +191,12 @@ async def lifespan(app: FastAPI):
     # Sigma 检测引擎
     from sigma_detector import sigma_detector
     logger.info(f"Sigma detector: {sigma_detector.stats()['rules_count']} rules loaded")
+    try:
+        from self_play.reviewer import seed_global_overlay
+        n = await seed_global_overlay()
+        logger.info(f"Self-Play overlay seeded {n} shadow/promoted rules")
+    except Exception as e:
+        logger.warning(f"Self-Play overlay seed skipped: {e}")
 
     # ── NDR 模块初始化（按配置按需启用） ──
     if settings.capture_enabled:
@@ -286,6 +292,13 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("HTTP 直连模式: 设置 SHARED_MEMORY_KAFKA_ENABLED=true 启用 Kafka")
 
+    # 有界审计 worker(取代无界 create_task)
+    try:
+        from audit_worker import audit_worker
+        await audit_worker.start()
+    except Exception as e:
+        logger.warning(f"AuditWorkerPool start failed: {e}")
+
     # 启动定时调度器
     await scheduler.start(async_session)
     logger.info("Scheduler started")
@@ -339,6 +352,11 @@ async def lifespan(app: FastAPI):
         await kafka_consumer_manager.stop()
         await kafka_producer.stop()
 
+    try:
+        from audit_worker import audit_worker
+        await audit_worker.stop()
+    except Exception:
+        pass
     await scheduler.stop()
     await summary.close()
     await embedder.close()
@@ -502,7 +520,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
 
 # ════════════════════════════════════════════
-# 路由挂载 — 13 个业务域 Router
+# 路由挂载 — 14 个业务域 Router
 # ════════════════════════════════════════════
 
 from routers.auth import router as auth_router
@@ -519,6 +537,8 @@ from routers.ndr import router as ndr_router
 from routers.edr_intel import router as edr_intel_router
 from routers.ops import router as ops_router
 from routers.capabilities import router as capabilities_router
+from routers.self_play import router as self_play_router
+from routers.causal import router as causal_router
 
 app.include_router(auth_router)
 app.include_router(sources_router)
@@ -534,8 +554,10 @@ app.include_router(ndr_router)
 app.include_router(capabilities_router)
 app.include_router(edr_intel_router)
 app.include_router(ops_router)
+app.include_router(self_play_router)
+app.include_router(causal_router)
 
-logger.info(f"Mounted 13 routers — {len(app.routes)} routes total")
+logger.info(f"Mounted 15 routers — {len(app.routes)} routes total")
 
 # ── OpenTelemetry 标准 trace (→ otel-collector → Tempo) ──
 try:

@@ -29,7 +29,9 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 RUN mkdir -p /tmp/ssh-keys /tmp/ssh && chmod 700 /tmp/ssh-keys /tmp/ssh
 # L2: 运行时策略目录（compose 可挂 volume；entrypoint 从镜像种子补齐）
 RUN mkdir -p /app/response_engine/policies /data/response_policies \
-    && chmod -R a+rwX /app/response_engine/policies /data/response_policies
+        /app/sigma_engine/rules_selfplay_shadow \
+    && chmod -R a+rwX /app/response_engine/policies /data/response_policies \
+        /app/sigma_engine/rules_selfplay_shadow
 RUN chown -R appuser:appgroup /app /data/response_policies
 
 EXPOSE 8000

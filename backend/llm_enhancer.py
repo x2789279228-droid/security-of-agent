@@ -2,7 +2,7 @@
 LLM 增强器 (LLM Enhancer) — P0.S 共享基础设施
 
 三大 LLM 增强模块 (流量/钓鱼/数据安全) 共用的:
-  1. 并发限制 (保护 LLM API,默认 5 并发)
+  1. 并发限制 (与 Audit 共用 llm_limiter / llm_global_concurrency)
   2. 模块日预算分桶 (任一超限降级,不挤占其它模块)
   3. 缓存命中 (除 summary.llm 自身 10min 缓存外的业务级去重)
   4. 超时降级 (默认 15s,拒绝 LLM 卡死)
@@ -11,7 +11,7 @@ LLM 增强器 (LLM Enhancer) — P0.S 共享基础设施
 
 性能红线:
   - 主路径 0 等待 (调用方走 asyncio.create_task)
-  - LLM API 并发 ≤ settings.llm_enhancer_concurrency
+  - LLM API 并发 ≤ settings.llm_global_concurrency
   - 重复输入命中缓存 < 1ms
   - 失败返回 None,调用方视为无 LLM 增强
 
@@ -50,15 +50,7 @@ _BIZ_CACHE_MAX = 2000
 _MODULE_BUDGET: dict[str, dict] = {}
 
 
-# ── 共享并发信号量 (延迟初始化,避免在无 event loop 的导入期报错) ──
-_SEMAPHORE: Optional[asyncio.Semaphore] = None
-
-
-def _get_semaphore() -> asyncio.Semaphore:
-    global _SEMAPHORE
-    if _SEMAPHORE is None:
-        _SEMAPHORE = asyncio.Semaphore(settings.llm_enhancer_concurrency)
-    return _SEMAPHORE
+# LLM 并发并入 llm_limiter (LLMClient.chat); 此处不再维护私有 Semaphore。
 
 
 def _today_str() -> str:
@@ -229,25 +221,21 @@ async def enhance(
     if not _check_and_consume_budget(module, budget_cost_yuan):
         return None
 
-    # 4. 信号量限流 + 超时 + 异常吃掉
-    sem = _get_semaphore()
+    # 4. 超时 + 异常吃掉。并发由 LLMClient.chat → llm_limiter 全局闸。
     try:
-        async with sem:
-            async with asyncio.timeout(timeout_sec):
-                from summary_compression import summary
-                raw = await summary.llm.chat(prompt_messages, temperature=temperature)
-                parsed = _safe_parse_json(raw)
-                if parsed is not None:
-                    if parsed.get("fallback"):
-                        # 预算耗尽/未配置等降级响应:不得冒充业务结论写入业务缓存,
-                        # 也不作为有效结果返回调用方(与超时/异常同语义 → None)
-                        logger.warning(
-                            f"[LlmEnhancer:{module}] LLM returned fallback payload "
-                            f"({parsed.get('error', 'unknown')}), discarding"
-                        )
-                        return None
-                    _biz_cache_set(biz_key, parsed)
-                return parsed
+        async with asyncio.timeout(timeout_sec):
+            from summary_compression import summary
+            raw = await summary.llm.chat(prompt_messages, temperature=temperature)
+            parsed = _safe_parse_json(raw)
+            if parsed is not None:
+                if parsed.get("fallback"):
+                    logger.warning(
+                        f"[LlmEnhancer:{module}] LLM returned fallback payload "
+                        f"({parsed.get('error', 'unknown')}), discarding"
+                    )
+                    return None
+                _biz_cache_set(biz_key, parsed)
+            return parsed
     except asyncio.TimeoutError:
         logger.warning(f"[LlmEnhancer:{module}] timeout {timeout_sec}s")
         _release_budget_on_failure(module, budget_cost_yuan)

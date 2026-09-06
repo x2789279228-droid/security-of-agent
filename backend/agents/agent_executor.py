@@ -41,8 +41,8 @@ class Executor:
     async def execute(
         self,
         tool_calls: list[ToolCall],
-        session: AsyncSession,
-        session_id: str,
+        session: Optional[AsyncSession] = None,
+        session_id: str = "",
         raw_event: dict = None,
         depth: str = "",
     ) -> AuditResult:
@@ -198,13 +198,17 @@ class Executor:
 
         async def execute_one(tc: ToolCall) -> ToolResult:
             t_start = time.time()
+            log_args = {
+                k: v for k, v in dict(tc.args or {}).items()
+                if k != "session" and not str(k).startswith("_")
+            }
             try:
                 async with db_session() as s:
                     args = dict(tc.args)
                     args["session"] = s
                     data = await tool_registry.execute(tc.tool, **args)
                 duration = (time.time() - t_start) * 1000
-                return ToolResult(
+                result = ToolResult(
                     call_id=tc.call_id, task_id=tc.task_id,
                     tool=tc.tool, success=True, data=data,
                     duration_ms=round(duration, 1),
@@ -212,11 +216,13 @@ class Executor:
             except Exception as e:
                 duration = (time.time() - t_start) * 1000
                 logger.warning(f"Tool {tc.tool} ({tc.call_id}) failed: {e}")
-                return ToolResult(
+                result = ToolResult(
                     call_id=tc.call_id, task_id=tc.task_id,
                     tool=tc.tool, success=False, error=str(e),
                     duration_ms=round(duration, 1),
                 )
+            self._emit_tool_telemetry(tc, result, log_args)
+            return result
 
         # return_exceptions=True：任何意外异常都不拖垮整批工具调用，
         # 与 _audit_chunks_parallel 的写法保持一致
@@ -227,13 +233,38 @@ class Executor:
         for tc, r in zip(tool_calls, raw_results):
             if isinstance(r, Exception):
                 logger.warning(f"Tool {tc.tool} ({tc.call_id}) crashed: {r}")
-                finalized.append(ToolResult(
+                crashed = ToolResult(
                     call_id=tc.call_id, task_id=tc.task_id,
                     tool=tc.tool, success=False, error=str(r),
-                ))
+                )
+                self._emit_tool_telemetry(tc, crashed, {
+                    k: v for k, v in dict(tc.args or {}).items()
+                    if k != "session" and not str(k).startswith("_")
+                })
+                finalized.append(crashed)
             else:
                 finalized.append(r)
         return finalized
+
+    @staticmethod
+    def _emit_tool_telemetry(tc: ToolCall, result: ToolResult, log_args: dict) -> None:
+        """链 C：调查工具调用打进 MCP Guard logger/检测器。失败不阻断执行。"""
+        try:
+            from mcp_guard.telemetry import ingest_tool_call
+            ingest_tool_call(
+                tool_name=tc.tool,
+                arguments=log_args,
+                caller="agent_executor",
+                source="audit_llm",
+                caller_role="system",
+                decision="allow",
+                reason=tc.task_id or "",
+                exec_status="success" if result.success else "error",
+                exec_result={"error": result.error} if (not result.success and result.error) else None,
+                duration_ms=result.duration_ms,
+            )
+        except Exception as e:
+            logger.warning("executor telemetry failed: %s", e)
 
     @staticmethod
     def _normalize_event(item: dict) -> dict | None:

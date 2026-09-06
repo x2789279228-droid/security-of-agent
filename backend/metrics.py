@@ -14,7 +14,7 @@ import logging
 import time
 
 from fastapi import Request, Response
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,39 @@ AUDIT_PQ_DEQUEUE = Counter(
 AUDIT_LANE_ADMIT = Counter(
     "soc_audit_lane_admit_total", "审计车道准入", ["lane", "tier"]
 )
+AUDIT_COMPLETE = Counter(
+    "soc_audit_complete_total", "审计完成(按质量/档位)", ["quality", "tier"]
+)
+AUDIT_CACHE_HIT = Counter(
+    "soc_audit_cache_hit_total", "审计结论缓存命中计数"
+)
+TEMPORAL_START_TIMEOUT = Counter(
+    "soc_audit_temporal_start_timeout_total", "Temporal start_workflow 墙钟超时计数"
+)
+LLM_429 = Counter("soc_llm_429_total", "LLM HTTP 429")
+LLM_INFLIGHT = Gauge("soc_llm_inflight", "当前占用的全局 LLM 槽")
+LLM_WAITERS = Gauge("soc_llm_waiters", "等待全局 LLM 槽的协程数")
+AUDIT_INFLIGHT = Gauge("soc_audit_inflight", "正在执行的审计 worker 数")
+AUDIT_QUEUE_DEPTH = Gauge("soc_audit_queue_depth", "内存审计队列深度")
+AUDIT_WORKERS = Gauge("soc_audit_worker_busy", "配置的审计 worker 数")
+DB_POOL_CHECKEDOUT = Gauge("soc_db_pool_checkedout", "DB 池已借出连接", ["pool"])
+EVENTBUS_SUBSCRIBERS = Gauge("soc_eventbus_subscribers", "SSE 订阅者数")
+EVENTBUS_DROPS = Counter("soc_eventbus_drops_total", "SSE 慢消费者丢弃的事件")
+
+# ── P2 接入管道指标 (网关 / 审计不丢 / 阶段耗时) ──
+AUDIT_SHED = Counter(
+    "soc_audit_shed_total", "审计 shed/overflow/deferred 计数(按档位与原因)",
+    ["tier", "reason"],
+)
+INGEST_STAGE_SECONDS = Histogram(
+    "soc_ingest_stage_seconds", "Ingest 各阶段耗时 (秒, stage=detect|persist|dispatch)",
+    ["stage"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
+)
+INGEST_DETECTOR_ERRORS = Counter(
+    "soc_ingest_detector_errors_total", "检测器错误计数(按检测器)",
+    ["detector"],
+)
 
 
 def inc_audit_pq_enqueue(tier: str = "?") -> None:
@@ -70,6 +103,102 @@ def inc_audit_pq_dequeue(tier: str = "?") -> None:
 def inc_audit_lane_admit(lane: str = "?", tier: str = "?") -> None:
     try:
         AUDIT_LANE_ADMIT.labels(lane=lane or "?", tier=tier or "?").inc()
+    except Exception:
+        pass
+
+
+def inc_audit_cache_hit() -> None:
+    try:
+        AUDIT_CACHE_HIT.inc()
+    except Exception:
+        pass
+
+
+def inc_temporal_start_timeout() -> None:
+    try:
+        TEMPORAL_START_TIMEOUT.inc()
+    except Exception:
+        pass
+
+
+def inc_audit_complete(quality: str = "llm", tier: str = "?") -> None:
+    try:
+        AUDIT_COMPLETE.labels(quality=quality or "unknown", tier=tier or "?").inc()
+    except Exception:
+        pass
+
+
+def inc_llm_429() -> None:
+    try:
+        LLM_429.inc()
+    except Exception:
+        pass
+
+
+def set_llm_inflight(used: int = 0, waiters: int = 0) -> None:
+    try:
+        LLM_INFLIGHT.set(int(used or 0))
+        LLM_WAITERS.set(int(waiters or 0))
+    except Exception:
+        pass
+
+
+def set_audit_runtime(inflight: int = 0, queue_depth: int = 0, workers: int = 0) -> None:
+    try:
+        AUDIT_INFLIGHT.set(int(inflight or 0))
+        AUDIT_QUEUE_DEPTH.set(int(queue_depth or 0))
+        AUDIT_WORKERS.set(int(workers or 0))
+    except Exception:
+        pass
+
+
+def inc_eventbus_drop(n: int = 1) -> None:
+    try:
+        EVENTBUS_DROPS.inc(max(1, int(n)))
+    except Exception:
+        pass
+
+
+def inc_audit_shed(tier: str = "?", reason: str = "?") -> None:
+    """队列满时的处置原因: memory_full / pq_ok / pq_fail / kafka_overflow / local_deque"""
+    try:
+        AUDIT_SHED.labels(tier=tier or "?", reason=reason or "?").inc()
+    except Exception:
+        pass
+
+
+def observe_ingest_stage(stage: str, seconds: float) -> None:
+    """记录 ingest 阶段耗时 (detect / persist / dispatch)"""
+    try:
+        INGEST_STAGE_SECONDS.labels(stage=stage or "?").observe(
+            max(0.0, float(seconds or 0.0)))
+    except Exception:
+        pass
+
+
+def inc_detector_error(detector: str = "?") -> None:
+    try:
+        INGEST_DETECTOR_ERRORS.labels(detector=detector or "?").inc()
+    except Exception:
+        pass
+
+
+def set_eventbus_subscribers(n: int = 0) -> None:
+    try:
+        EVENTBUS_SUBSCRIBERS.set(int(n or 0))
+    except Exception:
+        pass
+
+
+def refresh_db_pool_gauges() -> None:
+    try:
+        from models import engine_bg, engine_oltp
+        for name, eng in (("oltp", engine_oltp), ("bg", engine_bg)):
+            pool = getattr(getattr(eng, "sync_engine", None), "pool", None)
+            if pool is None:
+                continue
+            checked = getattr(pool, "checkedout", lambda: 0)()
+            DB_POOL_CHECKEDOUT.labels(pool=name).set(int(checked or 0))
     except Exception:
         pass
 
@@ -147,6 +276,15 @@ def inc_kafka_consumed(topic: str) -> None:
 
 async def metrics_endpoint(request: Request) -> Response:
     """GET /metrics — Prometheus 文本格式"""
+    try:
+        refresh_db_pool_gauges()
+    except Exception:
+        pass
+    try:
+        from event_bus import event_bus
+        set_eventbus_subscribers(event_bus.subscriber_count)
+    except Exception:
+        pass
     return Response(
         content=generate_latest(),
         media_type=CONTENT_TYPE_LATEST,

@@ -39,6 +39,7 @@ METRIC_KEYS = [
     "order_count",        # 工单总数
     "automation_rate",    # 自动化处置率（无需人工干预的处置比例）
     "grounding_pass_rate", # Grounding 验证通过率
+    "mttrc",              # 标出因果根因的平均时长(小时); 无根因记录则为 0
 ]
 
 
@@ -77,6 +78,39 @@ class KpiCalculator:
                 if delta >= 0:
                     total_hours += delta
         return round(total_hours / len(rows), 4) if rows else 0.0
+
+    async def compute_mttrc(
+        self, session: AsyncSession, *,
+        start: datetime, end: datetime,
+    ) -> float:
+        """平均因果根因定位时间(小时) = avg(metadata.causal_rooted_at - created_at)。
+
+        不替换 MTTR(closed_at - created_at)。无 causal_rooted_at 的案例不计入。
+        """
+        stmt = select(SecurityCase.created_at, SecurityCase.metadata_).where(and_(
+            SecurityCase.created_at >= start,
+            SecurityCase.created_at < end,
+        ))
+        rows = (await session.execute(stmt)).all()
+        hours = []
+        for created_at, meta in rows:
+            if not created_at or not isinstance(meta, dict):
+                continue
+            raw = meta.get("causal_rooted_at")
+            if not raw:
+                continue
+            try:
+                rooted = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if rooted.tzinfo is None:
+                rooted = rooted.replace(tzinfo=timezone.utc)
+            delta = (rooted - created_at).total_seconds() / 3600.0
+            if delta >= 0:
+                hours.append(delta)
+        if not hours:
+            return 0.0
+        return round(sum(hours) / len(hours), 4)
 
     async def compute_mttd(
         self, session: AsyncSession, *,
@@ -333,6 +367,7 @@ class KpiCalculator:
         order_count = await self.compute_order_count(session, start=start, end=end)
         automation_rate = await self.compute_automation_rate(session, start=start, end=end)
         grounding_pass_rate = await self.compute_grounding_pass_rate(session, start=start, end=end)
+        mttrc = await self.compute_mttrc(session, start=start, end=end)
 
         agg_metrics: list[tuple[str, float, dict]] = [
             ("mttd", float(mttd or 0), {}),
@@ -346,6 +381,7 @@ class KpiCalculator:
             ("order_count", float(order_count), {}),
             ("automation_rate", float(automation_rate), {}),
             ("grounding_pass_rate", float(grounding_pass_rate), {}),
+            ("mttrc", float(mttrc or 0), {}),
         ]
 
         # 按 priority 切分（critical / high / medium / low）
@@ -396,6 +432,7 @@ class KpiCalculator:
                 "fp_rate": fp_rate,
                 "automation_rate": automation_rate,
                 "grounding_pass_rate": grounding_pass_rate,
+                "mttrc_hours": float(mttrc or 0),
             },
         }
 

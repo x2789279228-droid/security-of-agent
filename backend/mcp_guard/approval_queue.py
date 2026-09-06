@@ -30,6 +30,9 @@ class ApprovalQueue:
         user_role: str,
         reason: str,
         decision_reason: str,
+        trigger: str = "policy",
+        signature_score=None,
+        signature_reasons=None,
     ) -> dict:
         """创建待审批工单。
 
@@ -50,6 +53,9 @@ class ApprovalQueue:
             "user_role": user_role,
             "request_reason": reason,
             "decision_reason": decision_reason,
+            "trigger": trigger or "policy",
+            "signature_score": signature_score,
+            "signature_reasons": list(signature_reasons or []),
             "status": "pending",
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "decided_at": None,

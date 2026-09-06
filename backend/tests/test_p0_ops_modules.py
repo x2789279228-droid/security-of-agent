@@ -273,15 +273,40 @@ class TestAuditTrail:
                 assert actions == {"asset.create", "asset.update"}
         _run(t())
 
+    def test_none_session_persists_when_db_available(self):
+        async def t():
+            from audit_trail import log_action, list_trail, _fallback_buffer
+            from models import async_session
+            await _reset_db()
+            _fallback_buffer.clear()
+            await log_action(
+                None, actor="blue_reviewer", action="selfplay.rule_dismissed",
+                target_type="selfplay_rule", target_id="SP-X",
+                before={"status": "candidate"}, after={"status": "dismissed"},
+            )
+            assert _fallback_buffer == []
+            async with async_session() as s:
+                rows = await list_trail(s, actor="blue_reviewer")
+                assert len(rows) == 1
+                assert rows[0]["action"] == "selfplay.rule_dismissed"
+        _run(t())
+
     def test_fallback_buffer_then_flush(self):
         async def t():
             from audit_trail import log_action, flush_fallback, list_trail, _fallback_buffer
             from models import async_session
             await _reset_db()
             _fallback_buffer.clear()
-            # session=None 走离线缓冲
+
+            class Boom:
+                def add(self, *_a, **_k):
+                    raise RuntimeError("db down")
+
+                async def commit(self):
+                    return None
+
             await log_action(
-                None, actor="system", action="source.register",
+                Boom(), actor="system", action="source.register",
                 target_type="source", target_id="99",
                 before={}, after={"name": "x"},
             )
@@ -293,6 +318,54 @@ class TestAuditTrail:
                 rows = await list_trail(s, action="source.register")
                 assert len(rows) == 1
         _run(t())
+
+    def test_flush_commit_failure_keeps_buffer(self):
+        async def t():
+            from audit_trail import log_action, flush_fallback, _fallback_buffer
+            await _reset_db()
+            _fallback_buffer.clear()
+
+            class BoomAdd:
+                def add(self, *_a, **_k):
+                    raise RuntimeError("db down")
+
+                async def commit(self):
+                    return None
+
+            await log_action(
+                BoomAdd(), actor="system", action="source.register",
+                target_type="source", target_id="99",
+                before={}, after={"name": "x"},
+            )
+            assert len(_fallback_buffer) == 1
+
+            class BoomCommit:
+                def add(self, *_a, **_k):
+                    return None
+
+                async def commit(self):
+                    raise RuntimeError("commit fail")
+
+                async def rollback(self):
+                    return None
+
+            n = await flush_fallback(BoomCommit())
+            assert n == 0
+            assert len(_fallback_buffer) == 1
+        _run(t())
+
+    def test_scheduler_flush_loop_is_wired(self):
+        from pathlib import Path
+        text = (Path(__file__).resolve().parents[1] / "scheduler.py").read_text(encoding="utf-8")
+        assert "_audit_trail_flush_loop" in text
+        assert "flush_fallback" in text
+        assert "create_task(self._audit_trail_flush_loop" in text
+
+    def test_reviewer_audit_does_not_pass_none_session(self):
+        from pathlib import Path
+        text = (Path(__file__).resolve().parents[1] / "self_play" / "reviewer.py").read_text(encoding="utf-8")
+        assert "log_action(None" not in text.replace(" ", "")
+        assert "async_session()" in text
 
 
 # ════════════════════════════════════════════
