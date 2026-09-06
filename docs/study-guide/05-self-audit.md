@@ -1,7 +1,7 @@
 # 05 · 平台自审计体系
 
 > 一个安全平台自身如果不安全，就是笑话。
-> 平台用 **5 道闸** 把"AI 幻觉 / 越权 / 危险操作 / 证据造假"挡在执行之前。
+> 平台用 **5 道闸 + 一层工具行为签名** 把"AI 幻觉 / 越权 / 危险操作 / 证据造假 / 合法但异常的 tool 调用"挡在执行之前。
 > 这一章逐道闸讲清：防什么、怎么防、代码在哪、如何绕过测试。
 
 ---
@@ -25,6 +25,11 @@ LLM 思考
 │ ② MCP Guard (4 层)                │  ← 工具白名单 / RBAC / 参数 / 策略
 │   registry → permission →        │
 │   validator → policy             │
+└──────────────┬───────────────────┘
+               ▼
+┌──────────────────────────────────┐
+│ 2.5 行为签名 (UEBA-for-AI)        │  ← 像不像这个 tool 平时的样子
+│   参数 / 顺序 / 时段 / 调用者     │  ← 默认 confirm(enforce)，可 shadow/deny
 └──────────────┬───────────────────┘
                ▼
 ┌──────────────────────────────────┐
@@ -150,6 +155,44 @@ request = ToolCallRequest(
 result = guard.call_tool(request)
 # result = {decision, reason, final_risk, checks, execution}
 ```
+
+---
+
+## 闸 2.5：Tool 行为签名 — UEBA-for-AI
+
+**文件**：`backend/mcp_guard/{behavior_signature,behavior_detector,telemetry,call_logger}.py`
+
+**问题**：规则闸回答"这次调用合不合规"。Prompt injection 诱导 Agent 去调的，往往是**已注册、有权限、参数合法**的工具——四层 Guard 全绿，但调用不像这个 tool 平时的样子。
+
+对应 OWASP LLM06:2025 Excessive Agency / ASI02 Tool Misuse / MITRE ATLAS AML.T0053。
+
+**不是第六套独立产品**：SecurityGuard 仍是静态地板（频限、硬编码序列）；签名是自适应天花板。默认 `confirm`（`enforce` 同义）：偏离升级为人工确认，不直接 deny。`shadow` 只告警；`deny` 强偏离才拒绝。
+
+**四维指纹** `(tool_name, caller)`：
+
+| 维 | 看什么 | 例 |
+|----|--------|----|
+| 参数 | IP 类 / 数值 z / 类别未见值 | 公网 C2 基线后封 `192.168.1.1` |
+| 顺序 | caller 的 Markov `prev→tool` | `alert_only`×40 后突然 `isolate_host` |
+| 时段 | 24 小时桶占比 | 白天扫描、凌晨 `full` |
+| 调用者 | 谁在调、`tool_match_method=fuzzy` | 调查 Agent 去调 `block_ip` |
+
+**三链汇流**（同一 `ingest_tool_call` / Guard `_finish`）：
+
+| source | 入口 |
+|--------|------|
+| `mcp_guard` / `api` | `McpGuardServer.call_tool` |
+| `response` | `SecurityGuard.record` / inspect 拒绝 |
+| `audit_llm` | `Executor.execute_one` |
+| `self_play` | 打点但不学习 |
+
+**模式**：`SHARED_MEMORY_TOOL_SIGNATURE_MODE=confirm|enforce|deny|shadow`（默认 confirm）。confirm 入 `ApprovalQueue`（`trigger=behavior_signature`）；deny 不执行并写 `audit_trail` `tool.signature_veto`。检测器故障 fail-open。
+
+**评测**：`backend/tests/test_tool_behavior_eval.py` — S1–S8 Recall ≥ 6/8，良性回放 FPR ≤ 5%，`observe_pre_exec` p99 < 5ms。
+
+**前端**：安全审计页「工具签名」tab；Monitor 事件类型 `tool_anomaly`。
+
+**怎么绕过测试**：灌 40 次公网 `vulnerability_scan`，再扫 `192.168.1.1`；默认 confirm 下决策升为 `require_confirmation` 并出工单。设 `MODE=shadow` 则仍 allow，仅 `signature.is_anomaly`。
 
 ---
 

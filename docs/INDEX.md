@@ -32,6 +32,9 @@
   - [upgrade-proposals/2026-q3-tech-stack-upgrade-v3.md](./upgrade-proposals/2026-q3-tech-stack-upgrade-v3.md) — v3.0（实装度核验 + 6 大反例）
   - [upgrade-proposals/2026-q3-tech-stack-upgrade-v4.md](./upgrade-proposals/2026-q3-tech-stack-upgrade-v4.md) — v4.0（24 项 + 6 大生产反例 + 5 维度交叉验证）
   - [upgrade-proposals/2026-q3-tech-stack-upgrade-v5.md](./upgrade-proposals/2026-q3-tech-stack-upgrade-v5.md) — v5.0（揭榜挂帅合规 + TCO 矩阵 + 7/14/30 天决策树 + 12 大反例）⭐ **建议执行版**
+  - [upgrade-proposals/2026-q3-red-blue-selfplay.md](./upgrade-proposals/2026-q3-red-blue-selfplay.md) — v9 红蓝自博弈(已落地 MVP)
+  - [upgrade-proposals/2026-q3-tool-behavior-signature.md](./upgrade-proposals/2026-q3-tool-behavior-signature.md) — Tool 行为签名 / UEBA-for-AI（PR1–PR6 已落地,创新矩阵 #7）
+  - [upgrade-proposals/2026-q3-tee-gm-crypto.md](./upgrade-proposals/2026-q3-tee-gm-crypto.md) — TEE 推理 + 国密合规（创新矩阵 #10；取代 v5 §4.2 国密草图）
 
 ## 仓库根目录的其它文档
 
