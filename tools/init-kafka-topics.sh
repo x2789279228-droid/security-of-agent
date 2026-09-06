@@ -51,6 +51,11 @@ $KAFKA_TOPICS --create --if-not-exists --topic security-audit-queue --partitions
 $KAFKA_CONFIGS --alter --topic security-audit-queue \
   --add-config retention.ms=604800000,cleanup.policy=delete
 
+# P0/P1 审计溢出(内存队列满且 Redis PQ 失败): 保留 7 天, Python 回灌 worker
+$KAFKA_TOPICS --create --if-not-exists --topic security-audit-overflow --partitions 2 --replication-factor 1
+$KAFKA_CONFIGS --alter --topic security-audit-overflow \
+  --add-config retention.ms=604800000,cleanup.policy=delete
+
 # 审计结果: 保留 30 天（合规要求）
 $KAFKA_TOPICS --create --if-not-exists --topic security-audit-results --partitions 2 --replication-factor 1
 $KAFKA_CONFIGS --alter --topic security-audit-results \

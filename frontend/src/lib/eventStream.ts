@@ -30,12 +30,16 @@ export const EVENT_META: Record<string, { label: string; badge: string }> = {
   security_event:            { label: '事件接入', badge: 'bg-ink text-white' },
   alert:                     { label: '告警',     badge: 'bg-ink text-white outline outline-2 outline-offset-2 outline-dan' },
   agent_stage:               { label: 'Agent 阶段', badge: 'bg-ink text-white' },
+  agent_thought:             { label: '思维步骤', badge: 'border border-line bg-mist text-ink' },
   audit_complete:            { label: '审计完成', badge: 'bg-nong text-white' },
   response_action:           { label: '响应执行', badge: 'bg-hui text-white' },
   pipeline_health:           { label: '管道健康', badge: 'bg-qing text-ink' },
   edr_correlation:           { label: 'EDR关联', badge: 'border border-line bg-mist text-ink' },
   data_security_llm_verdict: { label: '数据安全裁定', badge: 'border border-line bg-mist text-ink' },
   phishing_llm_verdict:      { label: '钓鱼裁定', badge: 'border border-line bg-mist text-ink' },
+  selfplay_round:            { label: '自博弈回合', badge: 'bg-ink text-white' },
+  selfplay_match:            { label: '自博弈对局', badge: 'border border-ink text-ink' },
+  tool_anomaly:              { label: '工具偏离', badge: 'bg-ink text-white outline outline-2 outline-offset-2 outline-dan' },
 }
 export const TYPE_KEYS = Object.keys(EVENT_META)
 export const metaOf = (type: string) => EVENT_META[type]
@@ -52,6 +56,7 @@ export function severityOf(type: string, data: any): keyof typeof SEVERITY_META 
   const s = String(data?.severity ?? '').toLowerCase()
   return s in SEVERITY_META ? (s as keyof typeof SEVERITY_META)
     : type === 'alert' ? 'high'
+    : type === 'tool_anomaly' ? 'high'
     : type === 'pipeline_health' ? 'medium'
     : type === 'agent_stage' && (data?.status === 'error' || data?.status === 'timeout') ? 'high'
     : 'info'

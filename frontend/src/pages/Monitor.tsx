@@ -7,7 +7,11 @@ import AgentRelayStrip from '../components/monitor/AgentRelayStrip'
 import ActiveRelayCards from '../components/monitor/ActiveRelayCards'
 import EventToolbar, { type Filters } from '../components/monitor/EventToolbar'
 import EventRow from '../components/monitor/EventRow'
+import ThoughtChainPanel from '../components/monitor/ThoughtChainPanel'
+import ToolAnomalyBanner from '../components/monitor/ToolAnomalyBanner'
 import { api } from '../lib/api'
+import { deriveRelays } from '../lib/agentPipeline'
+import { pickThoughtEventId } from '../lib/thoughtChain'
 import { useServiceStore } from '../stores/serviceStore'
 import {
   severityOf,
@@ -15,6 +19,16 @@ import {
   useEventStreamStore,
   type StreamEvent,
 } from '../lib/eventStream'
+
+const DEMO_EVENT = {
+  event: 'C2_BEACON',
+  severity: 'critical',
+  src_ip: '192.168.1.105',
+  dst_ip: '23.129.64.33',
+  message: '演示审查：内部主机疑似与C2服务器通信',
+  confidence: 85,
+  _demo: true,
+}
 
 const healthMeta: Record<string, { label: string; color: string; text: string }> = {
   ok: { label: '正常', color: 'bg-ink', text: 'text-ink' },
@@ -31,11 +45,19 @@ export default function Monitor() {
   // 连接生命周期托管（引用计数单例通道，含断点续传与保活监测）
   useEventStreamLifecycle()
 
-  // 首屏 hydration：拉取进行中的 Agent 接力（无 SSE 历史时也能看到当前经手人）
+  // 首屏 hydration：进行中 + 最近完成 + 可展示思维链（SSE 窗口可能只剩自博弈行）
   const [hydratedPipelines, setHydratedPipelines] = useState<any[]>([])
+  const [hydratedRecent, setHydratedRecent] = useState<any[]>([])
+  const [thoughtCandidates, setThoughtCandidates] = useState<any[]>([])
   useEffect(() => {
     api.activePipelines()
       .then((r) => setHydratedPipelines(r.pipelines ?? []))
+      .catch(() => {})
+    api.recentPipelines()
+      .then((r) => setHydratedRecent(r.pipelines ?? []))
+      .catch(() => {})
+    api.recentThoughtChains()
+      .then((r) => setThoughtCandidates(r.chains ?? []))
       .catch(() => {})
   }, [])
 
@@ -111,6 +133,85 @@ export default function Monitor() {
       return next
     })
   }, [])
+  const [selectedEventId, setSelectedEventId] = useState<number | null>(null)
+  const [dismissedThought, setDismissedThought] = useState(false)
+  const [awaitingLive, setAwaitingLive] = useState(false)
+  const [demoBusy, setDemoBusy] = useState(false)
+  const [demoError, setDemoError] = useState('')
+  const selectEvent = useCallback((eventId: number) => {
+    if (!eventId) return
+    setDismissedThought(false)
+    setAwaitingLive(false)
+    setSelectedEventId((prev) => (prev === eventId ? prev : eventId))
+  }, [])
+  const closeThought = useCallback(() => {
+    setSelectedEventId(null)
+    setDismissedThought(true)
+    setAwaitingLive(false)
+  }, [])
+
+  useEffect(() => {
+    if (dismissedThought) return
+    const liveId = deriveRelays(buffer).active[0]?.eventId || 0
+    if (liveId && (awaitingLive || selectedEventId == null)) {
+      setSelectedEventId(liveId)
+      setAwaitingLive(false)
+      return
+    }
+    if (selectedEventId != null) return
+    const fromBuffer = pickThoughtEventId(buffer)
+    if (fromBuffer) {
+      setSelectedEventId(fromBuffer)
+      return
+    }
+    if (awaitingLive) return
+    const fromDb = Number(thoughtCandidates[0]?.event_id) || 0
+    if (fromDb) setSelectedEventId(fromDb)
+  }, [buffer, dismissedThought, selectedEventId, thoughtCandidates, awaitingLive])
+
+  const runDemo = useCallback(async () => {
+    setDemoBusy(true)
+    setDemoError('')
+    setDismissedThought(false)
+    setAwaitingLive(true)
+    try {
+      const sid = `demo-monitor-${crypto.randomUUID().slice(0, 8)}`
+      const data = await api.ingestLog(DEMO_EVENT, sid)
+      const eid = Number(data?.event_id) || 0
+      if (eid) {
+        setAwaitingLive(false)
+        setSelectedEventId(eid)
+      }
+    } catch (e: any) {
+      setDemoError(e?.message || '演示审查启动失败')
+      setAwaitingLive(false)
+    } finally {
+      setDemoBusy(false)
+    }
+  }, [])
+
+  const recentFromThoughts = useMemo(
+    () => thoughtCandidates.map((c) => ({
+      event_id: c.event_id,
+      current_stage: 'reviewer',
+      completed_stages: ['decomposer', 'tool_builder', 'executor', 'reviewer'],
+      done: true,
+      started_at: c.created_at ? Date.parse(String(c.created_at)) / 1000 : 0,
+      session_id: '',
+      trace_id: '',
+    })),
+    [thoughtCandidates],
+  )
+  const recentHydration = hydratedRecent.length > 0 ? hydratedRecent : recentFromThoughts
+
+  const candidateId = Number(thoughtCandidates[0]?.event_id) || 0
+  const idleHint = dismissedThought
+    ? (candidateId
+      ? `已关闭。点击接力卡片或最近完成，查看该事件思维链（最近 #${candidateId}）`
+      : '已关闭。点击接力卡片、最近完成或带 event_id 的审计行，查看思维链。')
+    : awaitingLive
+      ? '演示审查已提交，流水线事件到达后将自动打开该事件思维链'
+      : '当前没有可展示的 Audit-LLM 思维链。请注入一条安全事件，或在本页跑演示审查。'
 
   // 虚拟滚动：仅 mount 可视区行（此前 500 行全量 mount + framer-motion FLIP 是渲染卡顿主因）
   const rowHeight = useDynamicRowHeight({ defaultRowHeight: 56 })
@@ -179,10 +280,25 @@ export default function Monitor() {
       {/* ── 多 Agent 审查接力 ── */}
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-[22px] font-black tracking-tight text-ink">多 Agent 审查接力</h2>
-        <span className="font-mono text-[13px] text-ink-faint tabular-nums">
-          显示 {shownEvents} / 缓冲 {buffer.length} 条
-        </span>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={runDemo}
+            disabled={demoBusy}
+            className="border border-ink bg-ink px-3 py-1 text-[12px] text-white disabled:opacity-60"
+          >
+            {demoBusy ? '演示启动中…' : '跑一条演示审查'}
+          </button>
+          <span className="font-mono text-[13px] text-ink-faint tabular-nums">
+            显示 {shownEvents} / 缓冲 {buffer.length} 条
+          </span>
+        </div>
       </div>
+      {demoError && (
+        <p className="mb-3 text-[12px] text-alert">{demoError}</p>
+      )}
+
+      <ToolAnomalyBanner />
 
       <div className="mb-5 border border-line bg-white">
         <StreamStatusBar paused={paused} onTogglePause={togglePause} />
@@ -192,7 +308,21 @@ export default function Monitor() {
         <EventToolbar filters={filters} onChange={setFilters} typeCounts={typeCounts} />
       </div>
 
-      <ActiveRelayCards hydrated={hydratedPipelines} />
+      <ActiveRelayCards
+        hydrated={hydratedPipelines}
+        hydratedRecent={recentHydration}
+        selectedEventId={selectedEventId}
+        onSelect={selectEvent}
+        onDemo={runDemo}
+        demoBusy={demoBusy}
+      />
+
+      <ThoughtChainPanel
+        eventId={selectedEventId}
+        onClose={closeThought}
+        onJumpEvent={selectEvent}
+        idleHint={idleHint}
+      />
 
       {/* 事件列表 */}
       <div className="relative border border-line bg-white">
@@ -207,7 +337,13 @@ export default function Monitor() {
             rowComponent={EventRow}
             rowCount={visible.length}
             rowHeight={rowHeight}
-            rowProps={{ events: visible, expandedIds, onToggle: toggleExpanded }}
+            rowProps={{
+              events: visible,
+              expandedIds,
+              onToggle: toggleExpanded,
+              selectedEventId,
+              onSelectEvent: selectEvent,
+            }}
             overscanCount={8}
             style={{ height: 520 }}
           />

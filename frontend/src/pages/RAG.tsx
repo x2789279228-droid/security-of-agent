@@ -280,7 +280,13 @@ export default function RAG() {
             {result && result.total > 0 && (
               <div className="space-y-3">
                 <p className="text-xs text-ink-faint font-sans">
-                  检索策略: {result.strategy} · 共 {result.total} 条结果
+                  检索策略: {result.strategy}
+                  {result.rerank_backend && result.rerank_backend !== 'none' ? ` · 重排 ${result.rerank_backend}` : ''}
+                  · 共 {result.total} 条结果
+                  {result.transform?.lexical_first && <span className="ml-2">精确词优先</span>}
+                  {(result.transform?.keywords || []).length > 0 && (
+                    <span className="ml-2">扩展 {result.transform.keywords.slice(0, 6).join(' / ')}</span>
+                  )}
                 </p>
                 {(result.chunks || []).map((chunk: any, i: number) => (
                   <div key={i} className="border border-line rounded-none p-4">
@@ -290,8 +296,15 @@ export default function RAG() {
                         <span className={classNames('px-1.5 py-0.5 text-[10px] font-sans rounded border', SEVERITY_COLORS[chunk.severity] || '')}>
                           {chunk.severity}
                         </span>
+                        {chunk.reranked && (
+                          <span className="px-1.5 py-0.5 text-[10px] font-sans border border-line text-ink-faint">rerank</span>
+                        )}
                       </div>
-                      <span className="text-[10px] font-sans text-ink-faint">score: {(chunk.score * 100).toFixed(0)}%</span>
+                      <span className="text-[10px] font-sans text-ink-faint">
+                        {chunk.dense_rank ? `dense#${chunk.dense_rank} ` : ''}
+                        {chunk.bm25_rank ? `bm25#${chunk.bm25_rank} ` : ''}
+                        score: {Number(chunk.score || 0).toFixed(3)}
+                      </span>
                     </div>
                     <p className="text-xs text-ink-soft font-sans whitespace-pre-wrap line-clamp-4">{chunk.content}</p>
                     <div className="flex gap-2 mt-2 flex-wrap">

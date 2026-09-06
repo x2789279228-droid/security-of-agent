@@ -9,6 +9,7 @@ const tabs = [
   { path: ROUTES.SECURITY_AUDIT, label: '安全审计' },
   { path: ROUTES.RESPONSE, label: '响应' },
   { path: ROUTES.OPERATIONS, label: '运营中心' },
+  { path: ROUTES.SELF_PLAY, label: '自博弈' },
   { path: ROUTES.RAG, label: '知识库' },
 ]
 

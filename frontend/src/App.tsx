@@ -14,6 +14,7 @@ const SecurityAudit = lazy(() => import('./pages/SecurityAudit'))
 const Response = lazy(() => import('./pages/Response'))
 const RAG = lazy(() => import('./pages/RAG'))
 const Operations = lazy(() => import('./pages/Operations'))
+const SelfPlay = lazy(() => import('./pages/SelfPlay'))
 const Traffic = lazy(() => import('./pages/Traffic'))
 const Encrypted = lazy(() => import('./pages/Encrypted'))
 const Intel = lazy(() => import('./pages/Intel'))
@@ -55,6 +56,7 @@ export default function App() {
           <Route path={ROUTES.SECURITY_AUDIT} element={page(<SecurityAudit />, false)} />
           <Route path={ROUTES.RESPONSE} element={page(<Response />, false)} />
           <Route path={ROUTES.OPERATIONS} element={page(<Operations />, false)} />
+          <Route path={ROUTES.SELF_PLAY} element={page(<SelfPlay />, false)} />
           <Route path={ROUTES.RAG} element={page(<RAG />, false)} />
           <Route path={ROUTES.TRAFFIC} element={page(<Traffic />, false)} />
           <Route path={ROUTES.ENCRYPTED} element={page(<Encrypted />, false)} />

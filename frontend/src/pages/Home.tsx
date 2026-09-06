@@ -41,6 +41,12 @@ const capabilities = [
     title: 'MITRE ATT&CK 加持。',
     desc: '内置攻击战术与响应预案，RAG 检索增强为每一次审计提供权威知识支撑。',
   },
+  {
+    path: ROUTES.SELF_PLAY,
+    tag: '红蓝自博弈',
+    title: '红队出招，蓝队进化。',
+    desc: 'Red Agent 按 ATT&CK 课程生成对抗场景，蓝队复用四层流水线响应，漏报反哺检测。',
+  },
 ]
 
 const capabilityTiers = [
@@ -51,6 +57,7 @@ const capabilityTiers = [
     features: [
       { name: 'Sigma 规则引擎', desc: '11 条规则覆盖 8 类攻击，<1ms 延迟' },
       { name: 'Flink CEP 攻击链', desc: '3 种模式实时检测 (端口扫描→C2 / 横向移动 / 数据外泄)' },
+      { name: '因果图 PC/GES', desc: '批式结构学习 + 后门 do(); 区分相关与因果, CEP 仍是候选链' },
       { name: '多维异常评分', desc: '频率 + 严重度 + 时段三维评分，智能分级路由' },
       { name: '数据源认证', desc: 'API Key 白名单 + SCRAM-SHA-512 + TLS 加密' },
     ],
@@ -77,6 +84,17 @@ const capabilityTiers = [
       { name: '反馈闭环优化', desc: '处置结果回灌检测引擎，误报抑制、漏报补偿' },
     ],
   },
+  {
+    tier: 'L4',
+    name: '自博弈进化层',
+    subtitle: 'Red vs Blue · Self-Play',
+    features: [
+      { name: '红队 Agent', desc: 'MITRE ATT&CK 课程 + 规避变体,只生成仿真日志' },
+      { name: '蓝队闭环', desc: 'Decomposer→Executor→Reviewer + Sigma 实时响应' },
+      { name: '课程学习', desc: '连续检出则加难;漏报写入 overlay,不自动改生产规则' },
+      { name: '论文级指标', desc: 'ASR / Recall / Precision / MTTD / Novelty / Compounding' },
+    ],
+  },
 ]
 
 const pipeline = [
@@ -84,6 +102,7 @@ const pipeline = [
   { step: '02', name: '审计', desc: 'Audit-LLM 分析' },
   { step: '03', name: '响应', desc: '自动封禁隔离' },
   { step: '04', name: '复盘', desc: 'CAD 穿透验证' },
+  { step: '05', name: '自博弈', desc: '红蓝对抗进化' },
 ]
 
 const sevTone: Record<string, string> = {
@@ -249,7 +268,7 @@ export default function Home() {
                     onClick={() => navigate(cap.path)}
                     className={`text-left p-7 hover:bg-mist/60 transition-colors ${
                       i % 2 === 0 ? 'md:border-r border-line' : ''
-                    } ${i < 2 ? 'border-b border-line' : ''}`}
+                    } ${i < capabilities.length - (capabilities.length % 2 === 0 ? 2 : 1) ? 'border-b border-line' : ''}`}
                   >
                     <p className="text-[12px] font-light text-ink-faint mb-2">{cap.tag}</p>
                     <h3 className="text-[18px] font-bold text-ink mb-2">{cap.title}</h3>
@@ -269,13 +288,13 @@ export default function Home() {
             <motion.div {...reveal}>
               <p className="text-[22px] font-black mb-2">分层递进，从感知到自治。</p>
               <p className="text-[13px] font-light text-ink-soft mb-8">
-                L1 规则检测 → L2 智能研判 → L3 自主处置，零人工干预的安全运营闭环。
+                L1 规则检测 → L2 智能研判 → L3 自主处置 → L4 红蓝自博弈进化。
               </p>
-              <div className="grid md:grid-cols-3 border border-line">
+              <div className="grid md:grid-cols-2 xl:grid-cols-4 border border-line">
                 {capabilityTiers.map((tier, ti) => (
                   <div
                     key={tier.tier}
-                    className={`p-7 ${ti < 2 ? 'md:border-r border-b md:border-b-0 border-line' : ''}`}
+                    className={`p-7 ${ti < capabilityTiers.length - 1 ? 'xl:border-r border-line' : ''} ${ti < 2 ? 'md:border-b xl:border-b-0 md:border-r border-line' : ''}`}
                   >
                     <div className="flex items-center gap-3 mb-6">
                       <span className="w-9 h-9 bg-ink text-white text-[12px] font-bold flex items-center justify-center">
@@ -305,8 +324,8 @@ export default function Home() {
 
           <SpecRow label="流程">
             <motion.div {...reveal}>
-              <p className="text-[22px] font-black mb-8">四层流水线，闭环守护。</p>
-              <div className="grid grid-cols-2 md:grid-cols-4">
+              <p className="text-[22px] font-black mb-8">接入、审计、响应、复盘、自博弈。</p>
+              <div className="grid grid-cols-2 md:grid-cols-5">
                 {pipeline.map((p, i) => (
                   <div key={p.step} className="relative pb-2">
                     <p className="text-[11px] tracking-[0.2em] text-ink-faint mb-2">{p.step}</p>

@@ -105,6 +105,35 @@ export const api = {
       body: JSON.stringify({ event }),
     }),
 
+  // ── MCP Guard / 工具行为签名 ──
+
+  guardStatus: () => fetchJSON<any>('/guard/status'),
+
+  guardSignatures: () => fetchJSON<any>('/guard/signatures'),
+
+  guardAnomalies: (limit = 50) =>
+    fetchJSON<any>(`/guard/anomalies?limit=${limit}`),
+
+  guardApprovals: (page = 1, pageSize = 20) =>
+    fetchJSON<any>(`/guard/approvals?page=${page}&page_size=${pageSize}`),
+
+  guardCalls: (params: Record<string, string> = {}) => {
+    const qs = new URLSearchParams(params).toString()
+    return fetchJSON<any>(`/guard/calls${qs ? `?${qs}` : ''}`)
+  },
+
+  guardCall: (body: {
+    tool_name: string
+    arguments?: Record<string, any>
+    user_role?: string
+    reason?: string
+    caller?: string
+  }) =>
+    fetchJSON<any>('/guard/call', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   // ── 安全事件查询 ──
 
   getAnomalies: (sessionId: string, minScore = 0.5) =>
@@ -112,6 +141,17 @@ export const api = {
 
   getChains: (sessionId: string) =>
     fetchJSON<any>(`/security/chains?session_id=${sessionId}`),
+
+  getCausalGraph: () => fetchJSON<any>('/causal/graph'),
+
+  queryCausal: (x: string, y: string, doValue = 0) =>
+    fetchJSON<any>('/causal/query', {
+      method: 'POST',
+      body: JSON.stringify({ x, y, do: doValue }),
+    }),
+
+  runCausalLearn: () =>
+    fetchJSON<any>('/causal/learn', { method: 'POST' }),
 
   getEvents: (params: Record<string, string>) => {
     const qs = new URLSearchParams(params).toString()
@@ -340,6 +380,24 @@ export const api = {
   /** 正在运行的 Agent 接力（Monitor 首屏 hydration） */
   activePipelines: () =>
     fetchJSON<{ pipelines: any[]; count: number }>('/observability/active-pipelines'),
+
+  /** 最近已结束的 Agent 接力 */
+  recentPipelines: (limit = 8) =>
+    fetchJSON<{ pipelines: any[]; count: number }>(
+      `/observability/recent-pipelines?limit=${limit}`,
+    ),
+
+  /** 最近可展示思维链的事件（不含 prompt） */
+  recentThoughtChains: (limit = 8) =>
+    fetchJSON<{ chains: any[]; count: number }>(
+      `/observability/recent-thought-chains?limit=${limit}`,
+    ),
+
+  /** 单事件思维链 DAG（live / 落库 / 存量投影） */
+  thoughtChain: (eventId: number) =>
+    fetchJSON<import('./thoughtChain').ThoughtChainPayload>(
+      `/observability/thought-chain/${eventId}`,
+    ),
 
   /** 获取最近实时事件（页面刷新恢复/断线回放），按 seq 升序 */
   eventsRecent: (params: { limit?: number; since_seq?: number } = {}) => {
@@ -648,4 +706,38 @@ export const api = {
   /** 冲刷离线审计缓冲 */
   opsAuditTrailFlush: () =>
     fetchJSON<any>('/audit-trail/flush', { method: 'POST' }),
+
+  // ── Red vs Blue Self-Play ──
+
+  selfPlayCatalog: () => fetchJSON<any>('/self-play/catalog'),
+
+  selfPlayMatches: () => fetchJSON<any>('/self-play/matches'),
+
+  selfPlayMatch: (matchId: string) =>
+    fetchJSON<any>(`/self-play/matches/${encodeURIComponent(matchId)}`),
+
+  selfPlayStart: (body: Record<string, any>) =>
+    fetchJSON<any>('/self-play/matches', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  selfPlayStop: (matchId: string) =>
+    fetchJSON<any>(`/self-play/matches/${encodeURIComponent(matchId)}/stop`, {
+      method: 'POST',
+    }),
+
+  selfPlayMetrics: () => fetchJSON<any>('/self-play/metrics'),
+
+  selfPlayLearnedRules: (status = '') =>
+    fetchJSON<any>(`/self-play/learned-rules${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+
+  selfPlayRuleStatus: (id: number, status: string, reason = '') =>
+    fetchJSON<any>(`/self-play/learned-rules/${id}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status, reason }),
+    }),
+
+  selfPlayReviewRun: (limit = 20) =>
+    fetchJSON<any>(`/self-play/review/run?limit=${limit}`, { method: 'POST' }),
 }

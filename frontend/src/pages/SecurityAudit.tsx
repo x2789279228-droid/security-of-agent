@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { PageTransition } from '../components/common/PageTransition'
+import ThoughtChainPanel from '../components/monitor/ThoughtChainPanel'
+import ToolSignaturePanel from '../components/monitor/ToolSignaturePanel'
 import { api } from '../lib/api'
 
-type Tab = 'inject' | 'batch' | 'pipeline' | 'cad' | 'chains'
+type Tab = 'inject' | 'batch' | 'pipeline' | 'cad' | 'chains' | 'guard'
 
 const EVENT_PRESETS = [
   { label: 'C2通信 (critical)', value: { event: 'C2_BEACON', severity: 'critical', src_ip: '192.168.1.105', dst_ip: '23.129.64.33', message: '内部主机疑似与C2服务器通信', confidence: 85 } },
@@ -200,7 +202,7 @@ export default function SecurityAudit() {
         <p className="page-sub mb-8">Audit-LLM + CAD 系统可靠性测试 — 支持单条 / 批量 / 文件导入</p>
 
         <div className="flex flex-wrap gap-2 mb-8">
-          {([{ id: 'inject', label: '单条注入' }, { id: 'batch', label: '批量导入' }, { id: 'pipeline', label: '流水线' }, { id: 'cad', label: 'CAD审计' }, { id: 'chains', label: '攻击链' }] as { id: Tab; label: string }[]).map(tab => (
+          {([{ id: 'inject', label: '单条注入' }, { id: 'batch', label: '批量导入' }, { id: 'pipeline', label: '流水线' }, { id: 'cad', label: 'CAD审计' }, { id: 'chains', label: '攻击链' }, { id: 'guard', label: '工具签名' }] as { id: Tab; label: string }[]).map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)}
               className={classNames('px-4 py-2 text-[13px] tracking-[0.08em] border border-ink',
                 activeTab === tab.id ? 'bg-ink text-white' : 'bg-transparent text-ink hover:bg-ink hover:text-white')}>
@@ -360,6 +362,9 @@ export default function SecurityAudit() {
         {activeTab === 'pipeline' && (
           <div className="space-y-4">
             {pipelineEventId && <div className="text-xs text-ink-faint font-sans">查看事件 #{pipelineEventId} 的流水线结果</div>}
+            {pipelineEventId ? (
+              <ThoughtChainPanel eventId={pipelineEventId} />
+            ) : null}
             {pipelineData ? (
               <>
                 <div className="flex flex-wrap gap-2 text-xs font-sans">
@@ -369,6 +374,15 @@ export default function SecurityAudit() {
                   <span className="px-3 py-1.5 bg-mist text-ink rounded-none">
                     analyzed: {String(pipelineData.analyzed)}
                   </span>
+                  {pipelineData.pipeline_result?.quality && (
+                    <span className={`px-3 py-1.5 rounded-none ${
+                      pipelineData.pipeline_result.quality === 'llm'
+                        ? 'bg-green-50 text-green-700'
+                        : 'bg-orange-50 text-orange-700'
+                    }`}>
+                      质量: {pipelineData.pipeline_result.quality}
+                    </span>
+                  )}
                   {pipelineData.pipeline_result?.threat_type && (
                     <span className="px-3 py-1.5 bg-orange-50 text-orange-700 rounded-none">
                       {pipelineData.pipeline_result.threat_type}
@@ -415,6 +429,9 @@ export default function SecurityAudit() {
           </div>
         )}
 
+        {/* ── Tab: 工具签名 ── */}
+        {activeTab === 'guard' && <ToolSignaturePanel />}
+
         {/* ── Tab: 攻击链 ── */}
         {activeTab === 'chains' && (
           <div className="space-y-4">
@@ -429,12 +446,33 @@ export default function SecurityAudit() {
                 <Collapse title="攻击链列表" defaultOpen>
                   {chainData.chains?.length > 0 ? chainData.chains.map((c: any, i: number) => (
                     <div key={i} className="mb-3 pb-3 border-b border-line last:border-0">
-                      <p className="font-medium text-ink">[{c.pattern_name}] conf={c.confidence}</p>
+                      <p className="font-medium text-ink">
+                        [{c.pattern_name}] conf={c.confidence}
+                        {c.causal_verdict && (
+                          <span className="ml-2 font-sans text-[10px] px-1.5 py-0.5 border border-line">
+                            {c.causal_verdict === 'causal_support' ? '因果支持' : c.causal_verdict === 'spurious' ? '伪相关' : '未知'}
+                          </span>
+                        )}
+                      </p>
                       <p className="text-ink-faint mt-1">{c.alert}</p>
                       <p className="text-ink-faint text-[10px] mt-1">事件IDs: {c.event_ids?.join(', ')}</p>
+                      {(c.ace != null || c.p_y_do != null) && (
+                        <p className="text-ink-faint text-[10px] mt-1">
+                          do({c.do_query?.x}=0) → {c.do_query?.y} : P={c.p_y_do ?? '—'} ACE={c.ace ?? '—'}
+                        </p>
+                      )}
                     </div>
                   )) : '未发现攻击链'}
                 </Collapse>
+                {chainData.causal_graph && (
+                  <Collapse title="因果 DAG (PC 定向)" defaultOpen>
+                    {JSON.stringify({
+                      n: chainData.causal_graph.n,
+                      agree_rate: chainData.causal_graph.agree_rate,
+                      directed: chainData.causal_graph.directed,
+                    }, null, 2)}
+                  </Collapse>
+                )}
                 <Collapse title="时间窗口分组">{JSON.stringify(chainData.temporal_groups, null, 2)}</Collapse>
               </>
             )}

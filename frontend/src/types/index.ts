@@ -19,6 +19,7 @@ export interface SecurityLog {
   dst_ip: string
   message: string
   analyzed: boolean
+  audit_quality?: 'llm' | 'tools' | 'rule' | 'fallback' | 'shed' | 'budget' | 'rate_limited' | string | null
   created_at: string
   is_anomaly?: boolean
   anomaly_score?: number

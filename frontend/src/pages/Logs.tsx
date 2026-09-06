@@ -91,6 +91,23 @@ export default function Logs() {
         return [live, ...prev].slice(0, 500)
       })
     })
+    es.addEventListener('audit_complete', (e) => {
+      const data = JSON.parse(e.data)
+      const eid = data.event_id
+      const quality = data.quality || 'llm'
+      if (!eid) return
+      setLogs((prev) => prev.map((l) => (
+        l.id === eid ? { ...l, analyzed: true, audit_quality: quality } : l
+      )))
+    })
+    es.addEventListener('audit_degraded', (e) => {
+      const data = JSON.parse(e.data)
+      const eid = data.event_id
+      if (!eid) return
+      setLogs((prev) => prev.map((l) => (
+        l.id === eid ? { ...l, analyzed: true, audit_quality: data.quality || 'budget' } : l
+      )))
+    })
     es.onerror = () => setConnected(false)
     return () => es.close()
   }, [])
@@ -110,11 +127,13 @@ export default function Logs() {
   const stats = useMemo(() => {
     const bySeverity: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
     let reviewed = 0
+    let degraded = 0
     for (const l of logs) {
       if (l.severity in bySeverity) bySeverity[l.severity]++
-      if (l.analyzed) reviewed++
+      if (l.analyzed && (l.audit_quality === 'llm' || !l.audit_quality)) reviewed++
+      else if (l.analyzed) degraded++
     }
-    return { bySeverity, reviewed, pending: logs.length - reviewed }
+    return { bySeverity, reviewed, degraded, pending: logs.length - reviewed - degraded }
   }, [logs])
 
   return (
@@ -176,7 +195,7 @@ export default function Logs() {
             刷新
           </button>
           <span className="text-[13px] text-ink-faint shrink-0 hidden md:block">
-            已审计 {stats.reviewed} · 待审计 {stats.pending}
+            已审计 {stats.reviewed} · 降级 {stats.degraded} · 待审计 {stats.pending}
           </span>
         </div>
 
@@ -237,7 +256,19 @@ export default function Logs() {
                           </td>
                           <td className="px-5 py-3 whitespace-nowrap">
                             {log.analyzed ? (
-                              <span className="text-ink text-[11px] font-semibold">已审计</span>
+                              <span className={`text-[11px] font-semibold ${
+                                log.audit_quality === 'llm' || !log.audit_quality
+                                  ? 'text-ink'
+                                  : log.audit_quality === 'tools' || log.audit_quality === 'rule'
+                                    ? 'text-ink-soft'
+                                    : 'text-alert'
+                              }`}>
+                                {log.audit_quality === 'llm' || !log.audit_quality
+                                  ? 'LLM'
+                                  : log.audit_quality === 'tools' || log.audit_quality === 'rule'
+                                    ? '规则'
+                                    : '降级'}
+                              </span>
                             ) : (
                               <span className="text-ink-faint text-[11px] font-semibold">审核中</span>
                             )}

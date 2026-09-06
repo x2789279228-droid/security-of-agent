@@ -16,6 +16,7 @@ export const ROUTES = {
   RESPONSE: '/response',
   RAG: '/rag',
   OPERATIONS: '/operations',
+  SELF_PLAY: '/self-play',
   // NDR 扩展
   TRAFFIC: '/traffic',
   ENCRYPTED: '/encrypted',

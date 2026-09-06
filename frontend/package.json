@@ -11,6 +11,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "check": "tsc -b && oxlint",
+    "test:pipeline": "node --experimental-strip-types --test scripts/agentPipeline.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

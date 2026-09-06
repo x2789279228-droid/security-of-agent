@@ -66,6 +66,7 @@ function isRelayStage(stage: string): stage is AgentRelayStage {
 /** 从事件缓冲派生按 event_id 聚合的接力状态（新事件在前，遍历时用旧→新覆盖） */
 export function deriveRelays(buffer: StreamEvent[]): {
   active: RelayState[]
+  recent: RelayState[]
   nodeStats: Record<string, { running: number; completed: number; errors: number }>
 } {
   const map = new Map<number, RelayState>()
@@ -177,26 +178,23 @@ export function deriveRelays(buffer: StreamEvent[]): {
     }
   }
 
-  // 收尾：CAD + response 都完成后标 done；仅有 running 的为 active
+  // 收尾：仅有 running 的进 active；已结束（无 running 且至少一格非 idle）进 recent
   const active: RelayState[] = []
+  const recent: RelayState[] = []
   for (const relay of map.values()) {
     const hasRunning = AGENT_RELAY_STAGES.some((s) => relay.stages[s] === 'running')
-    const allTerminal = AGENT_RELAY_STAGES.every(
-      (s) => relay.stages[s] !== 'running',
-    )
-    // 若 reviewer+cad 已结束且无 running，视为本轮接力结束（response 可能未触发）
-    if (!hasRunning && allTerminal) {
-      const touched = AGENT_RELAY_STAGES.some((s) => relay.stages[s] !== 'idle')
-      if (touched && relay.stages.cad_verify !== 'idle' && relay.stages.cad_verify !== 'running') {
-        relay.done = true
-      }
-      if (touched && relay.stages.reviewer === 'success' && relay.stages.cad_verify === 'idle') {
-        // 等待 CAD 或未跑 CAD — 仍可能进行中，但无 active span 时不算 active
-      }
-    }
+    const touched = AGENT_RELAY_STAGES.some((s) => relay.stages[s] !== 'idle')
     if (hasRunning) {
       relay.done = false
       active.push(relay)
+    } else if (touched) {
+      if (relay.stages.response === 'success' || relay.stages.cad_verify !== 'idle') {
+        relay.done = true
+      }
+      if (relay.stages.reviewer === 'success' && relay.stages.cad_verify === 'idle') {
+        relay.done = true
+      }
+      recent.push(relay)
     }
 
     for (const s of AGENT_RELAY_STAGES) {
@@ -208,7 +206,8 @@ export function deriveRelays(buffer: StreamEvent[]): {
   }
 
   active.sort((a, b) => b.updatedAt - a.updatedAt)
-  return { active, nodeStats }
+  recent.sort((a, b) => b.updatedAt - a.updatedAt)
+  return { active, recent: recent.slice(0, 8), nodeStats }
 }
 
 export function fmtMs(ms: number): string {

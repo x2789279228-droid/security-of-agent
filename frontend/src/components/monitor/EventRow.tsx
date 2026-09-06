@@ -16,12 +16,15 @@ import {
   type StreamEvent,
 } from '../../lib/eventStream'
 import { STAGE_LABELS, fmtMs } from '../../lib/agentPipeline'
+import { isSelfPlayEventType, isThoughtSelectable, thoughtBrief } from '../../lib/thoughtChain'
 
 // 传给 List.rowProps 的数据（index/style 由 react-window 注入，不在此列）
 export interface EventRowData {
   events: StreamEvent[]
   expandedIds: Set<number>
   onToggle: (id: number) => void
+  selectedEventId?: number | null
+  onSelectEvent?: (eventId: number) => void
 }
 
 type EventRowProps = RowComponentProps<EventRowData>
@@ -31,6 +34,7 @@ const PREFERRED_KEYS = [
   'threat_type', 'event_type', 'event', 'alert_type',
   'verdict', 'classification', 'label', 'stage', 'trigger', 'type',
   'src_ip', 'confidence', 'anomaly_score',
+  'tool_name', 'score', 'caller',
 ]
 
 function briefOf(data: any): string {
@@ -92,6 +96,15 @@ function Summary({ evt }: { evt: StreamEvent }) {
           )}
         </span>
       )
+    case 'agent_thought':
+      return (
+        <span className="text-ink-soft">
+          <span className="font-semibold text-ink">{thoughtBrief(d)}</span>
+          {typeof d.event_id === 'number' && (
+            <span className="font-mono text-ink-faint"> · #{d.event_id}</span>
+          )}
+        </span>
+      )
     case 'agent_stage': {
       const label = d.agent_label || STAGE_LABELS[String(d.stage)] || d.stage
       const phase = d.phase === 'start' ? '接手' : '完成'
@@ -135,6 +148,18 @@ function Summary({ evt }: { evt: StreamEvent }) {
           {d.status && <span className="text-ink-faint"> · {d.status}</span>}
         </span>
       )
+    case 'tool_anomaly':
+      return (
+        <span className="text-ink-soft">
+          <span className="font-semibold text-ink">工具偏离</span>
+          {' · '}<span className="font-mono">{d.tool_name}</span>
+          {d.caller && <span className="text-ink-faint"> · {d.caller}</span>}
+          {' · '}得分 {Number(d.score ?? 0).toFixed(2)}
+          {Array.isArray(d.reasons) && d.reasons[0] && (
+            <span className="text-ink-faint"> — {String(d.reasons[0]).slice(0, 80)}</span>
+          )}
+        </span>
+      )
     case 'pipeline_health': {
       if (d.type === 'diagnostic') {
         return (
@@ -161,10 +186,14 @@ const Inner = memo(function Inner({
   evt,
   expanded,
   onToggle,
+  selected,
+  onSelectEvent,
 }: {
   evt: StreamEvent
   expanded: boolean
   onToggle: (id: number) => void
+  selected?: boolean
+  onSelectEvent?: (eventId: number) => void
 }) {
   if (evt.kind !== 'event') {
     const isGap = evt.kind === 'gap'
@@ -185,10 +214,16 @@ const Inner = memo(function Inner({
   const d = evt.data ?? {}
   const timeStr = new Date(evt.ts).toLocaleTimeString('zh-CN', { hour12: false })
 
+  const eid = Number(d.event_id) || 0
   return (
     <div
-      onClick={() => onToggle(evt.id)}
-      className={`flex h-full cursor-pointer select-none flex-col justify-center border-b border-line transition-colors ${expanded ? 'bg-surface' : 'hover:bg-surface/60'}`}
+      onClick={() => {
+        onToggle(evt.id)
+        if (eid && onSelectEvent) onSelectEvent(eid)
+      }}
+      className={`flex h-full cursor-pointer select-none flex-col justify-center border-b border-line transition-colors ${
+        selected ? 'bg-mist' : expanded ? 'bg-surface' : 'hover:bg-surface/60'
+      }`}
     >
       <div className="flex items-stretch">
         {/* severity 分级竖线 */}
@@ -218,6 +253,12 @@ const Inner = memo(function Inner({
               )}
               {d.source && <span className="border border-line px-1">{d.source}</span>}
               {typeof d.trace_id === 'string' && d.trace_id && <TraceId traceId={d.trace_id} />}
+              {isThoughtSelectable(evt) && (
+                <span className="border border-line px-1">思维链</span>
+              )}
+              {isSelfPlayEventType(evt.type) && (
+                <span className="border border-dashed border-dan px-1">自博弈回合，无 Audit-LLM 思维链</span>
+              )}
               {evt.replay && <span title="该事件经断线续传回放补发" className="rounded-full border border-dan px-1">回放</span>}
             </div>
           </div>
@@ -247,12 +288,21 @@ const Inner = memo(function Inner({
 })
 
 /** react-window 行组件：外壳应用定位 style，内层 memo 化 */
-export default function EventRow({ index, events, expandedIds, onToggle, style, ariaAttributes }: EventRowProps) {
+export default function EventRow({
+  index, events, expandedIds, onToggle, selectedEventId, onSelectEvent, style, ariaAttributes,
+}: EventRowProps) {
   const evt = events[index]
   if (!evt) return null
+  const eid = evt.kind === 'event' ? Number(evt.data?.event_id) || 0 : 0
   return (
     <div style={style as CSSProperties} {...ariaAttributes}>
-      <Inner evt={evt} expanded={expandedIds.has(evt.id)} onToggle={onToggle} />
+      <Inner
+        evt={evt}
+        expanded={expandedIds.has(evt.id)}
+        onToggle={onToggle}
+        selected={!!eid && eid === selectedEventId}
+        onSelectEvent={onSelectEvent}
+      />
     </div>
   )
 }

@@ -91,45 +91,31 @@ async function main() {
     await cdp.send('Page.enable')
     await cdp.send('Runtime.enable')
     await cdp.send('DOM.enable')
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 1440, height: 1600, deviceScaleFactor: 1, mobile: false,
+    })
     await cdp.send('Page.navigate', { url: BASE + '/login' })
-    await sleep(2000)
+    await sleep(1500)
 
-    // Fill login form via DOM
-    await cdp.send('Runtime.evaluate', {
+    const loginRes = await cdp.send('Runtime.evaluate', {
       awaitPromise: true,
-      expression: `(() => {
-        const inputs = [...document.querySelectorAll('input')];
-        const user = inputs.find(i => i.type === 'text' || i.name?.includes('user') || i.placeholder?.includes('用户') || i.placeholder?.toLowerCase().includes('user')) || inputs[0];
-        const pass = inputs.find(i => i.type === 'password') || inputs[1];
-        if (!user || !pass) return 'no-inputs:' + inputs.length;
-        const set = (el, v) => {
-          const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-          proto.set.call(el, v);
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        };
-        set(user, ${JSON.stringify(USER)});
-        set(pass, ${JSON.stringify(PASS)});
-        const btn = [...document.querySelectorAll('button')].find(b => /登录|login/i.test(b.textContent || ''));
-        if (btn) btn.click();
-        else (user.form && user.form.requestSubmit()) || document.querySelector('form')?.requestSubmit();
-        return 'submitted';
+      expression: `(async () => {
+        const r = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: ${JSON.stringify(USER)}, password: ${JSON.stringify(PASS)} }),
+        })
+        const d = await r.json()
+        if (!d.access_token) return 'fail:' + r.status
+        localStorage.setItem('sm_token', d.access_token)
+        localStorage.setItem('sm_user', ${JSON.stringify(USER)})
+        return 'ok'
       })()`,
     })
-
-    // Wait for navigation / token
-    for (let i = 0; i < 20; i++) {
-      await sleep(500)
-      const loc = await cdp.send('Runtime.evaluate', {
-        expression: `location.pathname + '|' + (localStorage.getItem('sm_token') ? 'authed' : 'anon')`,
-      })
-      const val = loc.result?.value || ''
-      if (val.includes('authed') && !val.includes('/login')) break
-      if (i === 19) console.log('login state:', val)
-    }
+    console.log('api-login', loginRes.result?.value || loginRes)
 
     await cdp.send('Page.navigate', { url: BASE + '/monitor' })
-    await sleep(2500)
+    await sleep(3500)
 
     const text = await cdp.send('Runtime.evaluate', {
       expression: `document.body?.innerText || ''`,
@@ -140,6 +126,8 @@ async function main() {
       hasStages: /分解|工具|执行|复核|CAD|响应/.test(body),
       notOldPipeline: !/服务端事件总线/.test(body),
       hasStream: /实时|事件|缓冲|连接/.test(body),
+      hasIdleOrRecent: /最近完成|当前没有进行中的审查接力|跑一条演示审查|思维链/.test(body),
+      hasThoughtOrDemo: /思维链|#\d+|跑一条演示审查/.test(body),
     }
     console.log(JSON.stringify({ checks, bodyPreview: body.slice(0, 600) }, null, 2))
 
@@ -148,7 +136,29 @@ async function main() {
     fs.writeFileSync(out, Buffer.from(shot.data, 'base64'))
     console.log('screenshot', out)
 
-    const ok = checks.hasRelayTitle && checks.hasStages && checks.notOldPipeline
+    const clickDemo = await cdp.send('Runtime.evaluate', {
+      expression: `(() => {
+        const btn = [...document.querySelectorAll('button')].find(b => /跑一条演示审查/.test(b.textContent || ''))
+        if (!btn) return 'no-btn'
+        btn.click()
+        return 'clicked'
+      })()`,
+    })
+    console.log('demo-click', clickDemo.result?.value)
+    await sleep(4000)
+    const after = await cdp.send('Runtime.evaluate', {
+      expression: `document.body?.innerText || ''`,
+    })
+    const afterBody = after.result?.value || ''
+    checks.demoStarted = /演示启动|演示审查启动|进行中的审查接力|思维链\s*#/.test(afterBody)
+    console.log('after-demo', {
+      demoStarted: checks.demoStarted,
+      preview: afterBody.replace(/\s+/g, ' ').slice(0, 800),
+    })
+    const shot2 = await cdp.send('Page.captureScreenshot', { format: 'png' })
+    fs.writeFileSync(path.join(ROOT, 'scripts', 'monitor-verify-demo.png'), Buffer.from(shot2.data, 'base64'))
+
+    const ok = checks.hasRelayTitle && checks.hasStages && checks.notOldPipeline && checks.hasIdleOrRecent && checks.hasThoughtOrDemo
     if (!ok) {
       console.error('VERIFY_FAILED')
       process.exitCode = 1
