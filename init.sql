@@ -518,3 +518,155 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_security_events_event_id ON security_events
 
 -- P: observability - pipeline_spans trace_id column (OTel/Tempo linkage)
 ALTER TABLE pipeline_spans ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32) DEFAULT '';
+ALTER TABLE llm_traces ADD COLUMN IF NOT EXISTS trace_id VARCHAR(32) DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_llm_traces_trace_id ON llm_traces(trace_id);
+
+-- RAG hybrid: lexical pre-tokens + Postgres FTS (no-op if table not yet created)
+ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS search_lex TEXT DEFAULT '';
+
+-- ════════════════════════════════════════════
+-- Red vs Blue Self-Play
+-- ════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS self_play_matches (
+    id SERIAL PRIMARY KEY,
+    match_id VARCHAR(64) NOT NULL UNIQUE,
+    status VARCHAR(20) DEFAULT 'pending',
+    mode VARCHAR(20) DEFAULT 'sigma',
+    curriculum_level INTEGER DEFAULT 0,
+    total_rounds INTEGER DEFAULT 0,
+    completed_rounds INTEGER DEFAULT 0,
+    config JSONB DEFAULT '{}',
+    metrics JSONB DEFAULT '{}',
+    winner VARCHAR(20) DEFAULT '',
+    started_at TIMESTAMP WITH TIME ZONE,
+    finished_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sp_match_status ON self_play_matches(status);
+CREATE INDEX IF NOT EXISTS idx_sp_match_created ON self_play_matches(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS self_play_rounds (
+    id SERIAL PRIMARY KEY,
+    match_id VARCHAR(64) NOT NULL,
+    round_num INTEGER DEFAULT 0,
+    curriculum_level INTEGER DEFAULT 0,
+    red_plan JSONB DEFAULT '{}',
+    events JSONB DEFAULT '[]',
+    blue_obs JSONB DEFAULT '[]',
+    outcome VARCHAR(20) DEFAULT '',
+    metrics JSONB DEFAULT '{}',
+    learned JSONB DEFAULT '[]',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sp_round_match ON self_play_rounds(match_id, round_num);
+
+CREATE TABLE IF NOT EXISTS self_play_learned_rules (
+    id SERIAL PRIMARY KEY,
+    rule_id VARCHAR(50) DEFAULT '',
+    match_id VARCHAR(64) DEFAULT '',
+    source_round INTEGER DEFAULT 0,
+    title VARCHAR(300) DEFAULT '',
+    attack_type VARCHAR(50) DEFAULT '',
+    mitre_id VARCHAR(20) DEFAULT '',
+    severity VARCHAR(20) DEFAULT 'medium',
+    conditions JSONB DEFAULT '{}',
+    sigma_yaml TEXT DEFAULT '',
+    status VARCHAR(20) DEFAULT 'candidate',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sp_rule_status ON self_play_learned_rules(status);
+CREATE INDEX IF NOT EXISTS idx_sp_rule_match ON self_play_learned_rules(match_id);
+ALTER TABLE self_play_learned_rules ADD COLUMN IF NOT EXISTS review_report JSONB DEFAULT '{}';
+
+-- ════════════════════════════════════════════
+-- 因果攻击链 (PC / GES + 后门 do)
+-- ════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS causal_graphs (
+    id SERIAL PRIMARY KEY,
+    algorithm VARCHAR(20) DEFAULT 'pc+ges',
+    n_windows INTEGER DEFAULT 0,
+    bin_minutes INTEGER DEFAULT 30,
+    names JSONB DEFAULT '[]',
+    directed JSONB DEFAULT '[]',
+    edges JSONB DEFAULT '[]',
+    pc JSONB DEFAULT '{}',
+    ges JSONB DEFAULT '{}',
+    agree_rate REAL DEFAULT 0.0,
+    reason VARCHAR(80) DEFAULT '',
+    ok BOOLEAN DEFAULT FALSE,
+    candidates JSONB DEFAULT '[]',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_causal_graphs_created ON causal_graphs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS causal_edges (
+    id SERIAL PRIMARY KEY,
+    graph_id INTEGER,
+    cause VARCHAR(50) DEFAULT '',
+    effect VARCHAR(50) DEFAULT '',
+    confidence VARCHAR(40) DEFAULT '',
+    ace REAL,
+    identifiable BOOLEAN DEFAULT FALSE,
+    prior_violation BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_causal_edges_graph ON causal_edges(graph_id);
+CREATE INDEX IF NOT EXISTS idx_causal_edges_cause ON causal_edges(cause, effect);
+
+-- ════════════════════════════════════════════
+-- MCP Guard — 工具调用审计 / 行为签名
+-- ════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS tool_call_log (
+    id SERIAL PRIMARY KEY,
+    ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    tool_name VARCHAR(64) NOT NULL,
+    caller VARCHAR(64) NOT NULL DEFAULT 'unknown',
+    caller_role VARCHAR(32) DEFAULT '',
+    source VARCHAR(32) NOT NULL DEFAULT 'mcp_guard',
+    session_id VARCHAR(64) DEFAULT '',
+    trace_id VARCHAR(64) DEFAULT '',
+    event_id INTEGER DEFAULT 0,
+    arguments JSONB DEFAULT '{}',
+    arg_digest VARCHAR(32) DEFAULT '',
+    decision VARCHAR(32) DEFAULT '',
+    reason TEXT DEFAULT '',
+    checks JSONB DEFAULT '[]',
+    exec_status VARCHAR(32),
+    duration_ms DOUBLE PRECISION DEFAULT 0,
+    tool_match_method VARCHAR(16) DEFAULT 'exact',
+    signature_score DOUBLE PRECISION,
+    signature_reasons JSONB DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_tcl_ts ON tool_call_log (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_tcl_tool_caller ON tool_call_log (tool_name, caller, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_tcl_source ON tool_call_log (source);
+CREATE INDEX IF NOT EXISTS idx_tcl_score ON tool_call_log (signature_score DESC) WHERE signature_score IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS tool_signatures (
+    tool_name VARCHAR(64) NOT NULL,
+    caller VARCHAR(64) NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}',
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tool_name, caller)
+);
+
+CREATE TABLE IF NOT EXISTS tool_anomalies (
+    id SERIAL PRIMARY KEY,
+    ts TIMESTAMP WITH TIME ZONE NOT NULL,
+    call_id INTEGER,
+    tool_name VARCHAR(64) NOT NULL,
+    caller VARCHAR(64) NOT NULL,
+    score DOUBLE PRECISION NOT NULL,
+    dimensions JSONB NOT NULL DEFAULT '{}',
+    reasons JSONB NOT NULL DEFAULT '[]',
+    mode VARCHAR(16) NOT NULL DEFAULT 'shadow',
+    action_taken VARCHAR(16) NOT NULL DEFAULT 'logged',
+    trace_id VARCHAR(64) DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tool_anom_ts ON tool_anomalies (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_anom_tool ON tool_anomalies (tool_name, caller);

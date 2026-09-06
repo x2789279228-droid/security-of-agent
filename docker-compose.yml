@@ -32,6 +32,12 @@ services:
     image: pgvector/pgvector:0.8.2-pg16
     container_name: shared-memory-pg
     restart: always
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
     environment:
       POSTGRES_DB: shared_memory
       POSTGRES_USER: admin
@@ -338,11 +344,29 @@ services:
       SHARED_MEMORY_OTEL_ENABLED: "true"
       SHARED_MEMORY_OTEL_ENDPOINT: http://otel-collector:4317
       SHARED_MEMORY_ENV_NAME: ${SHARED_MEMORY_ENV_NAME:-dev}
+      # RAG 混合检索 (v2: dense + BM25 sparse + RRF + cross-encoder)
+      SHARED_MEMORY_RAG_HYBRID_ENABLED: ${SHARED_MEMORY_RAG_HYBRID_ENABLED:-true}
+      SHARED_MEMORY_RAG_QUERY_REWRITE: ${SHARED_MEMORY_RAG_QUERY_REWRITE:-rules}
+      SHARED_MEMORY_RAG_HYDE: ${SHARED_MEMORY_RAG_HYDE:-empty_only}
+      SHARED_MEMORY_RAG_BM25_BACKEND: ${SHARED_MEMORY_RAG_BM25_BACKEND:-builtin}
+      SHARED_MEMORY_RAG_RRF_K: ${SHARED_MEMORY_RAG_RRF_K:-60}
+      SHARED_MEMORY_RAG_PREFETCH: ${SHARED_MEMORY_RAG_PREFETCH:-20}
+      # 默认空 URL：不依赖 Infinity。词法/特征重排即可用。要 CE 时先 --profile rerank 再填 URL。
+      SHARED_MEMORY_RAG_RERANK_ENABLED: ${SHARED_MEMORY_RAG_RERANK_ENABLED:-true}
+      SHARED_MEMORY_RAG_RERANK_URL: ${SHARED_MEMORY_RAG_RERANK_URL:-}
+      SHARED_MEMORY_RAG_RERANK_MODEL: ${SHARED_MEMORY_RAG_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      SHARED_MEMORY_RAG_RERANK_TOP_N: ${SHARED_MEMORY_RAG_RERANK_TOP_N:-20}
       # Temporal (4 层 Agent 编排; 默认启用, 失败降级 async)
       SHARED_MEMORY_TEMPORAL_ENABLED: ${SHARED_MEMORY_TEMPORAL_ENABLED:-true}
       SHARED_MEMORY_TEMPORAL_HOST: temporal:7233
       SHARED_MEMORY_TEMPORAL_NAMESPACE: default
       SHARED_MEMORY_TEMPORAL_TASK_QUEUE: audit-pipeline
+      SHARED_MEMORY_SELF_PLAY_ENABLED: ${SHARED_MEMORY_SELF_PLAY_ENABLED:-true}
+      SHARED_MEMORY_SELF_PLAY_INJECT: ${SHARED_MEMORY_SELF_PLAY_INJECT:-false}
+      SHARED_MEMORY_SELF_PLAY_USE_LLM: ${SHARED_MEMORY_SELF_PLAY_USE_LLM:-false}
+      SHARED_MEMORY_SELF_PLAY_REVIEW_ENABLED: ${SHARED_MEMORY_SELF_PLAY_REVIEW_ENABLED:-true}
+      SHARED_MEMORY_SELF_PLAY_REVIEW_LLM: ${SHARED_MEMORY_SELF_PLAY_REVIEW_LLM:-true}
+      SHARED_MEMORY_SELF_PLAY_REVIEW_REPLAY: ${SHARED_MEMORY_SELF_PLAY_REVIEW_REPLAY:-true}
       # 敏感字段加密（Fernet key, 生成: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"）
       SHARED_MEMORY_FIELD_ENCRYPTION_KEY: ${SHARED_MEMORY_FIELD_ENCRYPTION_KEY:-}
       # ── B 类高级能力（NDR/EDR/威胁情报/0day/反钓鱼; 默认关闭, 演示经 .env.demo 开启）──
@@ -381,6 +405,7 @@ services:
       - ./config/ssh/firewall_key:/tmp/ssh-keys/id_rsa:ro
       # L2/L3: 运营新增/修改的响应策略 + taxonomy 跨重建持久化
       - response-policies-data:/data/response_policies
+      - selfplay-sigma-shadow:/app/sigma_engine/rules_selfplay_shadow
     ports:
       - "8001:8000"
     depends_on:
@@ -394,6 +419,37 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+
+  # ── Cross-encoder（可选，默认不拉镜像）──
+  # Infinity 镜像 ~数 GB，且首次还要下 BAAI/bge-reranker-v2-m3，不要绑进默认栈。
+  # 启用:
+  #   1) 国内镜像: docker pull docker.m.daocloud.io/michaelf34/infinity:latest
+  #               docker tag docker.m.daocloud.io/michaelf34/infinity:latest michaelf34/infinity:latest
+  #   2) docker compose --profile rerank up -d soc-bge-rerank
+  #   3) SHARED_MEMORY_RAG_RERANK_URL=http://soc-bge-rerank:7997/rerank
+  # 未启用时 RAG 走 BM25+RRF+特征重排，功能完整，只是没有神经网络 CE。
+  soc-bge-rerank:
+    image: ${INFINITY_IMAGE:-michaelf34/infinity:latest}
+    container_name: soc-bge-rerank
+    profiles: ["rerank"]
+    restart: unless-stopped
+    command: ["v2", "--model-id", "BAAI/bge-reranker-v2-m3", "--port", "7997", "--engine", "torch", "--device", "cpu"]
+    environment:
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+    volumes:
+      - bge-reranker-cache:/app/.cache
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:7997/info',timeout=3); sys.exit(0 if r.status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
 
   frontend:
     image: ghcr.io/x2789279228-droid/soc-frontend:${IMAGE_TAG:-dev}
@@ -450,6 +506,12 @@ services:
       SHARED_MEMORY_TEMPORAL_HOST: temporal:7233
       SHARED_MEMORY_TEMPORAL_NAMESPACE: default
       SHARED_MEMORY_TEMPORAL_TASK_QUEUE: audit-pipeline
+      SHARED_MEMORY_SELF_PLAY_ENABLED: ${SHARED_MEMORY_SELF_PLAY_ENABLED:-true}
+      SHARED_MEMORY_SELF_PLAY_INJECT: ${SHARED_MEMORY_SELF_PLAY_INJECT:-false}
+      SHARED_MEMORY_SELF_PLAY_USE_LLM: ${SHARED_MEMORY_SELF_PLAY_USE_LLM:-false}
+      SHARED_MEMORY_SELF_PLAY_REVIEW_ENABLED: ${SHARED_MEMORY_SELF_PLAY_REVIEW_ENABLED:-true}
+      SHARED_MEMORY_SELF_PLAY_REVIEW_LLM: ${SHARED_MEMORY_SELF_PLAY_REVIEW_LLM:-true}
+      SHARED_MEMORY_SELF_PLAY_REVIEW_REPLAY: ${SHARED_MEMORY_SELF_PLAY_REVIEW_REPLAY:-true}
       # v5 修复:并发上限 — 无上限时批量重放会打爆 LLM API (429 风暴致审计降级)
       TEMPORAL_CONCURRENCY: ${TEMPORAL_CONCURRENCY:-30}
       # OpenTelemetry (activity 内 span → collector → Tempo/Jaeger)
@@ -687,3 +749,5 @@ volumes:
   jaeger_data:
   temporal_postgres_data:
   response-policies-data:
+  selfplay-sigma-shadow:
+  bge-reranker-cache:
