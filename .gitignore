@@ -1,5 +1,6 @@
 # 安全：禁止提交环境变量文件（含密钥）
 .env
+.env.eval-bak
 backend/.env
 frontend/.env
 
@@ -16,6 +17,15 @@ database.db-shm
 database.db-wal
 *.sqlite3
 build_out*.txt
+build-backend-now.err
+
+# Self-Play 审核 Agent 自动写入的 Sigma(不进 git)
+backend/sigma_engine/rules_selfplay_shadow/*.yml
+
+# 视频/视频任务元数据（不入 git — 演示材料, 体积大且与代码无关）
+videos/
+.video_tasks/
+frontend/scripts/monitor-verify-demo.png
 
 # Python
 __pycache__/
@@ -84,6 +94,14 @@ r5_report.md
 r6_report.md
 r7_report.md
 r8_report.md
+r9_report.md
+r10_report.md
+r11_report.md
+r12_report.md
+r12_executive_summary.md
 /convert_to_json.py
+
+# 意外空文件
+backend/1
 # SSH 防火墙/响应密钥（含私钥）→ 仅本机测试, 不入库
 config/ssh/
