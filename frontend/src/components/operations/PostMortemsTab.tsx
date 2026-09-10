@@ -6,9 +6,9 @@ import { EmptyState } from './badges'
 import type { SecurityCase, PostMortem } from '../../types/operations'
 
 const PM_STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
-  draft: { label: '草稿', color: '#FF9F0A', bg: 'rgba(255,159,10,0.12)' },
-  reviewed: { label: '已审核', color: '#0A84FF', bg: 'rgba(10,132,255,0.10)' },
-  published: { label: '已发布', color: '#34c759', bg: 'rgba(52,199,89,0.10)' },
+  draft: { label: '草稿', color: '#C08A3A', bg: 'rgba(192,138,58,0.12)' },
+  reviewed: { label: '已审核', color: '#4A7A88', bg: 'rgba(74,122,136,0.10)' },
+  published: { label: '已发布', color: '#3E7A64', bg: 'rgba(52,199,89,0.10)' },
 }
 
 export function PostMortemsTab() {
@@ -80,14 +80,14 @@ export function PostMortemsTab() {
   return (
     <div className="space-y-8">
       {/* 生成复盘 */}
-      <section className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <section className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <h3 className="text-sm font-semibold text-ink tracking-tight mb-1">生成复盘报告</h3>
         <p className="text-xs text-ink-faint mb-4">从已解决/已关闭的案例自动生成复盘草稿：时间线 + 误报统计 + LLM 根因分析</p>
         <div className="flex gap-2">
           <select
             value={selectedCase}
             onChange={(e) => setSelectedCase(Number(e.target.value))}
-            className="flex-1 px-3 py-2 text-xs border border-line rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-accent"
+            className="flex-1 px-3 py-2 text-xs border border-line rounded-lg bg-card/80 focus:outline-none focus:ring-1 focus:ring-accent"
           >
             <option value={0}>选择案例…</option>
             {withoutPm.map((c) => <option key={c.id} value={c.id}>{c.case_number} — {c.title}</option>)}
@@ -95,7 +95,7 @@ export function PostMortemsTab() {
           <button
             onClick={generate}
             disabled={generating || !selectedCase}
-            className="px-5 py-2 text-xs font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+            className="px-5 py-2 text-xs font-medium text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
             style={{ backgroundImage: AI_GRADIENT }}
           >
             {generating ? '生成中（LLM 分析）…' : '✦ 生成复盘'}
@@ -123,7 +123,7 @@ export function PostMortemsTab() {
                   initial={{ opacity: 0, y: 16 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ ...spring.ui, delay: Math.min(i * 0.04, 0.3) }}
-                  className="bg-white border border-line rounded-none shadow-[0_1px_3px_rgba(0,0,0,0.04)] overflow-hidden"
+                  className="bg-card/80 border border-line rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] overflow-hidden"
                 >
                   <button
                     onClick={() => setExpanded(isOpen ? null : c.id)}
@@ -171,7 +171,7 @@ export function PostMortemsTab() {
                                 <div className="absolute left-[5px] top-1 bottom-1 w-px" style={{ background: AI_GRADIENT, opacity: 0.35 }} />
                                 {pm.timeline.slice(0, 10).map((t, j) => (
                                   <div key={j} className="relative pb-3 last:pb-0">
-                                    <span className="absolute -left-5 top-1 w-[9px] h-[9px] rounded-full" style={{ background: '#5E5CE6' }} />
+                                    <span className="absolute -left-5 top-1 w-[9px] h-[9px] rounded-full" style={{ background: '#4A7A88' }} />
                                     <p className="text-[10px] font-mono text-ink-faint tabular-nums">{t.time?.slice(0, 19).replace('T', ' ')}</p>
                                     <p className="text-xs text-ink">{t.event} <span className="text-ink-soft">— {t.detail}</span></p>
                                   </div>
@@ -199,7 +199,7 @@ export function PostMortemsTab() {
                               <ul className="space-y-1.5">
                                 {pm.rule_improvements.map((r, j) => (
                                   <li key={j} className="text-xs text-ink flex gap-2">
-                                    <span className="text-[#BF5AF2]">⚙</span>
+                                    <span className="text-[#4A7A88]">⚙</span>
                                     {r.rule_id && <span className="font-mono text-ink-faint">[{r.rule_id}]</span>} {r.suggestion}
                                   </li>
                                 ))}
@@ -219,7 +219,7 @@ export function PostMortemsTab() {
                           {pm.status !== 'published' && (
                             <button
                               onClick={() => publish(c.id)}
-                              className="px-4 py-2 text-xs font-medium text-white rounded-lg hover:opacity-90"
+                              className="px-4 py-2 text-xs font-medium text-on-accent rounded-lg hover:opacity-90"
                               style={{ backgroundImage: AI_GRADIENT }}
                             >
                               发布复盘（同步规则建议到反馈系统）

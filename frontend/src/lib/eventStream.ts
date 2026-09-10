@@ -26,31 +26,32 @@ export interface StreamEvent {
 }
 
 // ── 事件类型注册表 ── 新增后端事件类型时在此登记即可被管线捕获 ──
+// 徽章色：security_event=磷光 LIVE；alert/tool_anomaly=朱砂；其余类型按职能分色
 export const EVENT_META: Record<string, { label: string; badge: string }> = {
-  security_event:            { label: '事件接入', badge: 'bg-ink text-white' },
-  alert:                     { label: '告警',     badge: 'bg-ink text-white outline outline-2 outline-offset-2 outline-dan' },
-  agent_stage:               { label: 'Agent 阶段', badge: 'bg-ink text-white' },
-  agent_thought:             { label: '思维步骤', badge: 'border border-line bg-mist text-ink' },
-  audit_complete:            { label: '审计完成', badge: 'bg-nong text-white' },
-  response_action:           { label: '响应执行', badge: 'bg-hui text-white' },
-  pipeline_health:           { label: '管道健康', badge: 'bg-qing text-ink' },
-  edr_correlation:           { label: 'EDR关联', badge: 'border border-line bg-mist text-ink' },
-  data_security_llm_verdict: { label: '数据安全裁定', badge: 'border border-line bg-mist text-ink' },
-  phishing_llm_verdict:      { label: '钓鱼裁定', badge: 'border border-line bg-mist text-ink' },
-  selfplay_round:            { label: '自博弈回合', badge: 'bg-ink text-white' },
-  selfplay_match:            { label: '自博弈对局', badge: 'border border-ink text-ink' },
-  tool_anomaly:              { label: '工具偏离', badge: 'bg-ink text-white outline outline-2 outline-offset-2 outline-dan' },
+  security_event:            { label: '事件接入', badge: 'border border-accent/40 bg-accent/10 text-accent' },
+  alert:                     { label: '告警',     badge: 'border border-alert/50 bg-alert/15 text-alert' },
+  agent_stage:               { label: 'Agent 阶段', badge: 'border border-hui/45 bg-hui/10 text-hui' },
+  agent_thought:             { label: '思维步骤', badge: 'border border-line bg-mist text-ink-faint' },
+  audit_complete:            { label: '审计完成', badge: 'border border-accent/35 bg-accent/5 text-accent' },
+  response_action:           { label: '响应执行', badge: 'border border-warn/45 bg-warn/10 text-warn' },
+  pipeline_health:           { label: '管道健康', badge: 'border border-hui/35 bg-hui/5 text-hui' },
+  edr_correlation:           { label: 'EDR关联', badge: 'border border-dan/60 bg-transparent text-ink-soft' },
+  data_security_llm_verdict: { label: '数据安全裁定', badge: 'border border-dan/60 bg-transparent text-ink-soft' },
+  phishing_llm_verdict:      { label: '钓鱼裁定', badge: 'border border-warn/40 bg-warn/5 text-warn' },
+  selfplay_round:            { label: '自博弈回合', badge: 'border border-dashed border-accent/45 bg-accent/5 text-accent' },
+  selfplay_match:            { label: '自博弈对局', badge: 'border border-dashed border-warn/50 bg-warn/5 text-warn' },
+  tool_anomaly:              { label: '工具偏离', badge: 'border border-alert/50 bg-alert/15 text-alert' },
 }
 export const TYPE_KEYS = Object.keys(EVENT_META)
 export const metaOf = (type: string) => EVENT_META[type]
 
-// ── 严重度注册表（灰阶深浅分级）──
+// ── 严重度注册表 ── 0.1s 规则：critical=朱砂 / high=琥珀 / medium=信号蓝 / low+info=微光
 export const SEVERITY_META: Record<string, { label: string; chip: string; bar: string; rank: number }> = {
-  critical: { label: '严重', chip: 'bg-ink text-white',        bar: 'bg-ink w-[3px]', rank: 4 },
-  high:     { label: '高',   chip: 'bg-nong text-white',       bar: 'bg-ink w-[2px]', rank: 3 },
-  medium:   { label: '中',   chip: 'border border-nong text-nong', bar: 'bg-nong w-[2px]', rank: 2 },
-  low:      { label: '低',   chip: 'border border-line text-ink-faint', bar: 'bg-dan w-px', rank: 1 },
-  info:     { label: '信息', chip: 'text-ink-faint',           bar: 'bg-line w-px', rank: 0 },
+  critical: { label: '严重', chip: 'bg-alert/15 text-alert border border-alert/40',  bar: 'bg-alert w-[3px]', rank: 4 },
+  high:     { label: '高',   chip: 'bg-warn/15 text-warn border border-warn/40',     bar: 'bg-warn w-[3px]',  rank: 3 },
+  medium:   { label: '中',   chip: 'bg-hui/10 text-hui border border-hui/40',        bar: 'bg-hui w-[3px]',   rank: 2 },
+  low:      { label: '低',   chip: 'border border-line bg-mist text-ink-faint',      bar: 'bg-dan w-[2px]',   rank: 1 },
+  info:     { label: '信息', chip: 'text-ink-faint',                                 bar: 'bg-line w-px',     rank: 0 },
 }
 export function severityOf(type: string, data: any): keyof typeof SEVERITY_META {
   const s = String(data?.severity ?? '').toLowerCase()
@@ -268,6 +269,12 @@ function handlePing(lastEventId: string) {
 function openStream() {
   if (es) return
   const source = api.eventsStream(knownMaxSeq ?? undefined)
+  if (!source) {
+    // 未登录(无 token):不建连,交给认证流程引导登录页
+    errStreak += 1
+    useEventStreamStore.setState({ status: 'offline', attempts: errStreak })
+    return
+  }
   es = source
   useEventStreamStore.setState({ status: 'connecting' })
 

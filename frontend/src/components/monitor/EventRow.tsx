@@ -278,7 +278,7 @@ const Inner = memo(function Inner({
             </span>
             <span>原始载荷 ↓</span>
           </p>
-          <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-all bg-white p-3 font-mono text-[11px] leading-relaxed text-ink-soft">
+          <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-line bg-card p-3 font-mono text-[11px] leading-relaxed text-ink-soft">
             {JSON.stringify(d, null, 2)}
           </pre>
         </div>

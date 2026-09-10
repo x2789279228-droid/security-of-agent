@@ -85,6 +85,55 @@ INGEST_DETECTOR_ERRORS = Counter(
     ["detector"],
 )
 
+# ── PR2 控制面 KPI 仪表盘指标 (MTTR/MTBF/误报率/响应动作耗时) ──
+SOC_MTTR_SECONDS = Gauge(
+    "soc_mttr_seconds", "Mean time to recover (seconds)",
+)
+SOC_MTBF_SECONDS = Gauge(
+    "soc_mtbf_seconds", "Mean time between failures/cases (seconds)",
+)
+SOC_FP_RATE = Gauge(
+    "soc_fp_rate", "False positive rate 0-1",
+)
+SOC_RESPONSE_DURATION = Histogram(
+    "soc_response_action_duration_seconds", "Response action duration",
+    ["action"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
+)
+
+
+def set_mttr_seconds(seconds: float) -> None:
+    """MTTR 仪表（秒）。hours 调用方自行换算；失败静默。"""
+    try:
+        SOC_MTTR_SECONDS.set(max(0.0, float(seconds or 0.0)))
+    except Exception:
+        pass
+
+
+def set_mtbf_seconds(seconds: float) -> None:
+    """MTBF 仪表（秒）。失败静默。"""
+    try:
+        SOC_MTBF_SECONDS.set(max(0.0, float(seconds or 0.0)))
+    except Exception:
+        pass
+
+
+def set_fp_rate(rate: float) -> None:
+    """误报率仪表 (0-1)。失败静默。"""
+    try:
+        SOC_FP_RATE.set(min(1.0, max(0.0, float(rate or 0.0))))
+    except Exception:
+        pass
+
+
+def observe_response_duration(action: str, seconds: float) -> None:
+    """响应动作耗时直方图（秒）。失败静默。"""
+    try:
+        SOC_RESPONSE_DURATION.labels(action=action or "unknown").observe(
+            max(0.0, float(seconds or 0.0)))
+    except Exception:
+        pass
+
 
 def inc_audit_pq_enqueue(tier: str = "?") -> None:
     try:

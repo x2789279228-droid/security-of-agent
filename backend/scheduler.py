@@ -75,6 +75,14 @@ class Scheduler:
         # embedding 回填巡检(延迟到启动自检之后再进入周期, 避免与启动回填抢占)
         self._embed_patrol_task = asyncio.create_task(self._embedding_backfill_patrol())
         self._tasks.append(self._embed_patrol_task)
+        # 每日学习闭环(与 KPI 同风格): 首启动不立即执行, 等到下一个 02:15 UTC
+        try:
+            from config import settings as _cfg
+            _learn_enabled = bool(getattr(_cfg, "learn_loop_enabled", True))
+        except Exception:
+            _learn_enabled = True
+        if _learn_enabled:
+            self._tasks.append(asyncio.create_task(self._learn_loop(db_session_factory)))
         logger.info("Scheduler started: snapshot=%ds, long_chain=%ds, cad_ctx=%ds, watchdog=%ds, sla=%ds, fp=%ds, kpi=%ds, embed_backfill=%ds",
                      SNAPSHOT_INTERVAL, LONG_CHAIN_INTERVAL, 3600, WATCHDOG_INTERVAL,
                      SLA_CHECK_INTERVAL, FP_ANALYTICS_INTERVAL, KPI_DAILY_INTERVAL,
@@ -418,10 +426,24 @@ class Scheduler:
     # ── 6. 误报统计 ──
 
     async def _fp_analytics_loop(self, db_factory):
-        """定时生成误报统计 + 调优建议"""
+        """定时生成误报统计 + 调优建议(learn_loop_hourly_enabled 时改走完整 hourly 闭环)"""
         while self._running:
             try:
                 await asyncio.sleep(FP_ANALYTICS_INTERVAL)
+                try:
+                    from config import settings as _cfg
+                    hourly_enabled = bool(getattr(_cfg, "learn_loop_hourly_enabled", False))
+                except Exception:
+                    hourly_enabled = False
+                if hourly_enabled:
+                    async with db_factory() as session:
+                        from learn_loop import run_cycle
+                        result = await run_cycle(session, trigger="hourly")
+                    logger.info(
+                        f"[LearnLoop] hourly cycle run_id={result.get('id')} "
+                        f"proposed={result.get('actions_proposed')} "
+                        f"auto_applied={result.get('actions_auto_applied')}"
+                    )
                 from feedback_loop import feedback_loop
                 async with db_factory() as session:
                     suggestions = await feedback_loop.generate_tuning_suggestions(session)
@@ -440,6 +462,46 @@ class Scheduler:
 
     # ── 7. KPI 日快照 ──
 
+    async def _set_kpi_gauges(self, session, result: dict, kpi_calculator=None) -> None:
+        """Push KPI snapshot into Prometheus gauges (fail-open)."""
+        try:
+            import metrics as _m
+            summary = (result or {}).get("summary") or {}
+            mttr_hours = summary.get("mttr_hours")
+            fp_rate = summary.get("fp_rate")
+
+            # snapshot 返回形状与预期不同 → 回退读取最近 KPI 快照
+            if mttr_hours is None and kpi_calculator is not None:
+                try:
+                    rows = await kpi_calculator.get_kpi(
+                        session, metric_key="mttr", period="daily", days=1)
+                    if rows:
+                        mttr_hours = (rows[-1] or {}).get("metric_value")
+                except Exception:
+                    mttr_hours = None
+            if fp_rate is None and kpi_calculator is not None:
+                try:
+                    rows = await kpi_calculator.get_kpi(
+                        session, metric_key="fp_rate", period="daily", days=1)
+                    if rows:
+                        fp_rate = (rows[-1] or {}).get("metric_value")
+                except Exception:
+                    fp_rate = None
+
+            if mttr_hours is not None:
+                _m.set_mttr_seconds(float(mttr_hours) * 3600.0)
+            if fp_rate is not None:
+                _m.set_fp_rate(float(fp_rate))
+
+            mttd_hours = summary.get("mttd_hours")
+            if mttr_hours is not None and mttd_hours is not None:
+                # MTBF 保守近似: 24h 检测窗口之外的平均无故障时间
+                _m.set_mtbf_seconds(
+                    max(0.0, 86400.0 - (float(mttd_hours) + float(mttr_hours)) * 3600.0))
+        except Exception as e:
+            logger.debug(f"[KPI] gauge export skipped: {e}")
+
+
     async def _kpi_daily_loop(self, db_factory):
         """每日生成 KPI 快照（默认凌晨 02:00 触发前一天聚合）"""
         while self._running:
@@ -456,10 +518,49 @@ class Scheduler:
                 async with db_factory() as session:
                     result = await kpi_calculator.snapshot_daily(session)
                     logger.info(f"[KPI] daily snapshot: {result.get('metrics_written')} metrics")
+                    await self._set_kpi_gauges(session, result, kpi_calculator)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"[KPI] daily snapshot failed: {e}")
+
+    # ── 7b. 每日学习闭环 ──
+
+    async def _learn_loop(self, db_factory):
+        """每日学习闭环: 等到下一个 learn_loop_hour_utc:learn_loop_minute (UTC)。
+
+        首启动不立即执行(与 KPI 一致), sleep 上限 86400s 防环间漂移;
+        内部由 learn_loop.run_cycle fail-open, 本循环只做告警日志。
+        """
+        while self._running:
+            try:
+                from config import settings as _cfg
+                if not bool(getattr(_cfg, "learn_loop_enabled", True)):
+                    await asyncio.sleep(3600)
+                    continue
+                hour = int(getattr(_cfg, "learn_loop_hour_utc", 2) or 2)
+                minute = int(getattr(_cfg, "learn_loop_minute", 15) or 15)
+                now = datetime.now(timezone.utc)
+                next_run = now.replace(hour=hour % 24, minute=minute, second=0, microsecond=0)
+                if next_run <= now:
+                    next_run = next_run + timedelta(days=1)
+                wait_seconds = min((next_run - now).total_seconds(), 86400)
+                await asyncio.sleep(wait_seconds)
+
+                async with db_factory() as session:
+                    from learn_loop import run_cycle
+                    result = await run_cycle(session, trigger="daily")
+                logger.info(
+                    f"[LearnLoop] daily cycle run_id={result.get('id')} "
+                    f"status={result.get('status')} "
+                    f"proposed={result.get('actions_proposed')} "
+                    f"auto_applied={result.get('actions_auto_applied')}"
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[LearnLoop] daily cycle failed: {e}")
+
 
     # ── 8. LLM 增强器预算日重置 ──
 

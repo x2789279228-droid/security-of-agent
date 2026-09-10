@@ -48,11 +48,19 @@ export default function Response() {
 
   // Approvals
   const [approvals, setApprovals] = useState<any[]>([])
+  const [previews, setPreviews] = useState<Record<string, any>>({})
+  const [previewingId, setPreviewingId] = useState('')
   const [logs, setLogs] = useState<any[]>([])
 
   // Execute
   const [execAction, setExecAction] = useState('block_ip')
   const [execTarget, setExecTarget] = useState('')
+  const [execPid, setExecPid] = useState('')
+  const [execSha, setExecSha] = useState('')
+  const [execPath, setExecPath] = useState('')
+  const [execAccount, setExecAccount] = useState('')
+  const [execDomain, setExecDomain] = useState('')
+  const [execMsgId, setExecMsgId] = useState('')
   const [rollbackToken, setRollbackToken] = useState('')
 
   const loadPolicies = useCallback(async () => {
@@ -90,10 +98,19 @@ export default function Response() {
   }
 
   const handleExecResponse = async () => {
-    if (!execTarget) { setError('请输入目标IP'); return }
+    const needsIp = ['block_ip', 'isolate_host', 'rate_limit', 'kill_session'].includes(execAction)
+    if (needsIp && !execTarget) { setError('请输入目标IP'); return }
     setLoading(true); setError(''); setResult(null)
     try {
-      const data = await api.executeResponse(execAction, execTarget, '手动执行')
+      const params: Record<string, unknown> = {}
+      if (execTarget) { params.src_ip = execTarget; params.host_ip = execTarget }
+      if (execPid) params.pid = Number(execPid)
+      if (execSha) params.sha256 = execSha
+      if (execPath) params.path = execPath
+      if (execAccount) params.account = execAccount
+      if (execDomain) params.domain = execDomain
+      if (execMsgId) params.internet_message_id = execMsgId
+      const data = await api.executeResponse(execAction, params, '手动执行')
       setResult(data)
       if (data.rollback_token) setRollbackToken(data.rollback_token)
     } catch (e: any) { setError(e.message) }
@@ -121,11 +138,23 @@ export default function Response() {
 
   return (
     <PageTransition>
-      <div className="page-shell pt-12 pb-20">
-        <h1 className="page-title">响应引擎</h1>
-        <p className="page-sub mb-8">自动威胁响应 · 策略管理 · 审批流程 · 回滚</p>
+      <div className="page-shell pt-4 pb-12">
+        <header className="flex flex-col gap-2 border-b border-line pb-3 md:flex-row md:items-end md:justify-between">
+          <div className="min-w-0 md:max-w-[44rem]">
+            <h1 className="font-serif text-[28px] font-black tracking-[-0.04em] text-ink leading-[1.1]">
+              响应引擎
+            </h1>
+            <p className="mt-1 text-[13px] leading-snug text-ink-soft">
+              自动威胁响应 · 策略管理 · 审批流程 · 回滚。
+            </p>
+            <p className="mt-1 hidden font-serif italic text-[12px] leading-snug text-ink-faint/80 md:block">
+              <span aria-hidden className="mr-1 text-[#c9a574]/70">¶</span>
+              ——封禁要快，回滚要快。
+            </p>
+          </div>
+        </header>
 
-        <div className="flex flex-wrap gap-2 mb-8">
+        <div className="mt-5 flex flex-wrap gap-2 mb-6">
           {([
             { id: 'threats', label: '威胁模拟' },
             { id: 'policies', label: '响应策略' },
@@ -185,15 +214,15 @@ export default function Response() {
                   const sev = (document.getElementById('threat-severity-select') as HTMLSelectElement)?.value || 'high'
                   await simulateThreat({ threat_type: type, confidence: 0.8, severity: sev, src_ip: ip, message: `模拟${type}事件` })
                 }} disabled={loading}
-                  className="px-5 py-2 text-xs font-sans font-medium bg-accent text-white rounded-none hover:opacity-90 disabled:opacity-50">
-                  {loading ? '执行中...' : '模拟威胁'}
+                  className="border border-[#0e1a26] bg-[#0e1a26] px-5 py-2 font-mono text-[11px] tracking-[0.18em] uppercase text-[#f1e8d6] hover:bg-[#182838] transition-colors disabled:opacity-50">
+                  {loading ? '执行中 …' : '模拟威胁'}
                 </button>
               </div>
             </div>
 
             {/* 手动执行 */}
             <div className="border-t border-line pt-4">
-              <label className="text-xs font-sans font-medium text-ink-faint mb-2 block">手动执行响应动作</label>
+              <label className="font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint mb-2 block">手动执行响应动作</label>
               <div className="flex items-center gap-3">
                 <select value={execAction} onChange={e => setExecAction(e.target.value)}
                   className="px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent">
@@ -201,12 +230,26 @@ export default function Response() {
                     <option key={a.name} value={a.name}>{a.name} ({a.description})</option>
                   ))}
                 </select>
-                <input type="text" placeholder="目标IP" value={execTarget} onChange={e => setExecTarget(e.target.value)}
+                <input type="text" placeholder="目标IP / 主机" value={execTarget} onChange={e => setExecTarget(e.target.value)}
                   className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
                 <button onClick={handleExecResponse} disabled={loading}
-                  className="px-4 py-2 text-xs font-sans font-medium bg-red-500 text-white rounded-none hover:opacity-90 disabled:opacity-50">
+                  className="border border-alert bg-alert px-4 py-2 font-mono text-[11px] tracking-[0.18em] uppercase text-paper hover:opacity-90 disabled:opacity-50">
                   执行
                 </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                <input type="text" placeholder="PID" value={execPid} onChange={e => setExecPid(e.target.value)}
+                  className="w-24 px-3 py-2 text-xs font-sans border border-line rounded-none" />
+                <input type="text" placeholder="SHA256" value={execSha} onChange={e => setExecSha(e.target.value)}
+                  className="flex-1 min-w-[12rem] px-3 py-2 text-xs font-sans border border-line rounded-none" />
+                <input type="text" placeholder="文件路径" value={execPath} onChange={e => setExecPath(e.target.value)}
+                  className="flex-1 min-w-[10rem] px-3 py-2 text-xs font-sans border border-line rounded-none" />
+                <input type="text" placeholder="账户" value={execAccount} onChange={e => setExecAccount(e.target.value)}
+                  className="w-36 px-3 py-2 text-xs font-sans border border-line rounded-none" />
+                <input type="text" placeholder="域名" value={execDomain} onChange={e => setExecDomain(e.target.value)}
+                  className="w-40 px-3 py-2 text-xs font-sans border border-line rounded-none" />
+                <input type="text" placeholder="邮件 Message-ID" value={execMsgId} onChange={e => setExecMsgId(e.target.value)}
+                  className="flex-1 min-w-[10rem] px-3 py-2 text-xs font-sans border border-line rounded-none" />
               </div>
             </div>
 
@@ -291,9 +334,17 @@ export default function Response() {
                   </div>
                   <div className="flex gap-2 mt-3">
                     <button onClick={async () => {
-                      try { await api.approveTicket(t.id); await loadApprovals(); setResult(`工单 ${t.id} 已批准`) } catch (e: any) { setError(e.message) }
+                      try {
+                        // 批准前先 dry-run 预览动作效果（无真实变更），再带 sig 批准
+                        setPreviewingId(t.id)
+                        const pv = await api.previewApproval(t.id)
+                        setPreviews(prev => ({ ...prev, [t.id]: pv }))
+                        await api.approveTicket(t.id, 'admin', t.sig)
+                        await loadApprovals()
+                        setResult(`工单 ${t.id} 已批准`)
+                      } catch (e: any) { setError(e.message) } finally { setPreviewingId('') }
                     }} className="px-3 py-1.5 text-[10px] font-sans font-medium bg-green-500 text-white rounded-none hover:opacity-90">
-                      批准
+                      {previewingId === t.id ? '预览中...' : '批准'}
                     </button>
                     <button onClick={async () => {
                       try { await api.rejectTicket(t.id, '自动拒绝'); await loadApprovals(); setResult(`工单 ${t.id} 已拒绝`) } catch (e: any) { setError(e.message) }
@@ -301,6 +352,11 @@ export default function Response() {
                       拒绝
                     </button>
                   </div>
+                  {previews[t.id] && (
+                    <div className="mt-3">
+                      <Collapse title="批准前预览 (dry-run)">{JSON.stringify(previews[t.id], null, 2)}</Collapse>
+                    </div>
+                  )}
                 </div>
               ))
             )}

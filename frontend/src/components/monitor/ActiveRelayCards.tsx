@@ -14,12 +14,13 @@ import {
 import { ROUTES } from '../../lib/constants'
 import { useEventStreamStore } from '../../lib/eventStream'
 
+// 阶段格三色：运行=松绿脉冲；成功=暮青；错误/超时=朱砂；空闲=青底
 const cellClass: Record<StageCellStatus, string> = {
-  idle: 'bg-line',
-  running: 'bg-ink animate-pulse',
-  success: 'bg-nong',
-  error: 'bg-hui',
-  timeout: 'bg-hui',
+  idle: 'bg-qing',
+  running: 'bg-ok animate-pulse shadow-[0_0_8px_rgba(62,122,100,0.35)]',
+  success: 'bg-accent/60',
+  error: 'bg-alert',
+  timeout: 'bg-alert/70',
 }
 
 function emptyStages(): Record<string, StageCellStatus> {
@@ -80,15 +81,19 @@ function Card({
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') onSelect?.(relay.eventId)
       }}
-      className={`min-w-[220px] flex-1 cursor-pointer border bg-white px-3 py-2.5 ${
-        selected ? 'border-ink' : 'border-line hover:border-ink'
+      className={`min-w-[220px] flex-1 cursor-pointer rounded-xl border bg-card/80 backdrop-blur-sm px-3 py-2.5 transition-colors ${
+        selected
+          ? 'border-accent/70 shadow-[0_4px_16px_rgba(58,101,112,0.14)]'
+          : relay.lastError
+            ? 'border-alert/40 hover:border-alert/70'
+            : 'border-line hover:border-accent/50'
       }`}
     >
       <div className="flex items-baseline justify-between gap-2">
-        <span className="font-mono text-[12px] font-semibold text-ink">
+        <span className={`font-mono text-[12px] font-semibold ${relay.lastError ? 'text-alert' : 'text-accent'}`}>
           #{relay.eventId}
         </span>
-        <span className="text-[11px] text-ink-faint tabular-nums">
+        <span className={`text-[11px] tabular-nums ${completed ? 'text-ok' : 'text-ink-faint'}`}>
           {completed ? '已完成' : runningLabel(relay.startedAt, now)}
         </span>
       </div>
@@ -208,7 +213,7 @@ export default function ActiveRelayCards({
 
   if (active.length === 0 && recent.length === 0) {
     return (
-      <div className="mb-5 border border-dashed border-line bg-white px-5 py-4">
+      <div className="mb-5 rounded-xl border border-dashed border-line bg-card/50 px-5 py-4">
         <p className="text-[13px] font-semibold text-ink">当前没有进行中的审查接力</p>
         <p className="mt-1 text-[12px] text-ink-faint">
           自博弈默认不注入 ingest，监控页不会出现 Audit-LLM 接力。可在本页跑一条演示审查，或到安全审计注入事件。
@@ -219,20 +224,20 @@ export default function ActiveRelayCards({
               type="button"
               onClick={onDemo}
               disabled={demoBusy}
-              className="border border-ink bg-ink px-3 py-1 text-[12px] text-white disabled:opacity-60"
+              className="rounded-lg bg-accent px-3 py-1.5 text-[12px] font-semibold text-on-accent border border-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
             >
               {demoBusy ? '演示审查启动中…' : '跑一条演示审查'}
             </button>
           )}
           <Link
             to={ROUTES.SECURITY_AUDIT}
-            className="border border-line px-3 py-1 text-[12px] text-ink-soft hover:border-ink hover:text-ink"
+            className="rounded-lg border border-line px-3 py-1.5 text-[12px] text-ink-soft transition-colors hover:border-accent/60 hover:text-accent"
           >
             安全审计注入
           </Link>
           <Link
             to={ROUTES.SELF_PLAY}
-            className="border border-line px-3 py-1 text-[12px] text-ink-soft hover:border-ink hover:text-ink"
+            className="rounded-lg border border-line px-3 py-1.5 text-[12px] text-ink-soft transition-colors hover:border-accent/60 hover:text-accent"
           >
             红蓝自博弈（勾选注入）
           </Link>

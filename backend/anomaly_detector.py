@@ -130,12 +130,12 @@ class AnomalyDetector:
         except Exception as e:
             logger.warning(f"Failed to load baselines from Redis: {e}")
 
-    async def _save_baselines_to_redis(self):
-        """异步保存基线到 Redis（每 _save_interval 秒执行一次）"""
+    async def _save_baselines_to_redis(self, force: bool = False):
+        """异步保存基线到 Redis（默认受 _save_interval 节流; force=True 跳过节流）"""
         if not self.redis:
             return
         now = time.time()
-        if now - self._last_save < self._save_interval:
+        if not force and now - self._last_save < self._save_interval:
             return
         self._last_save = now
         try:
@@ -201,6 +201,29 @@ class AnomalyDetector:
         bl.total_count += 1
         bl.hourly_counts[hour % 24] += 1
         bl.event_types.add(event_type)
+
+    def decay_entity(self, entity_type: str, entity_key: str, factor: float = 0.5) -> bool:
+        """按 factor 衰减实体的计数基线(learn_loop FP 收敛用)。
+
+        只缩放 hourly_counts / daily_count / weekly_count / total_count,
+        永不删除实体; 实体不存在返回 False。
+        """
+        bl = self.baselines.get(entity_type, {}).get(entity_key)
+        if bl is None:
+            return False
+        try:
+            factor = max(0.0, min(1.0, float(factor)))
+        except (TypeError, ValueError):
+            factor = 0.5
+        bl.hourly_counts = [int(c * factor) for c in bl.hourly_counts]
+        bl.daily_count = int(bl.daily_count * factor)
+        bl.weekly_count = int(bl.weekly_count * factor)
+        bl.total_count = int(bl.total_count * factor)
+        logger.info(
+            f"AnomalyDetector: decayed {entity_type}/{entity_key} "
+            f"by {factor:.2f} → total_count={bl.total_count}"
+        )
+        return True
 
     def _calc_statistical_deviation(self, entity_type: str,
                                      entity_key: str,

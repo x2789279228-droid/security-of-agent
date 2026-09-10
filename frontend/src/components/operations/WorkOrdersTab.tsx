@@ -14,11 +14,11 @@ const TYPE_FILTERS: { value: OrderType | ''; label: string }[] = [
 ]
 
 const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
-  pending: { label: '待处理', color: '#86868b', bg: 'rgba(134,134,139,0.10)' },
-  assigned: { label: '已指派', color: '#111111', bg: '#e8e8e8' },
-  in_progress: { label: '进行中', color: '#FF9F0A', bg: 'rgba(255,159,10,0.12)' },
-  completed: { label: '已完成', color: '#111111', bg: '#f2f2f2' },
-  cancelled: { label: '已取消', color: '#86868b', bg: 'rgba(134,134,139,0.10)' },
+  pending: { label: '待处理', color: '#8A97A4', bg: 'rgba(138,151,164,0.12)' },
+  assigned: { label: '已指派', color: '#1C2838', bg: '#E6ECF0' },
+  in_progress: { label: '进行中', color: '#C08A3A', bg: 'rgba(192,138,58,0.12)' },
+  completed: { label: '已完成', color: '#3E7A64', bg: 'rgba(62,122,100,0.10)' },
+  cancelled: { label: '已取消', color: '#8A97A4', bg: 'rgba(138,151,164,0.12)' },
 }
 
 export function WorkOrdersTab() {
@@ -63,11 +63,11 @@ export function WorkOrdersTab() {
         <select
           value={typeFilter}
           onChange={(e) => setTypeFilter(e.target.value as OrderType | '')}
-          className="px-3 py-1.5 text-xs border border-line rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-accent"
+          className="px-3 py-1.5 text-xs border border-line rounded-lg bg-card/80 focus:outline-none focus:ring-1 focus:ring-accent"
         >
           {TYPE_FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
-        <button onClick={load} className="px-3 py-1.5 text-xs font-medium bg-black/[0.04] rounded-lg hover:bg-black/[0.07] text-ink-soft">刷新</button>
+        <button onClick={load} className="px-3 py-1.5 text-xs font-medium bg-mist rounded-lg hover:bg-line text-ink-soft">刷新</button>
         <span className="ml-auto text-xs text-ink-faint tabular-nums">{orders.length} 个工单</span>
       </div>
 
@@ -86,7 +86,7 @@ export function WorkOrdersTab() {
                 initial={{ opacity: 0, y: 16 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ ...spring.ui, delay: Math.min(i * 0.03, 0.3) }}
-                className="bg-white border border-line rounded-none px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+                className="bg-card/80 border border-line rounded-xl px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
               >
                 <div className="flex items-start gap-3">
                   <OrderTypeIcon type={o.order_type} />
@@ -116,18 +116,18 @@ export function WorkOrdersTab() {
                               value={rejectReason}
                               onChange={(e) => setRejectReason(e.target.value)}
                               placeholder="拒绝原因"
-                              className="flex-1 px-3 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-alert bg-white"
+                              className="flex-1 px-3 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-alert bg-card/80"
                             />
                             <button onClick={() => reject(o.id)} disabled={busy}
-                              className="px-3 py-1.5 text-xs font-medium bg-alert text-white rounded-lg hover:opacity-90 disabled:opacity-50">确认拒绝</button>
-                            <button onClick={() => setRejectId(null)} className="px-3 py-1.5 text-xs text-ink-soft hover:bg-black/[0.04] rounded-lg">取消</button>
+                              className="px-3 py-1.5 text-xs font-medium bg-alert text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50">确认拒绝</button>
+                            <button onClick={() => setRejectId(null)} className="px-3 py-1.5 text-xs text-ink-soft hover:bg-mist rounded-lg">取消</button>
                           </div>
                         ) : (
                           <div className="flex gap-2">
                             <button onClick={() => approve(o.id)} disabled={busy}
-                              className="px-4 py-1.5 text-xs font-medium bg-ok text-white rounded-lg hover:opacity-90 disabled:opacity-50">✓ 批准</button>
+                              className="px-4 py-1.5 text-xs font-medium bg-ok text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50">✓ 批准</button>
                             <button onClick={() => setRejectId(o.id)} disabled={busy}
-                              className="px-4 py-1.5 text-xs font-medium bg-alert/90 text-white rounded-lg hover:bg-alert disabled:opacity-50">✕ 拒绝</button>
+                              className="px-4 py-1.5 text-xs font-medium bg-alert/90 text-on-accent rounded-lg hover:bg-alert disabled:opacity-50">✕ 拒绝</button>
                           </div>
                         )}
                       </div>

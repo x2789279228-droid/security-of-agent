@@ -219,11 +219,25 @@ export const api = {
   getResponseActions: () =>
     fetchJSON<any[]>('/response/actions'),
 
-  /** 手动执行响应动作 */
-  executeResponse: (actionName: string, srcIp: string, reason: string) =>
-    fetchJSON<any>(`/response/execute?action_name=${actionName}&src_ip=${srcIp}&reason=${encodeURIComponent(reason)}`, {
-      method: 'POST',
-    }),
+  /** 手动执行响应动作。第二参可以是目标 IP 字符串或 params 对象。 */
+  executeResponse: (actionName: string, srcIpOrParams: string | Record<string, unknown>, reason: string) => {
+    const params: Record<string, unknown> = typeof srcIpOrParams === 'string'
+      ? { src_ip: srcIpOrParams }
+      : { ...(srcIpOrParams || {}) }
+    const src = encodeURIComponent(String(params.src_ip || params.host_ip || ''))
+    return fetchJSON<any>(
+      `/response/execute?action_name=${actionName}&src_ip=${src}&reason=${encodeURIComponent(reason)}`,
+      { method: 'POST', body: JSON.stringify({ params }) },
+    )
+  },
+
+  listContainment: (status = '', actionName = '') => {
+    const q = new URLSearchParams()
+    if (status) q.set('status', status)
+    if (actionName) q.set('action_name', actionName)
+    const s = q.toString()
+    return fetchJSON<any[]>(`/response/containment${s ? `?${s}` : ''}`)
+  },
 
   /** 回滚响应 */
   rollbackResponse: (token: string) =>
@@ -235,9 +249,19 @@ export const api = {
   getApprovals: (pendingOnly = false) =>
     fetchJSON<any[]>(`/response/approvals?pending_only=${pendingOnly}`),
 
-  /** 批准工单 */
-  approveTicket: (ticketId: string, approvedBy = 'admin') =>
-    fetchJSON<any>(`/response/approvals/${ticketId}/approve?approved_by=${approvedBy}`, {
+  /** 批准工单（sig 为工单 HMAC 签名，来自 getApprovals 返回的 ticket.sig） */
+  approveTicket: (ticketId: string, approvedBy = 'admin', sig?: string) => {
+    const q = new URLSearchParams()
+    q.set('approved_by', approvedBy)
+    if (sig) q.set('sig', sig)
+    return fetchJSON<any>(`/response/approvals/${ticketId}/approve?${q.toString()}`, {
+      method: 'POST',
+    })
+  },
+
+  /** 批准前 dry-run 预览（不产生真实变更） */
+  previewApproval: (ticketId: string) =>
+    fetchJSON<any>(`/response/approvals/${ticketId}/preview`, {
       method: 'POST',
     }),
 
@@ -409,9 +433,12 @@ export const api = {
 
   /** 创建 SSE 事件流连接；lastEventSeq 用于手动重建连接时通过查询参数补传断点（浏览器仅自动重连时才携带头） */
   eventsStream: (lastEventSeq?: number) => {
+    // token 缺失时不要建连:既拿不到认证(401),又会触发 EventSource 的自动重连风暴,
+    // 看门狗会把"未登录"误报成"重连中"。交给调用方的 onerror 分支处理。
     const token = localStorage.getItem('sm_token')
+    if (!token) return null
     const params = new URLSearchParams()
-    if (token) params.set('token', token)
+    params.set('token', token)
     if (typeof lastEventSeq === 'number' && lastEventSeq > 0) {
       params.set('last_event_id', String(lastEventSeq))
     }
@@ -602,6 +629,50 @@ export const api = {
 
   /** 调优建议 */
   opsFeedbackSuggestions: () => fetchJSON<any[]>('/feedback/suggestions'),
+
+  /** 反馈记录列表 */
+  opsFeedbackList: (params: Record<string, string | number> = {}) => {
+    const entries = Object.entries(params).map(([k, v]) => [k, String(v)])
+    const qs = new URLSearchParams(entries).toString()
+    return fetchJSON<any>(`/feedback${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 审核反馈 */
+  opsFeedbackReview: (feedbackId: number, status: string) =>
+    fetchJSON<any>(`/feedback/${feedbackId}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    }),
+
+  /** 学习闭环: 运行列表 */
+  opsLearnLoopRuns: (limit = 30) =>
+    fetchJSON<any>(`/learn-loop/runs?limit=${limit}`),
+
+  /** 学习闭环: 最近一次运行（含 actions） */
+  opsLearnLoopLatest: () => fetchJSON<any>('/learn-loop/runs/latest'),
+
+  /** 学习闭环: 指定运行详情（含 actions） */
+  opsLearnLoopRun: (runId: number) =>
+    fetchJSON<any>(`/learn-loop/runs/${runId}`),
+
+  /** 学习闭环: 手动跑一轮 */
+  opsLearnLoopTrigger: (lookbackHours?: number) =>
+    fetchJSON<any>('/learn-loop/run', {
+      method: 'POST',
+      body: JSON.stringify(lookbackHours ? { lookback_hours: lookbackHours } : {}),
+    }),
+
+  /** 学习闭环: 人工应用动作 */
+  opsLearnLoopApply: (actionId: number) =>
+    fetchJSON<any>(`/learn-loop/actions/${actionId}/apply`, { method: 'POST' }),
+
+  /** 学习闭环: 驳回动作 */
+  opsLearnLoopDismiss: (actionId: number) =>
+    fetchJSON<any>(`/learn-loop/actions/${actionId}/dismiss`, { method: 'POST' }),
+
+  /** 学习闭环: 回滚动作 */
+  opsLearnLoopRollback: (actionId: number) =>
+    fetchJSON<any>(`/learn-loop/actions/${actionId}/rollback`, { method: 'POST' }),
 
   /** 规则列表 */
   opsRules: (ruleType = 'sigma') => fetchJSON<any[]>(`/rules?rule_type=${ruleType}`),

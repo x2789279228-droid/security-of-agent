@@ -18,16 +18,16 @@ interface SandboxTask {
 }
 
 const statusBadge: Record<string, string> = {
-  pending: 'bg-mist text-ink-faint',
-  running: 'bg-nong text-white',
-  completed: 'bg-ink text-white',
-  failed: 'bg-hui text-white',
+  pending: 'border border-line text-ink-faint',
+  running: 'border border-[#c9a574] text-[#c9a574]',
+  completed: 'border border-[#0e1a26] bg-[#0e1a26] text-[#f1e8d6]',
+  failed: 'border border-[#b03a30] text-[#b03a30]',
 }
 
 const verdictBadge: Record<string, string> = {
-  clean: 'border border-ink text-ink',
-  suspicious: 'bg-nong text-white',
-  malicious: 'bg-ink text-white',
+  clean: 'border border-ok text-ok',
+  suspicious: 'border border-[#b88940] text-[#b88940]',
+  malicious: 'border border-[#b03a30] bg-[#b03a30] text-paper',
 }
 
 export default function Sandbox() {
@@ -38,42 +38,77 @@ export default function Sandbox() {
   }, [])
 
   return (
-    <PageFrame title="沙箱检测" subtitle="CAPE 动态分析 · 行为报告 · 变种聚类">
-      <div className="grid gap-0 border border-line">
+    <PageFrame
+      title="沙箱检测"
+      hint="CAPE 动态分析 · 行为报告 · 变种聚类。怀疑但无法判断时，扔进沙箱。"
+      marginalia="——真伪的最后一道，不靠签名，靠行为。"
+    >
+      <div className="border border-line bg-paper">
         {tasks.map((t, i) => (
-          <div key={t.id} className={`p-5 bg-white ${i < tasks.length - 1 ? 'border-b border-line' : ''}`}>
-            <div className="flex items-center justify-between mb-3">
+          <article
+            key={t.id}
+            className={`grid grid-cols-1 gap-6 px-7 py-6 md:grid-cols-[1fr_140px] ${
+              i < tasks.length - 1 ? 'border-b border-line' : ''
+            }`}
+          >
+            <div>
               <div className="flex items-center gap-3">
-                <span className="font-medium text-ink">{t.sample_name || t.sample_type}</span>
-                <span className={`px-2 py-0.5 text-xs font-medium ${statusBadge[t.status] || ''}`}>
+                <span className="font-serif text-[20px] font-bold tracking-tight text-ink">
+                  {t.sample_name || t.sample_type}
+                </span>
+                <span
+                  className={`px-2 py-0.5 font-mono text-[10px] tracking-[0.22em] uppercase ${statusBadge[t.status] || 'border border-line'}`}
+                >
                   {t.status}
                 </span>
                 {t.verdict && (
-                  <span className={`px-2 py-0.5 text-xs font-medium ${verdictBadge[t.verdict] || ''}`}>
+                  <span
+                    className={`px-2 py-0.5 font-mono text-[10px] tracking-[0.22em] uppercase ${verdictBadge[t.verdict] || 'border border-line'}`}
+                  >
                     {t.verdict}
                   </span>
                 )}
               </div>
-              {t.score > 0 && (
-                <span className="text-sm font-mono text-ink-soft">{(t.score * 10).toFixed(1)}/10</span>
+              {t.behavior_summary && (
+                <p className="mt-3 text-[13px] leading-relaxed text-ink-soft">
+                  {t.behavior_summary}
+                </p>
+              )}
+              {t.mitre_techniques && t.mitre_techniques.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-1.5">
+                  {t.mitre_techniques.slice(0, 6).map((tech, idx) => (
+                    <span
+                      key={idx}
+                      className="border border-line px-2 py-0.5 font-mono text-[11px] text-ink"
+                    >
+                      <span className="text-[#c9a574]">{tech.id}</span> {tech.name}
+                    </span>
+                  ))}
+                </div>
               )}
             </div>
-            {t.behavior_summary && (
-              <p className="text-sm font-light text-ink-soft mb-3">{t.behavior_summary}</p>
-            )}
-            {t.mitre_techniques && t.mitre_techniques.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {t.mitre_techniques.slice(0, 6).map((tech, idx) => (
-                  <span key={idx} className="px-2 py-0.5 border border-line text-[11px]">
-                    {tech.id} {tech.name}
+            <div className="flex flex-col items-start gap-1 md:items-end">
+              {t.score > 0 && (
+                <span className="font-serif text-[36px] font-black tabular-nums leading-none text-ink">
+                  {(t.score * 10).toFixed(1)}
+                  <span className="font-mono text-[11px] tracking-[0.22em] uppercase text-ink-faint">
+                    {' '}/ 10
                   </span>
-                ))}
-              </div>
-            )}
-          </div>
+                </span>
+              )}
+              <span className="font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint">
+                Risk · 风险评分
+              </span>
+              <span className="font-mono text-[10px] text-ink-faint/80">
+                {t.task_id}
+              </span>
+            </div>
+          </article>
         ))}
         {tasks.length === 0 && (
-          <div className="py-20 text-center text-ink-faint">暂无沙箱任务</div>
+          <div className="px-6 py-20 text-center text-[13px] text-ink-faint">
+            暂无沙箱任务
+          </div>
         )}
       </div>
     </PageFrame>

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, Text, DateTime, Date, JSON, Boolean, Float, ForeignKey, text
+from sqlalchemy import Column, Integer, String, Text, DateTime, Date, JSON, Boolean, Float, ForeignKey, UniqueConstraint, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncAttrs
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase
@@ -182,6 +182,26 @@ class ResponseLog(Base):
     approval_id = Column(String(100), default="")
     approval_status = Column(String(20), default="")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ContainmentRecord(Base):
+    """遏制动作持久化 — 隔离/封禁/隔离区/sinkhole/账户禁用，供回滚与双栈对账。"""
+    __tablename__ = "containment_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    action_name = Column(String(50), default="", index=True)
+    target_type = Column(String(30), default="")          # ip | host | file | account | domain | message
+    target_id = Column(String(500), default="", index=True)
+    host_ip = Column(String(45), default="", index=True)
+    families = Column(MutableListJSON, default=list)      # ["ipv4","ipv6"]
+    rule_ids = Column(MutableListJSON, default=list)
+    backend = Column(String(30), default="")              # firewall | host_ssh | ldap | graph | dns
+    status = Column(String(20), default="applied", index=True)  # applied|partial|failed|rolled_back|unconfigured
+    snapshot_id = Column(String(100), default="")
+    payload = Column(MutableJSON, default=dict)
+    rollback_token = Column(String(100), default="", index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class AgentTrace(Base):
@@ -399,14 +419,14 @@ class PostMortem(Base):
     case_id = Column(Integer, ForeignKey("security_cases.id"), unique=True, index=True)
     title = Column(String(300), default="")
     summary = Column(Text, default="")
-    timeline = Column(MutableJSON, default=list)         # [{time, event, detail}]
+    timeline = Column(MutableListJSON, default=list)     # [{time, event, detail}]
     root_cause = Column(Text, default="")
     impact_assessment = Column(Text, default="")
-    lessons_learned = Column(MutableJSON, default=list)
-    action_items = Column(MutableJSON, default=list)     # [{item, owner, deadline, done}]
+    lessons_learned = Column(MutableListJSON, default=list)
+    action_items = Column(MutableListJSON, default=list)  # [{item, owner, deadline, done}]
     false_positive_count = Column(Integer, default=0)
     detection_gaps = Column(Text, default="")
-    rule_improvements = Column(MutableJSON, default=list)
+    rule_improvements = Column(MutableListJSON, default=list)
     author = Column(String(100), default="")
     reviewer = Column(String(100), default="")
     status = Column(String(20), default="draft", index=True)  # draft|reviewed|published
@@ -448,6 +468,73 @@ class RuleVersion(Base):
     changed_by = Column(String(100), default="")
     is_active = Column(Boolean, default=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+# ════════════════════════════════════════════
+# 每日学习闭环 (learn_loop)
+# ════════════════════════════════════════════
+
+class LearningRun(Base):
+    """学习闭环单次运行 — 收割→统计/聚类/序列→提议→自动应用 全周期留痕。"""
+    __tablename__ = "learning_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    window_start = Column(DateTime(timezone=True), nullable=True)
+    window_end = Column(DateTime(timezone=True), nullable=True)
+    trigger = Column(String(20), default="daily")   # daily|hourly|manual
+    status = Column(String(20), default="running", index=True)  # running|completed|failed
+    harvest = Column(MutableJSON, default=dict)
+    model_summary = Column(MutableJSON, default=dict)
+    actions_proposed = Column(Integer, default=0)
+    actions_auto_applied = Column(Integer, default=0)
+    actions_failed = Column(Integer, default=0)
+    error = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+
+class LearningAction(Base):
+    """学习闭环提议的动作 — 自动白名单动作自动应用，其余留待人工复核。"""
+    __tablename__ = "learning_actions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("learning_runs.id"), nullable=False, index=True)
+    action_type = Column(String(40), index=True)
+    target_type = Column(String(30), default="")
+    target_id = Column(String(120), default="", index=True)
+    mechanism = Column(String(20), default="")  # baseline|reputation|feedback|degrade|tune|postmortem|case
+    payload = Column(MutableJSON, default=dict)
+    confidence = Column(Float, default=0.0)
+    status = Column(String(20), default="proposed", index=True)
+    # proposed|auto_applied|applied|dismissed|rolled_back
+    apply_result = Column(MutableJSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    applied_at = Column(DateTime(timezone=True), nullable=True)
+    applied_by = Column(String(100), default="")
+
+
+class ReputationPrior(Base):
+    """信誉先验 — learn_loop 根据运营 TP/FP 反馈对 IP/域名信誉分做有界微调。"""
+    __tablename__ = "reputation_priors"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    target = Column(String(255), index=True)
+    target_type = Column(String(16), default="ip")  # ip|domain
+    delta = Column(Float, default=0.0)
+    tp_count = Column(Integer, default=0)
+    fp_count = Column(Integer, default=0)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint("target", "target_type", name="uq_reputation_priors_target_type"),)
+
+
+class BaselineSnapshot(Base):
+    """基线快照 — 与 scheduler._snapshot_baselines 的 raw SQL 建表保持同构。"""
+    __tablename__ = "baseline_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_type = Column(String(50), nullable=False)
+    entity_key = Column(String(255), nullable=False)
+    snapshot = Column(MutableJSON, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 # ════════════════════════════════════════════
@@ -756,6 +843,8 @@ class AuditTrail(Base):
     ip = Column(String(45), default="")
     user_agent = Column(String(200), default="")
     reason = Column(Text, default="")
+    prev_hash = Column(String(64), default="")
+    row_hash = Column(String(64), default="", index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 

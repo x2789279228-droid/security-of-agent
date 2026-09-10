@@ -25,6 +25,49 @@ _HIGH_RISK_COUNTRIES = {"RU", "CN", "KP", "IR", "SY"}  # 可按需调整
 # 已知恶意 ASN（示例，实际应从情报源更新）
 _MALICIOUS_ASNS = set()
 
+# ── learn_loop 信誉先验(有界 delta, 见 reputation_priors 表) ──
+# 无 session 的信誉查询走模块缓存; apply 侧 upsert 后同步 set_prior_cache。
+_PRIOR_CACHE: dict = {}  # {(target_type, target): delta}
+
+
+def set_prior_cache(target_type: str, target: str, delta: float) -> None:
+    """apply.update_reputation_prior 落地后同步模块缓存。"""
+    _PRIOR_CACHE[(target_type or "ip", str(target))] = float(delta or 0.0)
+
+
+async def load_priors_into_cache(session) -> None:
+    """把 reputation_priors 全量载入模块缓存(orchestrator 周期结束刷新)。"""
+    try:
+        from sqlalchemy import select
+        from models import ReputationPrior
+        rows = (await session.execute(select(ReputationPrior))).scalars().all()
+        _PRIOR_CACHE.clear()
+        for r in rows:
+            _PRIOR_CACHE[(r.target_type or "ip", r.target)] = float(r.delta or 0.0)
+    except Exception as e:
+        logger.warning(f"load_priors_into_cache failed: {e}")
+
+
+async def _get_prior_delta(target_type: str, target: str, session=None) -> float:
+    """读取有界先验 delta; 任何失败返回 0.0(fail-open)。"""
+    try:
+        if session is not None:
+            from sqlalchemy import select
+            from models import ReputationPrior
+            row = (await session.execute(
+                select(ReputationPrior).where(
+                    ReputationPrior.target == target,
+                    ReputationPrior.target_type == target_type,
+                )
+            )).scalars().first()
+            if row is not None:
+                return float(row.delta or 0.0)
+            return 0.0
+        return float(_PRIOR_CACHE.get((target_type, target), 0.0))
+    except Exception as e:
+        logger.debug("prior delta lookup skipped: %s", e)
+        return 0.0
+
 
 @dataclass
 class ReputationScore:
@@ -83,7 +126,13 @@ class ReputationEngine:
         except ValueError:
             pass
 
-        result.score = min(score, 1.0)
+        # learn_loop 有界先验(TP/FP 反馈 → delta): fail-open, 不影响主评分
+        delta = await _get_prior_delta("ip", ip, session)
+        score = min(1.0, max(0.0, min(score, 1.0) + delta))
+        if delta:
+            factors.append(f"learn_prior:{delta:+.3f}")
+
+        result.score = score
         result.factors = factors
         result.level = self._classify(result.score)
         return result
@@ -124,7 +173,13 @@ class ReputationEngine:
                 score += 0.15
                 factors.append("high_digit_ratio")
 
-        result.score = min(score, 1.0)
+        # learn_loop 有界先验(TP/FP 反馈 → delta): fail-open, 不影响主评分
+        delta = await _get_prior_delta("domain", domain, session)
+        score = min(1.0, max(0.0, min(score, 1.0) + delta))
+        if delta:
+            factors.append(f"learn_prior:{delta:+.3f}")
+
+        result.score = score
         result.factors = factors
         result.level = self._classify(result.score)
         return result

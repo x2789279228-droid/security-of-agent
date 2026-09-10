@@ -236,6 +236,97 @@ def _validate_positive_int(value: int, name: str = "value") -> int:
         raise ValueError(f"{name} must be a positive integer, got {value}")
     return value
 
+def _validate_domain(domain: str, max_len: int = 253) -> str:
+    """域名强校验: 仅字母/数字/连字符/点, ≤253, 无路径/空格(dns_sinkhole 参数)。"""
+    d = str(domain or "").strip()
+    if not d:
+        raise ValueError("domain 不能为空")
+    if len(d) > max_len:
+        raise ValueError(f"domain 长度超限 ({len(d)} > {max_len})")
+    if not re.fullmatch(r"[A-Za-z0-9.\-]+", d):
+        raise ValueError(f"domain 含非法字符: {domain!r}")
+    if ".." in d or d.startswith(("-", ".")) or d.endswith(("-", ".")):
+        raise ValueError(f"domain 格式非法: {domain!r}")
+    return d
+
+def _families_for(host_ip: str, extra: Optional[list] = None) -> list:
+    """host_ip + extra_ips → 去重排序的协议族列表(供 mock/dry_run 结果用)。"""
+    fams = []
+    for raw in [host_ip] + list(extra or []):
+        raw = str(raw or "").strip()
+        if not raw:
+            continue
+        addr = ipaddress.ip_address(raw)
+        f = "ipv6" if addr.version == 6 else "ipv4"
+        if f not in fams:
+            fams.append(f)
+    return sorted(fams)
+
+def _marker_for_domain(domain: str) -> str:
+    """域名 → 确定性 sinkhole marker(SOC-SH-<sha1 前 10 位>) — 回滚无需额外状态。"""
+    import hashlib as _h
+    return f"SOC-SH-{_h.sha1(domain.encode('ascii')).hexdigest()[:10].upper()}"
+
+def _same_host(record_ip: str, target: str) -> bool:
+    """记录里的 host/ip 与目标是否同一地址(先字符串相等, 再按 ipaddress 规范化比较)。"""
+    record_ip = str(record_ip or "").strip()
+    target = str(target or "").strip()
+    if not record_ip or not target:
+        return False
+    if record_ip == target:
+        return True
+    try:
+        return ipaddress.ip_address(record_ip) == ipaddress.ip_address(target)
+    except ValueError:
+        return False
+
+def _execution_mode() -> str:
+    """读取 config.execution_mode(live|dry_run|mock)。
+
+    直连 ssh_firewall 的动作(block_ip/isolate_host/dns_sinkhole)不走 SafeExecutor,
+    需自行按模式路由: mock/dry_run 不建立 SSH、不执行, 返回带 mode 标签的结果。
+
+    PR2: 预览(preview_mode ContextVar)优先 — 预览请求内强制 dry_run,
+    不改变全局 execution_router.mode。
+    """
+    try:
+        from .preview import preview_mode
+        if preview_mode.get():
+            return "dry_run"
+    except Exception:
+        pass
+    return getattr(settings, "execution_mode", "live") or "live"
+
+async def _ensure_firewall_connected() -> Optional[str]:
+    """确保 ssh_firewall 已配置并连接; 返回 None=就绪, 否则错误信息。"""
+    from .ssh_firewall import ssh_firewall
+    if ssh_firewall._connected and ssh_firewall._config.get("host"):
+        return None
+    try:
+        from config import settings as _s
+        if not ssh_firewall._config.get("host"):
+            ssh_firewall.configure(
+                host=_s.fw_ssh_host, port=_s.fw_ssh_port,
+                username=_s.fw_ssh_user, password=_s.fw_ssh_password,
+                use_sudo=_s.fw_use_sudo,
+            )
+        if not ssh_firewall._connected:
+            await asyncio.to_thread(ssh_firewall.connect)
+        return None
+    except Exception as ce:
+        logger.error(f"ssh_firewall auto-connect failed: {ce}")
+        return str(ce)
+
+async def _auto_rollback(rule_id: str, delay_seconds: int, label: str) -> None:
+    """延时后按 rule_id 回滚(隔离 TTL / 封禁 TTL 共用)。"""
+    try:
+        await asyncio.sleep(delay_seconds)
+        from .ssh_firewall import ssh_firewall
+        rb = ssh_firewall.rollback(rule_id)
+        logger.info(f"[auto-rollback] {label} rule_id={rule_id}: {rb.get('status')}")
+    except Exception as e:
+        logger.error(f"[auto-rollback] {label} rule_id={rule_id} failed: {e}")
+
 # ════════════════════════════════════════════
 # 响应动作实现 (真实执行 + 桩回退)
 # ════════════════════════════════════════════
@@ -314,35 +405,31 @@ async def _exec(cmd: str, action: str, platform: str = "windows", **fields) -> d
 
 async def _block_ip(src_ip: str, reason: str = "", duration_minutes: int = 60, **kwargs) -> dict:
     """
-    封禁源IP — Linux iptables INPUT DROP 规则
-    走 ssh_firewall.SshFirewallAdapter.block_ip (paramiko + 真实 iptables)
-    支持自动解封: 记录 rule_id, asyncio.create_task 在 duration 后调 ssh_firewall.rollback
+    封禁源IP — 按地址族走 ssh_firewall(IPv4→iptables INPUT, IPv6→ip6tables INPUT)。
+    支持自动解封: 记录 rule_id, asyncio.create_task 在 duration 后调 ssh_firewall.rollback。
+    直连 ssh_firewall: mock/dry_run 模式不建 SSH, 按 config.execution_mode 路由。
     """
     src_ip = _validate_ip(src_ip)
     duration_minutes = _validate_positive_int(duration_minutes, "duration_minutes")
     rule_name = f"RE_Block_{src_ip.replace('.','_')}"
 
-    # v4.1:走 ssh_firewall 路径,绕开 transport.ssh_transport 的 9p namespace 问题
+    exec_mode = _execution_mode()
+    if exec_mode != "live":
+        return {
+            "action": "block_ip", "success": True, "mode": exec_mode,
+            "would_execute": exec_mode == "dry_run",
+            "src_ip": src_ip, "duration_minutes": duration_minutes,
+            "rule_name": rule_name,
+            "firewall_rule_id": f"FW-RULE-MOCK-{sum(map(ord, src_ip)) % 100000}",
+            "detail": {"message": f"[{exec_mode.upper()}] block_ip 未执行真实封禁"},
+        }
+
     from .ssh_firewall import ssh_firewall
     # ssh_firewall 是单例,可能未 connect 或 configure 不完整 — 首次调用前自动 (re-)configure + connect
-    if not ssh_firewall._connected or not ssh_firewall._config.get("host"):
-        try:
-            from config import settings as _settings
-            import asyncio as _asyncio
-            if not ssh_firewall._config.get("host"):
-                ssh_firewall.configure(
-                    host=_settings.fw_ssh_host,
-                    port=_settings.fw_ssh_port,
-                    username=_settings.fw_ssh_user,
-                    password=_settings.fw_ssh_password,
-                    use_sudo=_settings.fw_use_sudo,
-                )
-                logger.info(f"[block_ip] ssh_firewall auto-configured {_settings.fw_ssh_user}@{_settings.fw_ssh_host}")
-            await _asyncio.to_thread(ssh_firewall.connect)
-            logger.info(f"[block_ip] ssh_firewall auto-connected for {src_ip}")
-        except Exception as ce:
-            logger.error(f"[block_ip] ssh_firewall auto-connect failed: {ce}")
-            return {"success": False, "error": f"ssh_firewall connect failed: {ce}", "mode": "error", "src_ip": src_ip, "rule_name": rule_name}
+    err = await _ensure_firewall_connected()
+    if err:
+        return {"success": False, "error": f"ssh_firewall connect failed: {err}",
+                "mode": "error", "src_ip": src_ip, "rule_name": rule_name}
     try:
         fw_result = ssh_firewall.block_ip(src_ip, duration=duration_minutes * 60)
     except Exception as e:
@@ -361,39 +448,37 @@ async def _block_ip(src_ip: str, reason: str = "", duration_minutes: int = 60, *
         "duration_minutes": duration_minutes,
         "rule_name": rule_name,
         "firewall_rule_id": fw_rule_id,
+        "family": fw_result.get("family", ""),
         "detail": fw_result,
     }
 
     # 自动解封: 通过 ssh_firewall.rollback(rule_id) 删除规则
-    # 用 asyncio.sleep 不需要后台进程,简单可靠
     if success and duration_minutes > 0 and fw_rule_id:
-        async def _auto_unblock():
-            try:
-                await asyncio.sleep(duration_minutes * 60)
-                rb = ssh_firewall.rollback(fw_rule_id)
-                logger.info(f"[block_ip] auto-unblock {src_ip} (rule_id={fw_rule_id}): {rb.get('status')}")
-            except Exception as e:
-                logger.error(f"[block_ip] auto-unblock failed for {src_ip}: {e}")
-        asyncio.create_task(_auto_unblock())
+        asyncio.create_task(_auto_rollback(fw_rule_id, duration_minutes * 60, f"[block_ip] {src_ip}"))
         logger.info(f"[block_ip] auto-unblock scheduled for {src_ip} in {duration_minutes}min (rule_id={fw_rule_id})")
 
     return result
 
 
 async def _unblock_ip(src_ip: str, reason: str = "", **kwargs) -> dict:
-    """解封IP — 通过 ssh_firewall.rollback 按 rule_id 删除规则"""
-    # v4.1:走 ssh_firewall.get_active_rules (按 ip 过滤) + ssh_firewall.rollback
+    """解封IP — 找该 IP 的 active 封禁记录(FW-RULE), 逐条 ssh_firewall.rollback。"""
+    exec_mode = _execution_mode()
+    if exec_mode != "live":
+        return {"action": "unblock_ip", "success": True, "mode": exec_mode,
+                "src_ip": src_ip, "deleted_count": 0,
+                "message": f"[{exec_mode.upper()}] unblock_ip 模拟"}
     from .ssh_firewall import ssh_firewall
     try:
         active = ssh_firewall.get_active_rules()
-        target_ip_safe = src_ip.replace(".", "_")
         deleted = 0
         for r in active:
-            rip = r.get("ip", "")
-            if rip == src_ip or target_ip_safe in rip:
+            # 只解封 block 记录, 不动隔离记录(status=isolated)
+            if r.get("status") not in ("active", "applied") or not r.get("ip"):
+                continue
+            if _same_host(r.get("ip", ""), src_ip):
                 rb = ssh_firewall.rollback(r.get("rule_id", ""))
                 if rb.get("status") == "success":
-                    deleted += 1
+                    deleted += int(rb.get("deleted", 1))
         return {
             "action": "unblock_ip",
             "success": deleted > 0,
@@ -409,65 +494,226 @@ async def _unblock_ip(src_ip: str, reason: str = "", **kwargs) -> dict:
 # ── 2. isolate_host / restore_host (防火墙全阻断) ──
 # v4.1(2026-09-01):改走 ssh_firewall.isolate_host / rollback,绕开 9p namespace 问题
 
-async def _isolate_host(host_ip: str, reason: str = "", **kwargs) -> dict:
+async def _isolate_host(host_ip: str, reason: str = "", isolation_type: str = "network",
+                        extra_ips: Optional[list] = None, peer_ip: Optional[str] = None,
+                        duration_minutes: int = 0, **kwargs) -> dict:
     """
-    隔离主机 — ssh_firewall.isolate_host (入站 + 出站 DROP)
-    相当于把该主机从网络中彻底断开
+    隔离主机 — 双栈: 对 host_ip(+extra_ips) 在匹配族表写 INPUT/OUTPUT DROP。
+    透传 ssh_firewall 的 complete/families_applied/families_missing/rule_ids:
+    有请求的族缺失时 success 可为 True 但 complete=False(部分遏制, 不虚报完全隔离)。
+    duration_minutes>0 → 到期自动 restore(默认 0=人工恢复, 维持原行为)。
     """
     host_ip = _validate_ip(host_ip)
+    duration_minutes = _validate_positive_int(duration_minutes, "duration_minutes")
+    # extra_ips 兼容 str 或 list; peer_ip 保留向后兼容(网络隔离不使用)
+    if isinstance(extra_ips, str):
+        extra_list = [extra_ips]
+    else:
+        extra_list = [str(e) for e in (extra_ips or [])]
+
+    exec_mode = _execution_mode()
+    if exec_mode != "live":
+        fams = _families_for(host_ip, extra_list)
+        return {
+            "action": "isolate_host", "success": True, "mode": exec_mode,
+            "would_execute": exec_mode == "dry_run",
+            "host_ip": host_ip, "isolation_type": isolation_type,
+            "complete": True, "families_applied": fams,
+            "families_missing": [], "rule_ids": ["EDR-ISO-MOCK"],
+            "isolation_id": "EDR-ISO-MOCK",
+            "detail": {"message": f"[{exec_mode.upper()}] isolate_host 未执行真实隔离"},
+        }
+
     from .ssh_firewall import ssh_firewall
     # 自动 connect (同 _block_ip)
-    if not ssh_firewall._connected or not ssh_firewall._config.get("host"):
-        try:
-            from config import settings as _settings
-            import asyncio as _asyncio
-            if not ssh_firewall._config.get("host"):
-                ssh_firewall.configure(
-                    host=_settings.fw_ssh_host, port=_settings.fw_ssh_port,
-                    username=_settings.fw_ssh_user, password=_settings.fw_ssh_password,
-                    use_sudo=_settings.fw_use_sudo,
-                )
-            await _asyncio.to_thread(ssh_firewall.connect)
-        except Exception as ce:
-            logger.error(f"[isolate_host] ssh_firewall connect failed: {ce}")
-            return {"success": False, "error": f"connect failed: {ce}", "mode": "error", "host_ip": host_ip}
+    err = await _ensure_firewall_connected()
+    if err:
+        return {"success": False, "error": f"connect failed: {err}",
+                "mode": "error", "host_ip": host_ip}
     try:
-        fw_result = ssh_firewall.isolate_host(host_ip, isolation_type="network")
+        fw_result = ssh_firewall.isolate_host(host_ip, isolation_type=isolation_type,
+                                              extra_ips=extra_list or None)
     except Exception as e:
         logger.error(f"[isolate_host] ssh_firewall.isolate_host failed: {e}")
         return {"success": False, "error": str(e), "mode": "error", "host_ip": host_ip}
     success = fw_result.get("status") == "success"
-    return {
-        "action": "isolate_host", "success": success,
+    result = {
+        "action": "isolate_host",
+        "success": success,
         "mode": "ssh_firewall_paramiko",
-        "host_ip": host_ip, "detail": fw_result,
+        "host_ip": host_ip,
+        "isolation_type": isolation_type,
+        "complete": fw_result.get("complete", success),
+        "families_applied": fw_result.get("families_applied", []),
+        "families_missing": fw_result.get("families_missing", []),
+        "rule_ids": fw_result.get("rule_ids", []),
+        "isolation_id": fw_result.get("isolation_id", ""),
+        "detail": fw_result,
     }
+    # 可选隔离 TTL: duration_minutes>0 → 逐条 rule_id 到期自动恢复
+    if success and duration_minutes > 0:
+        for rid in fw_result.get("rule_ids", []):
+            asyncio.create_task(_auto_rollback(rid, duration_minutes * 60, f"[isolate_host] {host_ip}"))
+        logger.info(f"[isolate_host] auto-restore scheduled for {host_ip} in {duration_minutes}min "
+                    f"(rule_ids={fw_result.get('rule_ids', [])})")
+    return result
 
 
 async def _restore_host(host_ip: str, reason: str = "", **kwargs) -> dict:
-    """恢复主机 — 通过 ssh_firewall.rollback 按 isolation_id 删除规则"""
+    """恢复主机 — get_active_rules 找 host/ip 匹配的隔离记录, 逐条 rollback(全链全族)。"""
+    exec_mode = _execution_mode()
+    if exec_mode != "live":
+        return {"action": "restore_host", "success": True, "mode": exec_mode,
+                "host_ip": host_ip, "deleted_count": 0,
+                "message": f"[{exec_mode.upper()}] restore_host 模拟"}
     from .ssh_firewall import ssh_firewall
     try:
         active = ssh_firewall.get_active_rules()
-        target_ip_safe = host_ip.replace(".", "_")
         deleted = 0
+        matched = 0
         for r in active:
-            rip = r.get("host", "") or r.get("ip", "")
-            if rip == host_ip or target_ip_safe in rip:
+            if _same_host(r.get("host", "") or r.get("ip", ""), host_ip):
+                matched += 1
                 rb = ssh_firewall.rollback(r.get("rule_id", ""))
                 if rb.get("status") == "success":
-                    deleted += 1
+                    deleted += int(rb.get("deleted", 1))
+        # 幂等: 没有可恢复的隔离规则(已恢复过/从未隔离)也算成功,
+        # 重复回滚不应被当作失败(rollback_batch 依赖该语义)。
         return {
-            "action": "restore_host", "success": deleted > 0,
+            "action": "restore_host",
+            "success": True,
             "mode": "ssh_firewall_paramiko",
-            "host_ip": host_ip, "deleted_count": deleted,
+            "host_ip": host_ip,
+            "deleted_count": deleted,
+            "rules_matched": matched,
+            "idempotent": deleted == 0,
+            **({"message": "没有待恢复的隔离规则(可能已恢复)"} if deleted == 0 else {}),
         }
     except Exception as e:
         logger.error(f"[restore_host] ssh_firewall failed: {e}")
         return {"action": "restore_host", "success": False, "error": str(e), "mode": "error", "host_ip": host_ip}
-    result_out = await _exec(cmd_out, "restore_host", host_ip=host_ip)
-    return {"success": result_in.get("success", False) or result_out.get("success", False),
-            "results": [result_in, result_out]}
+
+
+# ── 2b. dns_sinkhole / unsinkhole (DNS 沉洞) ──
+# 走 ssh_firewall.sinkhole_domain(真实执行)。live 且 SSH 不可达 → success=false + unconfigured,
+# 不做 stub 假装成功; mock/dry_run 按 config.execution_mode 返回模拟结果。
+
+async def _dns_sinkhole(domain: str = "", ipv4: str = "", ipv6: str = "",
+                        resolved_ip: Optional[list] = None, marker_id: str = "",
+                        reason: str = "", duration_minutes: int = 0, **kwargs) -> dict:
+    """DNS sinkhole: 恶意域名 → 黑洞地址(dnsmasq drop-in / hosts), 可选对解析 IP 一并封禁。"""
+    # 域名强校验(字母/数字/连字符/点, ≤253, 无路径/空格)
+    try:
+        domain = _validate_domain(domain)
+    except ValueError as e:
+        return {"action": "dns_sinkhole", "success": False, "mode": "invalid",
+                "domain": str(domain or ""), "error": str(e)}
+
+    # 黑洞 IP: 缺省/空串 → settings 默认
+    sink_v4 = (str(ipv4).strip() if ipv4 else "") or getattr(settings, "dns_sinkhole_ipv4", "") or ""
+    sink_v6 = (str(ipv6).strip() if ipv6 else "") or getattr(settings, "dns_sinkhole_ipv6", "") or ""
+    try:
+        if sink_v4:
+            _validate_ip(sink_v4)
+        if sink_v6:
+            _validate_ip(sink_v6)
+    except ValueError as e:
+        return {"action": "dns_sinkhole", "success": False, "mode": "invalid",
+                "domain": domain, "error": str(e)}
+
+    # 域名解析到的恶意 IP(可选, 一并封禁; str 或 list)
+    resolved_ips: list[str] = []
+    if isinstance(resolved_ip, str):
+        resolved_ips = [resolved_ip]
+    elif isinstance(resolved_ip, (list, tuple)):
+        resolved_ips = [str(x) for x in resolved_ip]
+    for ip in resolved_ips:
+        try:
+            _validate_ip(ip)
+        except ValueError as e:
+            return {"action": "dns_sinkhole", "success": False, "mode": "invalid",
+                    "domain": domain, "error": str(e)}
+
+    marker_id = str(marker_id or "").strip() or _marker_for_domain(domain)
+    exec_mode = _execution_mode()
+    if exec_mode != "live":
+        return {"action": "dns_sinkhole", "success": True, "mode": exec_mode,
+                "domain": domain, "marker_id": marker_id, "backend": "hosts",
+                "would_execute": exec_mode == "dry_run",
+                "message": f"[{exec_mode.upper()}] dns_sinkhole {domain} 未真实写入"}
+
+    from .ssh_firewall import ssh_firewall
+    err = await _ensure_firewall_connected()
+    if err:
+        return {"action": "dns_sinkhole", "success": False, "mode": "unconfigured",
+                "domain": domain, "marker_id": marker_id, "backend": "unconfigured",
+                "error": f"ssh_firewall connect failed: {err}"}
+    try:
+        fw_res = ssh_firewall.sinkhole_domain(domain=domain,
+                                              ipv4=sink_v4 or None,
+                                              ipv6=sink_v6 or None,
+                                              marker_id=marker_id)
+    except Exception as e:
+        logger.error(f"[dns_sinkhole] ssh_firewall.sinkhole_domain failed: {e}")
+        return {"action": "dns_sinkhole", "success": False, "mode": "error",
+                "domain": domain, "marker_id": marker_id, "backend": "unconfigured",
+                "error": str(e)}
+    sink_ok = bool(fw_res.get("success")) or fw_res.get("status") == "success"
+    result = {
+        "action": "dns_sinkhole",
+        "success": sink_ok,
+        "mode": "ssh_firewall_paramiko",
+        "domain": domain,
+        "marker_id": fw_res.get("marker_id") or marker_id,
+        "backend": fw_res.get("backend", "unconfigured"),
+        "detail": fw_res,
+    }
+    if sink_ok and resolved_ips:
+        blocks = []
+        for ip in resolved_ips:
+            br = await _block_ip(src_ip=ip, reason=f"dns_sinkhole:{domain}",
+                                 duration_minutes=duration_minutes)
+            blocks.append({"ip": ip, "success": br.get("success", False),
+                           "detail": br.get("detail") or br.get("error") or br.get("message", "")})
+        result["resolved_ip_blocks"] = blocks
+        result["complete"] = sink_ok and all(b["success"] for b in blocks)
+    else:
+        result["complete"] = bool(sink_ok)
+    return result
+
+
+async def _unsinkhole_domain(domain: str = "", marker_id: str = "", reason: str = "",
+                             **kwargs) -> dict:
+    """撤销 DNS sinkhole(rollback_fn) — 按 marker 清 /etc/hosts + dnsmasq drop-in。"""
+    d = str(domain or "").strip()
+    if d:
+        try:
+            d = _validate_domain(d)
+        except ValueError as e:
+            return {"action": "dns_sinkhole", "success": False, "mode": "invalid",
+                    "domain": d, "error": str(e)}
+    marker = str(marker_id or "").strip() or (_marker_for_domain(d) if d else "")
+    exec_mode = _execution_mode()
+    if exec_mode != "live":
+        return {"action": "dns_sinkhole", "success": True, "mode": exec_mode,
+                "domain": d, "marker_id": marker,
+                "message": f"[{exec_mode.upper()}] unsinkhole 模拟"}
+    from .ssh_firewall import ssh_firewall
+    err = await _ensure_firewall_connected()
+    if err:
+        return {"success": False, "mode": "unconfigured", "domain": d, "marker_id": marker,
+                "error": f"ssh_firewall connect failed: {err}"}
+    try:
+        fw_res = ssh_firewall.unsinkhole_domain(domain=d, marker_id=marker)
+    except Exception as e:
+        logger.error(f"[unsinkhole] ssh_firewall.unsinkhole_domain failed: {e}")
+        return {"success": False, "mode": "error", "domain": d, "marker_id": marker, "error": str(e)}
+    return {"action": "dns_sinkhole",
+            "success": bool(fw_res.get("success")) or fw_res.get("status") == "success",
+            "mode": "ssh_firewall_paramiko", "domain": d,
+            "marker_id": fw_res.get("marker_id") or marker,
+            "backend": fw_res.get("backend", "unconfigured"),
+            "detail": fw_res}
 
 
 # ── 3. rate_limit / remove_rate_limit (通过 QoS 策略) ──
@@ -669,6 +915,23 @@ def _init_registry():
         params_schema={
             "host_ip": "str (required) 主机IP",
             "reason": "str 隔离原因",
+            "extra_ips": "list[str] 主机其他地址(如另一协议族)",
+            "duration_minutes": "int 隔离时长(默认0=人工恢复)",
+        },
+    )
+    response_registry.register(
+        "dns_sinkhole", _dns_sinkhole,
+        description="DNS sinkhole: 恶意域名指向黑洞 IP(可同时封禁解析 IP)",
+        severity=ACTION_SEVERITY_HIGH,
+        category="network",
+        reversible=True,
+        rollback_fn=_unsinkhole_domain,
+        params_schema={
+            "domain": "str (required) 恶意域名(字母/数字/连字符/点, ≤253)",
+            "ipv4": "str 黑洞 IPv4(默认 settings.dns_sinkhole_ipv4)",
+            "ipv6": "str 黑洞 IPv6(默认 settings.dns_sinkhole_ipv6)",
+            "resolved_ip": "str|list 域名解析到的 IP, 一并封禁(可双栈给两个)",
+            "duration_minutes": "int resolved_ip 封禁时长(默认0=人工解除)",
         },
     )
     response_registry.register(
@@ -710,6 +973,11 @@ def _init_registry():
         },
     )
     logger.info(f"Response registry initialized with {len(response_registry._actions)} actions")
+    try:
+        from response_engine.containment import register_containment_actions
+        register_containment_actions(response_registry)
+    except Exception as e:
+        logger.warning("containment actions not registered: %s", e)
 
 
 _init_registry()

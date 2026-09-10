@@ -13,6 +13,7 @@ from config import settings
 from models import get_session
 from auth import get_current_user, RequireRole, UserInfo
 from audit_trail import log_from_request as _audit
+from security_crypto import sign_approval, actions_digest
 from response_engine import (
     get_orchestrator, get_response_logger,
     response_executor,
@@ -349,6 +350,19 @@ async def list_response_actions(user: UserInfo = Depends(get_current_user)):
         for a in actions
     ]
 
+@router.get("/response/containment")
+async def list_containment(
+    status: str = Query(""),
+    action_name: str = Query(""),
+    limit: int = Query(100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+    user: UserInfo = Depends(RequireRole("operator")),
+):
+    """已落地的遏制记录（双栈隔离 / 隔离区 / sinkhole / 账户禁用）。"""
+    from response_engine.containment.store import list_records
+    return await list_records(session, status=status, action_name=action_name, limit=limit)
+
+
 @router.post("/response/execute")
 async def execute_response(
     request: Request,
@@ -373,8 +387,34 @@ async def execute_response(
             f"CRITICAL action '{action_name}' 不允许手动直接执行，请提交审批工单",
         )
 
-    threat_info = {"src_ip": src_ip, "threat_type": "manual", "confidence": 1.0, "severity": "high"}
-    actions = [{"name": action_name, "params": {"src_ip": src_ip, "reason": reason}}]
+    body_params: dict = {}
+    try:
+        ctype = (request.headers.get("content-type") or "") if getattr(request, "headers", None) else ""
+        if "application/json" in ctype and hasattr(request, "json"):
+            raw = await request.json()
+            if isinstance(raw, dict):
+                inner = raw.get("params") if isinstance(raw.get("params"), dict) else raw
+                body_params = dict(inner)
+    except Exception:
+        body_params = {}
+
+    params = {"reason": reason or body_params.get("reason", "")}
+    if src_ip:
+        params["src_ip"] = src_ip
+        params.setdefault("host_ip", src_ip)
+    for k, v in body_params.items():
+        if v is None or v == "":
+            continue
+        params[k] = v
+
+    threat_info = {
+        "src_ip": params.get("src_ip") or src_ip,
+        "host_ip": params.get("host_ip") or src_ip,
+        "threat_type": "manual",
+        "confidence": 1.0,
+        "severity": "high",
+    }
+    actions = [{"name": action_name, "params": params}]
 
     # 安全护栏路径：SecurityGuard 四项审查 + 频率限制（此前直连 executor 全部绕过）
     batch = await response_orchestrator._guarded_execute(actions, threat_info)
@@ -411,6 +451,10 @@ async def rollback_response(
 ):
     """回滚响应动作"""
     result = await response_executor.rollback_batch(rollback_token)
+    # 幂等标记: 所有动作均为 not_found/已回滚重放时 → idempotent=true
+    idempotent = bool(result.results) and result.failed == 0 and all(
+        getattr(r, "idempotent", False) for r in result.results
+    )
     await _audit(
         session, request, user, action="response.rollback",
         target_type="response_action", target_id=rollback_token,
@@ -421,6 +465,8 @@ async def rollback_response(
         "rollback_token": rollback_token,
         "succeeded": result.succeeded,
         "failed": result.failed,
+        "idempotent": idempotent,
+        "error": result.error,
     }
 
 @router.get("/response/approvals")
@@ -447,6 +493,11 @@ async def list_approvals(
             "match_status": getattr(t, "match_status", "") or "",
             "created_at": t.created_at,
             "expires_at": t.expires_at,
+            # HMAC 签名(批准时原样回传 → approval_queue.approve 校验防篡改);
+            # 工单自带 sig 缺失时按同一算法现算兜底
+            "sig": getattr(t, "sig", "") or sign_approval(
+                t.id, t.expires_at, actions_digest(t.actions), t.policy_name,
+            ),
         }
         for t in tickets
     ]
@@ -457,9 +508,10 @@ async def approve_action(
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: UserInfo = Depends(RequireRole("admin")),
+    sig: str = Query("", description="审批 HMAC 签名(可选; 为空则用工单自带签名, 进程内批准)"),
 ):
-    """批准审批工单"""
-    ticket = approval_queue.approve(ticket_id, user.username)
+    """批准审批工单(控制面校验: TTL / 防重放 / actions 摘要 / HMAC)"""
+    ticket = approval_queue.approve(ticket_id, user.username, sig=sig or None)
     if not ticket:
         raise HTTPException(404, f"Ticket not found or already processed: {ticket_id}")
     # 触发执行
@@ -504,6 +556,31 @@ async def reject_action(
         reason=reason,
     )
     return {"status": "rejected", "ticket_id": ticket_id, "reason": reason}
+
+@router.post("/response/approvals/{ticket_id}/preview")
+async def preview_approval(
+    ticket_id: str,
+    user: UserInfo = Depends(RequireRole("operator")),
+):
+    """批准前 dry-run 预览 — 只模拟执行动作, 不产生任何真实变更。
+
+    ContextVar 局部生效（preview_actions 内部设置/复位）,
+    不改变全局 execution_mode。
+    """
+    ticket = approval_queue.get_ticket(ticket_id)
+    if not ticket:
+        raise HTTPException(404, f"Ticket not found: {ticket_id}")
+    from response_engine.preview import preview_actions
+    try:
+        steps = await preview_actions(ticket.actions, ticket.threat_info)
+    except Exception as e:
+        raise HTTPException(500, f"Preview failed: {e}")
+    await _audit(
+        None, None, user, action="response.approval_preview",
+        target_type="approval_ticket", target_id=ticket_id,
+        after={"steps": len(steps)},
+    )
+    return {"ticket_id": ticket_id, "steps": steps}
 
 @router.get("/response/logs")
 async def query_response_logs(

@@ -39,12 +39,22 @@ class PostMortemService:
           - false_positive_count: 从反馈记录统计
           - root_cause + lessons_learned: LLM 生成（可选）
         """
-        # 检查是否已存在
-        existing = await session.execute(
+        # 幂等: 已存在 → 直接返回既有行(学习闭环/SLA 自动关闭会重复触发)
+        existing = (await session.execute(
             select(PostMortem).where(PostMortem.case_id == case_id)
-        )
-        if existing.scalars().first():
-            return {"success": False, "error": "该案例已有复盘报告"}
+        )).scalars().first()
+        if existing is not None:
+            case_number = ""
+            try:
+                case = await session.get(SecurityCase, case_id)
+                case_number = case.case_number if case else ""
+            except Exception:
+                case_number = ""
+            logger.info(f"[PostMortem] Idempotent hit for case_id={case_id} (pm={existing.id})")
+            return {
+                "success": True, "id": existing.id,
+                "case_number": case_number, "existing": True,
+            }
 
         case = await session.get(SecurityCase, case_id)
         if not case:

@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
 import { api } from '../../lib/api'
 import { EmptyState } from './badges'
+import { STATUS_TONE, INK_FAINT } from '../../lib/operationsTokens'
+import { AI_GRADIENT_STOPS } from '../../lib/constants'
 
 // ── 类型 ──
 
@@ -65,10 +67,16 @@ const STAGE_LABELS: Record<string, string> = {
 }
 
 const STAGE_COLORS: Record<string, string> = {
-  ingest: '#34c759', anomaly_detect: '#0071e3', sigma_detect: '#af52de',
-  store: '#5e5ce6', decomposer: '#ff9f0a', tool_builder: '#ff375f',
-  executor: '#ff2d55', reviewer: '#5856d6', cad_verify: '#30b0c7',
-  response: '#34c759',
+  ingest: STATUS_TONE.success,
+  anomaly_detect: AI_GRADIENT_STOPS[0],
+  sigma_detect: STATUS_TONE.active,
+  store: STATUS_TONE.info,
+  decomposer: STATUS_TONE.pending,
+  tool_builder: STATUS_TONE.failed,
+  executor: STATUS_TONE.failed,
+  reviewer: STATUS_TONE.info,
+  cad_verify: AI_GRADIENT_STOPS[3],
+  response: STATUS_TONE.success,
 }
 
 function fmtMs(ms: number): string {
@@ -88,16 +96,16 @@ function fmtTime(iso: string | number): string {
 // ── 展示 ──
 
 function SpanRow({ span, maxLatency }: { span: TraceSpan; maxLatency: number }) {
-  const color = STAGE_COLORS[span.stage || ''] || '#8e8e93'
+  const color = STAGE_COLORS[span.stage || ''] || INK_FAINT
   const pct = maxLatency > 0 ? Math.max(3, (span.latency_ms / maxLatency) * 100) : 3
-  const statusColor = span.status === 'error' || span.status === 'timeout' ? '#ff3b30' : '#34c759'
+  const statusColor = span.status === 'error' || span.status === 'timeout' ? STATUS_TONE.failed : STATUS_TONE.success
   return (
     <div className="flex items-center gap-3 py-2.5">
       <div className="w-28 shrink-0">
         <span className="text-[12px] font-semibold text-ink truncate block">{spanLabel(span)}</span>
         {span.event_type && <span className="text-[10px] text-ink-faint truncate block">{span.event_type}</span>}
       </div>
-      <div className="flex-1 h-6 bg-ink/[0.04] rounded overflow-hidden">
+      <div className="flex-1 h-6 bg-mist rounded overflow-hidden">
         <motion.div
           initial={{ width: 0 }}
           animate={{ width: `${pct}%` }}
@@ -111,8 +119,8 @@ function SpanRow({ span, maxLatency }: { span: TraceSpan; maxLatency: number }) 
         <span
           className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
             span.status === 'success' ? 'bg-mist text-ink'
-            : span.status === 'error' ? 'bg-ink text-white'
-            : span.status === 'timeout' ? 'bg-nong text-white'
+            : span.status === 'error' ? 'bg-alert/20 text-alert'
+            : span.status === 'timeout' ? 'bg-warn/20 text-warn'
             : 'bg-ink/5 text-ink-soft'
           }`}
         >
@@ -189,7 +197,7 @@ export function TraceTab() {
               key={t.trace_id}
               onClick={() => setSelected(t.trace_id)}
               className={`w-full text-left px-3 py-2 rounded-xl mb-1 transition-colors ${
-                selected === t.trace_id ? 'bg-ink text-white' : 'hover:bg-mist'
+                selected === t.trace_id ? 'bg-mist text-ink font-medium' : 'hover:bg-mist'
               }`}
             >
               <div className="flex items-center justify-between gap-2">
@@ -254,11 +262,13 @@ export function TraceTab() {
                         <span className="text-ink-faint font-mono">#{e.id}</span>
                         <span className="font-medium text-ink">{e.event_type}</span>
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                          e.severity === 'critical' || e.severity === 'high'
-                            ? 'bg-ink text-white'
-                            : e.severity === 'medium'
-                              ? 'bg-[#ff9f0a]/10 text-[#c77700]'
-                              : 'bg-mist text-ink'
+                          e.severity === 'critical'
+                            ? 'bg-alert/20 text-alert'
+                            : e.severity === 'high'
+                              ? 'bg-warn/20 text-warn'
+                              : e.severity === 'medium'
+                                ? 'bg-signal/15 text-signal'
+                                : 'bg-mist text-ink-soft'
                         }`}>
                           {e.severity}
                         </span>

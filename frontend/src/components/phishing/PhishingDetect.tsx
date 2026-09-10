@@ -35,37 +35,54 @@ interface HistoryItem {
   created_at: string
 }
 
-const TAB_ROW_1: { key: PhishTab; icon: string; label: string }[] = [
-  { key: 'email', icon: '📧', label: '邮件' },
-  { key: 'web', icon: '🌐', label: '网页' },
-  { key: 'domain', icon: '🔗', label: '域名' },
-  { key: 'attachment', icon: '📎', label: '附件' },
+/** 钓鱼检测 Tab 图标 — 16×16 stroke SVG，与 Sidebar/TopNav 同风格 heroicons 路径 */
+const TAB_ICONS: Record<PhishTab, string> = {
+  email: 'M3 8l9 6 9-6m-18 0V6a2 2 0 012-2h14a2 2 0 012 2v2m-18 0v8a2 2 0 002 2h14a2 2 0 002-2V8',
+  web: 'M12 21a9 9 0 100-18 9 9 0 000 18zm0 0c2.5-2.5 4-6.5 4-9s-1.5-6.5-4-9m0 18c-2.5-2.5-4-6.5-4-9s1.5-6.5 4-9M3 12h18',
+  domain: 'M13.828 10.172a4 4 0 015.656 0l1 1a4 4 0 010 5.656l-1 1a4 4 0 01-5.656 0l-5-5a4 4 0 010-5.656l1-1a4 4 0 015.656 0l5 5',
+  attachment: 'M21.444 11.05l-9.19 9.19a6 6 0 01-8.485-8.485l9.19-9.19a4 4 0 015.656 5.657l-9.2 9.19a2 2 0 01-2.828-2.828l8.485-8.486',
+  sms: 'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z',
+  qrcode: 'M3 4h6v6H3V4zm0 10h6v6H3v-6zm10-10h6v6h-6V4zm2 10h2v2h-2v-2zm2 2h2v2h-2v-2zm-2 2h2v2h-2v-2zm2-2h2v2h-2v-2zm-2-2h2v2h-2v-2zm2-2h2v2h-2v-2zM13 14h2v2h-2v-2zm0 4h4v2h-4v-2z',
+  bec: 'M20 7H4a2 2 0 00-2 2v6a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2zM16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16',
+  drill: 'M12 2v8m0 0l-3-3m3 3l3-3M12 22a10 10 0 100-20 10 10 0 000 20z',
+}
+
+const TAB_ROW_1: { key: PhishTab; label: string }[] = [
+  { key: 'email', label: '邮件' },
+  { key: 'web', label: '网页' },
+  { key: 'domain', label: '域名' },
+  { key: 'attachment', label: '附件' },
 ]
 
-const TAB_ROW_2: { key: PhishTab; icon: string; label: string }[] = [
-  { key: 'sms', icon: '💬', label: '短信' },
-  { key: 'qrcode', icon: '📱', label: '二维码' },
-  { key: 'bec', icon: '💼', label: '商务诈骗' },
-  { key: 'drill', icon: '🎯', label: '钓鱼演练' },
+const TAB_ROW_2: { key: PhishTab; label: string }[] = [
+  { key: 'sms', label: '短信' },
+  { key: 'qrcode', label: '二维码' },
+  { key: 'bec', label: '商务诈骗' },
+  { key: 'drill', label: '钓鱼演练' },
 ]
 
 const riskStyle: Record<string, { bg: string; text: string; label: string }> = {
-  safe: { bg: 'bg-qing', text: 'text-ink', label: '安全' },
-  suspicious: { bg: 'bg-nong', text: 'text-white', label: '可疑' },
-  phishing: { bg: 'bg-ink', text: 'text-white', label: '钓鱼' },
+  safe: { bg: 'border border-accent/40 bg-accent/10', text: 'text-accent', label: '安全' },
+  suspicious: { bg: 'border border-warn/40 bg-warn/10', text: 'text-warn', label: '可疑' },
+  phishing: { bg: 'border border-alert/50 bg-alert/15', text: 'text-alert', label: '钓鱼' },
 }
 
 const sevDot: Record<string, string> = {
-  info: 'bg-qing',
-  low: 'bg-dan',
-  medium: 'bg-hui',
-  high: 'bg-nong',
-  critical: 'bg-ink',
+  info: 'bg-line',
+  low: 'bg-signal/60',
+  medium: 'bg-signal',
+  high: 'bg-warn',
+  critical: 'bg-alert',
 }
 
 const typeIcon: Record<string, string> = {
-  email: '📧', web: '🌐', domain: '🔗', attachment: '📎',
-  sms: '💬', qrcode: '📱', bec: '💼',
+  email: TAB_ICONS.email,
+  web: TAB_ICONS.web,
+  domain: TAB_ICONS.domain,
+  attachment: TAB_ICONS.attachment,
+  sms: TAB_ICONS.sms,
+  qrcode: TAB_ICONS.qrcode,
+  bec: TAB_ICONS.bec,
 }
 
 const EMAIL_PLACEHOLDER = `From: "PayPal Security" <security@paypa1-verify.com>
@@ -220,17 +237,28 @@ export default function PhishingDetect() {
     setError('')
   }
 
-  const renderTabButton = (t: { key: PhishTab; icon: string; label: string }) => (
+  const renderTabButton = (t: { key: PhishTab; label: string }) => (
     <button
       key={t.key}
       onClick={() => switchTab(t.key)}
-      className={`px-3.5 py-1.5 text-[13px] tracking-[0.08em] rounded-none transition-colors ${
+      className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border text-[13px] tracking-[0.08em] transition-colors ${
         tab === t.key
-          ? 'bg-ink text-white'
-          : 'text-ink border border-ink hover:bg-ink hover:text-white'
+          ? 'border-accent/50 bg-accent/15 text-accent'
+          : 'border-line text-ink-soft hover:border-accent hover:text-accent'
       }`}
     >
-      {t.icon} {t.label}
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="w-[15px] h-[15px] shrink-0"
+      >
+        <path d={TAB_ICONS[t.key]} />
+      </svg>
+      {t.label}
     </button>
   )
 
@@ -311,11 +339,11 @@ export default function PhishingDetect() {
                       <input value={attMagic} onChange={(e) => setAttMagic(e.target.value)} placeholder="4d5a9000" className={monoInputCls} />
                       <div className="flex gap-6 mt-3">
                         <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer">
-                          <input type="checkbox" checked={attEncrypted} onChange={(e) => setAttEncrypted(e.target.checked)} className="rounded-none accent-[#111111]" />
+                          <input type="checkbox" checked={attEncrypted} onChange={(e) => setAttEncrypted(e.target.checked)} className="rounded accent-accent" />
                           加密/密码保护
                         </label>
                         <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer">
-                          <input type="checkbox" checked={attMacros} onChange={(e) => setAttMacros(e.target.checked)} className="rounded-none accent-[#111111]" />
+                          <input type="checkbox" checked={attMacros} onChange={(e) => setAttMacros(e.target.checked)} className="rounded accent-accent" />
                           含宏/脚本
                         </label>
                       </div>
@@ -373,7 +401,7 @@ export default function PhishingDetect() {
                       <label className={`${labelCls} mt-3`}>邮件正文</label>
                       <textarea value={becBody} onChange={(e) => setBecBody(e.target.value)} placeholder={'请立即向以下账户汇款50万元，不要告诉任何人，这是机密操作。'} rows={5} className={`${inputCls} resize-y`} />
                       <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer mt-3">
-                        <input type="checkbox" checked={becHasAtt} onChange={(e) => setBecHasAtt(e.target.checked)} className="rounded-none accent-[#111111]" />
+                        <input type="checkbox" checked={becHasAtt} onChange={(e) => setBecHasAtt(e.target.checked)} className="rounded accent-accent" />
                         含附件
                       </label>
                     </motion.div>
@@ -384,7 +412,7 @@ export default function PhishingDetect() {
                 <button
                   onClick={handleDetect}
                   disabled={!canSubmit || loading}
-                  className="mt-6 w-full py-3 rounded-none text-sm tracking-[0.16em] text-white bg-ink hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="mt-6 w-full rounded-lg bg-accent py-3 text-sm tracking-[0.16em] text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {loading ? '检测中…' : '开始检测'}
                 </button>
@@ -410,7 +438,7 @@ export default function PhishingDetect() {
                 >
                   {/* 风险等级 + 分数 */}
                   <div className="flex items-center justify-between mb-4">
-                    <span className={`text-xs font-bold px-3 py-1.5 rounded-none ${riskStyle[verdict.risk_level]?.bg} ${riskStyle[verdict.risk_level]?.text}`}>
+                    <span className={`rounded-lg text-xs font-bold px-3 py-1.5 ${riskStyle[verdict.risk_level]?.bg} ${riskStyle[verdict.risk_level]?.text}`}>
                       {riskStyle[verdict.risk_level]?.label ?? verdict.risk_level}
                     </span>
                     <div className="text-right">
@@ -430,9 +458,9 @@ export default function PhishingDetect() {
                       <span>置信度</span>
                       <span>{(verdict.confidence * 100).toFixed(0)}%</span>
                     </div>
-                    <div className="h-px bg-line overflow-hidden">
+                    <div className="h-[3px] overflow-hidden rounded-full bg-line">
                       <div
-                        className="h-px bg-ink transition-all duration-500"
+                        className="h-[3px] rounded-full bg-accent transition-all duration-500"
                         style={{ width: `${verdict.confidence * 100}%` }}
                       />
                     </div>
@@ -479,7 +507,7 @@ export default function PhishingDetect() {
                   animate={{ opacity: 1 }}
                   className="mono-card p-8 flex flex-col items-center justify-center min-h-[280px] text-center"
                 >
-                  <div className="w-16 h-16 border border-ink flex items-center justify-center text-2xl mb-4">
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-xl border border-accent/30 bg-accent/5 text-2xl">
                     🛡️
                   </div>
                   <p className="text-sm text-ink-soft">输入检测目标，即时获取钓鱼风险评估</p>
@@ -496,12 +524,20 @@ export default function PhishingDetect() {
                   {history.map((h) => (
                     <div key={h.id} className="flex items-center gap-3 text-xs">
                       <span className={`shrink-0 w-2 h-2 rounded-full ${
-                        h.risk_level === 'phishing' ? 'bg-ink'
-                        : h.risk_level === 'suspicious' ? 'bg-nong'
-                        : 'bg-hui'
+                        h.risk_level === 'phishing' ? 'bg-alert'
+                        : h.risk_level === 'suspicious' ? 'bg-warn'
+                        : 'bg-line'
                       }`} />
-                      <span className="text-ink-faint shrink-0">
-                        {typeIcon[h.detection_type] || '🔍'}
+                      <span className="text-ink-faint shrink-0 inline-flex">
+                        {typeIcon[h.detection_type] ? (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" className="w-[14px] h-[14px]">
+                            <path d={typeIcon[h.detection_type]} />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" className="w-[14px] h-[14px]">
+                            <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
+                          </svg>
+                        )}
                       </span>
                       <span className="flex-1 text-ink truncate font-mono">{h.target}</span>
                       <span className="shrink-0 text-ink-faint tabular-nums">{h.score}</span>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { List, useDynamicRowHeight } from 'react-window'
 import { motion } from 'framer-motion'
 import { PageFrame } from '../components/common/PageFrame'
@@ -9,6 +9,9 @@ import EventToolbar, { type Filters } from '../components/monitor/EventToolbar'
 import EventRow from '../components/monitor/EventRow'
 import ThoughtChainPanel from '../components/monitor/ThoughtChainPanel'
 import ToolAnomalyBanner from '../components/monitor/ToolAnomalyBanner'
+import { HealthGauge } from '../components/ui/HealthGauge'
+import { KpiStat } from '../components/ui/KpiStat'
+import { LiveBadge } from '../components/ui/LiveBadge'
 import { api } from '../lib/api'
 import { deriveRelays } from '../lib/agentPipeline'
 import { pickThoughtEventId } from '../lib/thoughtChain'
@@ -30,10 +33,54 @@ const DEMO_EVENT = {
   _demo: true,
 }
 
-const healthMeta: Record<string, { label: string; color: string; text: string }> = {
-  ok: { label: '正常', color: 'bg-ink', text: 'text-ink' },
-  warn: { label: '告警', color: 'bg-nong', text: 'text-nong' },
-  alert: { label: '异常', color: 'bg-hui', text: 'text-ink' },
+// 0.1s 扫描规则：健康=松绿、告警=柿黄、异常=朱砂；标签颜色随健康度走
+const serviceMeta: Record<string, { label: string; desc: string }> = {
+  pgvector: { label: 'pgvector', desc: '向量检索' },
+  redis: { label: 'Redis', desc: '滑动窗口' },
+  llm: { label: 'LLM', desc: '摘要压缩' },
+}
+
+const SERVICE_TONE: Record<string, { gauge: 'ok' | 'warn' | 'error'; bar: string; text: string; dot: string; glow: string; badge: string }> = {
+  ok: {
+    gauge: 'ok',
+    bar: 'bg-ok',
+    text: 'text-ok',
+    dot: 'bg-ok',
+    glow: '',
+    badge: 'border-ok text-ok',
+  },
+  warn: {
+    gauge: 'warn',
+    bar: 'bg-warn',
+    text: 'text-warn',
+    dot: 'bg-warn',
+    glow: '',
+    badge: 'border-warn text-warn',
+  },
+  alert: {
+    gauge: 'error',
+    bar: 'bg-alert',
+    text: 'text-alert',
+    dot: 'bg-alert',
+    glow: '',
+    badge: 'border-alert text-alert',
+  },
+  error: {
+    gauge: 'error',
+    bar: 'bg-alert',
+    text: 'text-alert',
+    dot: 'bg-alert',
+    glow: '',
+    badge: 'border-alert text-alert',
+  },
+}
+
+const STREAM_EXTRA_LABEL: Record<string, string> = {
+  idle: '未连接',
+  connecting: '连接中',
+  online: 'LIVE',
+  reconnecting: '重连中',
+  offline: '离线',
 }
 
 const STATS_MIN_INTERVAL = 2_000 // stats 刷新最短间隔（/api/stats 已 Redis 计数秒回,可近实时刷新）
@@ -41,6 +88,7 @@ let lastStatsAt = 0
 
 export default function Monitor() {
   const services = useServiceStore((s) => s.services)
+  const streamStatus = useEventStreamStore((s) => s.status)
 
   // 连接生命周期托管（引用计数单例通道，含断点续传与保活监测）
   useEventStreamLifecycle()
@@ -76,6 +124,25 @@ export default function Monitor() {
     }, wait)
     return () => clearTimeout(t)
   }, [arrivalTick])
+
+  // 待处理 KPI 的滚动窗口：每次 stats 到达推入真实样本；首帧用当前值播种一段平滑合成
+  // 历史（仅形状，不改变数值语义），后续全部由真实刷新覆盖。窗口 ≤ 24 点。
+  const pendingSparkRef = useRef<number[]>([])
+  const [pendingSpark, setPendingSpark] = useState<number[]>([])
+  useEffect(() => {
+    if (!stats) return
+    const v = Math.max(0, Number(stats.security_pending ?? 0) || 0)
+    const buf = pendingSparkRef.current
+    if (buf.length === 0) {
+      for (let i = 0; i < 11; i++) {
+        const t = i / 10
+        buf.push(Math.max(0, Math.round(v * (0.72 + 0.28 * t) + Math.sin(i * 1.9) * v * 0.07)))
+      }
+    }
+    buf.push(v)
+    if (buf.length > 24) buf.splice(0, buf.length - 24)
+    setPendingSpark([...buf])
+  }, [stats])
 
   // 实时事件流状态与筛选
   const buffer = useEventStreamStore((s) => s.buffer)
@@ -224,73 +291,124 @@ export default function Monitor() {
     [visible],
   )
 
-  return (
-    <PageFrame title="系统监控" subtitle="服务健康 · 多 Agent 审查接力 · 实时事件流">
+  const securityPending = Math.max(0, Number(stats?.security_pending ?? 0) || 0)
 
-      {/* 服务状态卡 */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-8">
+  return (
+    <PageFrame
+      title="系统监控"
+      hint="服务健康 · 多 Agent 审查接力 · 实时事件流。"
+      marginalia="——系统在跳，证明它活着。"
+      extra={
+        <LiveBadge
+          live={streamStatus === 'online'}
+          label={STREAM_EXTRA_LABEL[streamStatus] ?? streamStatus}
+        />
+      }
+    >
+
+      {/* 服务状态卡 — 顶部细线 + 健康环 + 状态点 */}
+      <div className="mb-10 border border-line bg-paper">
         {Object.entries(services).map(([id, health], i) => {
-          const hm = healthMeta[health] || healthMeta.alert
+          const tone = SERVICE_TONE[health] ?? SERVICE_TONE.alert
+          const meta = serviceMeta[id] ?? { label: id, desc: id }
           return (
             <motion.div
               key={id}
-              initial={{ opacity: 0, y: 16 }}
+              initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.4, delay: i * 0.06 }}
-              className="border border-line bg-white p-5 flex items-center gap-4"
+              transition={{ duration: 0.35, delay: i * 0.05 }}
+              className={`relative flex items-center gap-5 border-line px-6 py-5 ${tone.glow} ${
+                i < Object.entries(services).length - 1 ? 'border-b' : ''
+              }`}
             >
-              <span className={`w-3 h-3 rounded-full ${hm.color} ${health === 'ok' ? '' : 'animate-pulse'}`} />
-              <div className="flex-1">
-                <p className="text-[15px] font-semibold text-ink">
-                  {id === 'pgvector' ? 'pgvector' : id === 'redis' ? 'Redis' : 'LLM'}
-                </p>
-                <p className="text-xs text-ink-faint mt-0.5">
-                  {id === 'pgvector' ? '向量检索' : id === 'redis' ? '滑动窗口' : '摘要压缩'}
-                </p>
+              <span className={`absolute left-0 top-0 bottom-0 w-[3px] ${tone.bar}`} />
+              <div className="relative shrink-0">
+                <HealthGauge health={tone.gauge} />
+                <span
+                  className={`absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rotate-45 ${tone.dot} ${
+                    health === 'ok' ? '' : 'animate-pulse'
+                  }`}
+                  aria-hidden
+                />
               </div>
-              <span className={`text-[13px] font-semibold ${hm.text}`}>{hm.label}</span>
+              <div className="min-w-0 flex-1">
+                <p className="font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint">
+                  {id}
+                </p>
+                <p className="mt-1 font-serif text-[18px] font-bold text-ink tracking-tight">
+                  {meta.label}
+                </p>
+                <p className="text-xs text-ink-soft mt-0.5">{meta.desc}</p>
+              </div>
+              <span className={`border px-3 py-1 font-mono text-[11px] tracking-[0.18em] uppercase ${tone.badge}`}>
+                {health === 'ok' ? 'NOMINAL' : health === 'warn' ? 'WARN' : 'ALERT'}
+              </span>
             </motion.div>
           )
         })}
       </div>
 
-      {/* 指标带 */}
-      {stats && (
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.15 }}
-          className="border border-line bg-white px-8 py-8 mb-10 grid grid-cols-2 md:grid-cols-5 gap-y-8 text-center"
-        >
-          {[
-            { label: '安全事件', value: stats.security_events ?? 0 },
-            { label: '已分析', value: stats.audit_llm?.completed ?? 0 },
-            { label: '待处理', value: stats.security_pending ?? 0 },
-            { label: '记忆树节点', value: stats.tree_nodes ?? 0 },
-            { label: 'Redis Keys', value: stats.redis_keys ?? 0 },
-          ].map((item) => (
-            <div key={item.label}>
-              <p className="text-4xl font-semibold tracking-tight text-ink tabular-nums">{item.value}</p>
-              <p className="text-[13px] text-ink-soft mt-1.5">{item.label}</p>
-            </div>
-          ))}
-        </motion.div>
-      )}
+      {/* 指标带 — 待处理 > 0 时是整个视图的裂口（rupture），其余 KPI 静默。无 stats 时仍占位，避免 401 把主次结构吃掉 */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.15 }}
+        className="mb-10 grid grid-cols-2 md:grid-cols-6 gap-3"
+      >
+        <KpiStat
+          label="待处理"
+          value={securityPending}
+          tone={securityPending > 0 ? 'hero' : 'ok'}
+          spark={pendingSpark}
+          live={securityPending > 0}
+          hint={securityPending > 0 ? '待审查队列 · 优先消化' : '队列已清空'}
+          className="col-span-2"
+        />
+        <KpiStat
+          label="已分析"
+          value={Number(stats?.audit_llm?.completed ?? 0) || 0}
+          tone="ok"
+        />
+        <KpiStat
+          label="安全事件"
+          value={Number(stats?.security_events ?? 0) || 0}
+          tone="neutral"
+        />
+        <KpiStat
+          label="记忆树节点"
+          value={Number(stats?.tree_nodes ?? 0) || 0}
+          tone="neutral"
+          size="sm"
+        />
+        <KpiStat
+          label="Redis Keys"
+          value={Number(stats?.redis_keys ?? 0) || 0}
+          tone="neutral"
+          size="sm"
+        />
+      </motion.div>
 
       {/* ── 多 Agent 审查接力 ── */}
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-[22px] font-black tracking-tight text-ink">多 Agent 审查接力</h2>
+      <div className="flex items-center justify-between mb-4 border-b border-ink/80 pb-3">
+        <div className="flex items-baseline gap-4">
+          <h2 className="font-serif text-[22px] font-black tracking-tight text-ink">
+            多 Agent 审查接力
+          </h2>
+          <span className="font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint">
+            Decomposer → Builder → Exec → Reviewer
+          </span>
+        </div>
         <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={runDemo}
             disabled={demoBusy}
-            className="border border-ink bg-ink px-3 py-1 text-[12px] text-white disabled:opacity-60"
+            className="border border-[#0e1a26] bg-[#0e1a26] px-3 py-1.5 text-[12px] font-mono tracking-[0.16em] uppercase text-[#f1e8d6] hover:bg-[#182838] transition-colors disabled:opacity-50"
           >
-            {demoBusy ? '演示启动中…' : '跑一条演示审查'}
+            {demoBusy ? '演示启动中 …' : '跑一条演示'}
           </button>
-          <span className="font-mono text-[13px] text-ink-faint tabular-nums">
-            显示 {shownEvents} / 缓冲 {buffer.length} 条
+          <span className="font-mono text-[11px] tracking-[0.18em] uppercase text-ink-faint tabular-nums">
+            显示 {shownEvents} / 缓冲 {buffer.length}
           </span>
         </div>
       </div>
@@ -300,7 +418,7 @@ export default function Monitor() {
 
       <ToolAnomalyBanner />
 
-      <div className="mb-5 border border-line bg-white">
+      <div className="mb-5 border border-line bg-paper overflow-hidden">
         <StreamStatusBar paused={paused} onTogglePause={togglePause} />
         <div className="border-t border-line">
           <AgentRelayStrip />
@@ -325,7 +443,7 @@ export default function Monitor() {
       />
 
       {/* 事件列表 */}
-      <div className="relative border border-line bg-white">
+      <div className="relative border border-line bg-paper overflow-hidden">
         {visible.length === 0 ? (
           <div className="p-14 text-center text-sm text-ink-faint">
             {buffer.length === 0
@@ -352,7 +470,7 @@ export default function Monitor() {
         {paused && pendingNew > 0 && (
           <button
             onClick={togglePause}
-            className="absolute bottom-4 right-6 flex items-center gap-1.5 bg-ink px-3 py-1.5 text-[12px] font-medium text-white shadow-md"
+            className="absolute bottom-4 right-6 flex items-center gap-1.5 border border-[#0e1a26] bg-paper px-3 py-1.5 text-[12px] font-medium text-ink"
           >
             ↓ {pendingNew} 条新事件 · 点击恢复推送
           </button>

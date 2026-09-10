@@ -82,8 +82,9 @@ LINUX_RULES: list[WhitelistRule] = [
         desc="nmap 扫描（仅限 IP 目标，禁止域名/参数注入）",
         forbidden=["--script", "-oN", "-oX", "-oG"],
     ),
+    # 修复: 原第二条 LX-006(nmap --version)与上面 iptables -D 规则重号 → LX-015
     WhitelistRule(
-        rule_id="LX-006",
+        rule_id="LX-015",
         pattern=r"^nmap\s+--version$",
         desc="nmap 版本检查",
     ),
@@ -101,6 +102,34 @@ LINUX_RULES: list[WhitelistRule] = [
         rule_id="LX-009",
         pattern=r"^echo\s+'---'$",
         desc="分隔符输出（连接诊断用）",
+    ),
+    # ── IPv6 (ip6tables) — 与 IPv4 规则平行; IP 段仅接受规范化 IPv6
+    # [0-9a-fA-F:]+ 即 ipaddress.ip_address() 规范化后的形式(v4-mapped 为十六进制),
+    # 注入子串仍被 GLOBAL_FORBIDDEN(; && | > 等) 先行拦截
+    WhitelistRule(
+        rule_id="LX-010",
+        pattern=r"^(sudo\s+)?ip6tables\s+-I\s+(INPUT|OUTPUT)\s+-[sd]\s+[0-9a-fA-F:]+\s+-j\s+DROP(\s+-m\s+comment\s+--comment\s+'[A-Za-z0-9_\-]+')?$",
+        desc="ip6tables 插入 IPv6 DROP 规则（封禁/隔离）",
+    ),
+    WhitelistRule(
+        rule_id="LX-011",
+        pattern=r"^(sudo\s+)?ip6tables\s+-D\s+(INPUT|OUTPUT)\s+\d+$",
+        desc="ip6tables 按行号删除规则（回滚）",
+    ),
+    WhitelistRule(
+        rule_id="LX-012",
+        pattern=r"^(sudo\s+)?ip6tables\s+-D\s+(INPUT|OUTPUT)\s+-[sd]\s+[0-9a-fA-F:]+\s+-j\s+(DROP|ACCEPT|REJECT)(\s+-m\s+comment\s+--comment\s+'[A-Za-z0-9_\-]+')?$",
+        desc="ip6tables 按匹配删除规则（解封）",
+    ),
+    WhitelistRule(
+        rule_id="LX-013",
+        pattern=r"^(sudo\s+)?ip6tables\s+-L\s+(INPUT|OUTPUT)\s+-n\s+--line-numbers$",
+        desc="ip6tables 列出规则（查询）",
+    ),
+    WhitelistRule(
+        rule_id="LX-014",
+        pattern=r"^ip6tables\s+--version$",
+        desc="ip6tables 版本检查",
     ),
 ]
 

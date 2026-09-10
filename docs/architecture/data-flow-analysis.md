@@ -94,7 +94,7 @@
 **认证链**：
 1. 全局中间件 `auth_middleware` (`app.py:403-431`) — 验证 JWT，过滤 `_PUBLIC_PATHS`
 2. `source_registry.authenticate(api_key)` (`routers/logs.py:96-100`) — SHA256 哈希比对，DB 权威 + 内存热缓存（`source_registry.py:38-41`）
-3. 速率限制中间件 `rate_limit_middleware` (`app.py:496-519`) — 按 `X-API-Key > Bearer > X-Forwarded-For > client_ip` 分桶（`_resolve_rate_limit_key` at `app.py:465-493`）
+3. 速率限制中间件 `rate_limit_middleware` (`app.py:493-523`) — 按 `X-API-Key > Bearer > X-Forwarded-For > client_ip` 分桶（`_resolve_rate_limit_key` at `app.py:449-478`）；是否计流由 `http_guards.rate_limit_decision(path, method)` 决定（豁免前缀 / `RATE_LIMIT_FORCED` 高危点名 / 未归类 std 桶）
 
 ### 1.2 Kafka 消费（薄消费者）
 
@@ -640,7 +640,7 @@
 
 ### 6.3 backpressure 边界
 
-1. **HTTP 网关**：`_rate_limit_store` 内存桶（`app.py:436-519`），按 (X-API-Key / XFF / client_ip) 分桶，每 5min 清理过期
+1. **HTTP 网关**：`_rate_limit_store` 内存桶（`app.py:442-523`），按 (X-API-Key / XFF / client_ip) 分桶，每 5min 清理过期；判定走 `http_guards.rate_limit_decision(path, method)` → `(是否计流, 命名空间)`：豁免前缀直接放行、`RATE_LIMIT_FORCED` 命中的高危端点走 `crit:` 独立桶、未归类路径走 `std:` 桶（2026-09-10 重定，详见 `README.md` §HTTP 限流策略）
 2. **Kafka audit-queue**：`_audit_semaphore` (12) + `max_poll_records=50`
 3. **LLM HTTP**：`llm_limiter` (8, P0 reserve 2) + `acquire timeout=30s`
 4. **Audit worker**：`PriorityQueue` 上限 2000 + PQ 兜底

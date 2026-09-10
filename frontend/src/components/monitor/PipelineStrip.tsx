@@ -22,7 +22,7 @@ function Node({
   flashKey?: number
 }) {
   return (
-    <div className="relative z-10 flex min-w-[86px] flex-col items-center gap-0.5 border border-line bg-white px-3 py-2">
+    <div className="relative z-10 flex min-w-[86px] flex-col items-center gap-0.5 rounded-lg border border-line bg-card/70 px-3 py-2">
       <span className="whitespace-nowrap text-[10px] tracking-wide text-ink-faint">{label}</span>
       <span className="font-mono text-[15px] font-semibold text-ink tabular-nums">{value}</span>
       {sub !== undefined && (
@@ -31,10 +31,10 @@ function Node({
       {flashKey > 0 && (
         <motion.span
           key={flashKey}
-          initial={{ opacity: 0.3 }}
+          initial={{ opacity: 0.35 }}
           animate={{ opacity: 0 }}
           transition={{ duration: 0.7 }}
-          className="pointer-events-none absolute inset-0 bg-qing"
+          className="pointer-events-none absolute inset-0 rounded-lg bg-accent/25"
         />
       )}
     </div>
@@ -75,7 +75,7 @@ export default function PipelineStrip({ shownCount }: { shownCount: number }) {
         {packet !== null && (
           <motion.span
             key={packet}
-            className="absolute top-1/2 z-20 h-2 w-2 rounded-full bg-ink"
+            className="absolute top-1/2 z-20 h-2 w-2 rounded-full bg-ok shadow-[0_0_8px_rgba(62,122,100,0.35)]"
             style={{ marginLeft: -4 }}
             initial={{ left: '6%', opacity: 0 }}
             animate={{ left: '94%', opacity: [0, 1, 1, 0.85] }}

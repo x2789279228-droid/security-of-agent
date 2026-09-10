@@ -16,6 +16,7 @@
     from case_manager import case_manager
     case = await case_manager.auto_create_case(session, event)
 """
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -76,6 +77,55 @@ AUTO_RESPONSE_ACTIONS = frozenset({
     "kill_session", "unblock_ip", "restore_host",
 })
 ACTIVE_CASE_STATUSES = ("open", "investigating", "responding")
+
+# 后台任务注册表: 防止 fire-and-forget 协程被 GC 截断
+_BG_TASKS: set = set()
+
+# 关闭/误报后自动补复盘草稿的状态集合
+PM_DRAFT_STATUSES = ("closed", "false_positive")
+
+# 处置结论 → 反馈类型的关键词(大小写不敏感, 不发明标签)
+_DISPOSITION_FEEDBACK_KEYWORDS = (
+    (("false_positive", "false positive", "误报"), "false_positive"),
+    (("true_positive", "true positive", "确认威胁", "真阳"), "true_positive"),
+    (("missed", "漏报"), "missed_threat"),
+)
+
+
+def _spawn_bg(coro) -> None:
+    """Fire-and-forget 落地: 有运行中 loop 用 create_task, 否则后台线程自驱。
+
+    绝不阻塞/影响调用方; 任何调度异常只留 warning。
+    """
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            task = loop.create_task(coro)
+            _BG_TASKS.add(task)
+            task.add_done_callback(_BG_TASKS.discard)
+            return
+        import threading
+        threading.Thread(
+            target=lambda: asyncio.run(coro), daemon=True,
+        ).start()
+    except Exception as e:
+        logger.warning(f"[Case] background task schedule failed: {e}")
+
+
+def _concurrent_bg_safe() -> bool:
+    """sqlite(单连接 StaticPool) 上并发后台 session 会交叉踩同一连接 → 内联执行。
+
+    Postgres 等多连接后端返回 True, 走 fire-and-forget。
+    """
+    try:
+        from config import settings
+        url = str(getattr(settings, "database_url", "") or "")
+        return bool(url) and not url.startswith("sqlite")
+    except Exception:
+        return False
 
 
 def _aware(dt: Optional[datetime]) -> Optional[datetime]:
@@ -239,7 +289,20 @@ class CaseManager:
             logger.warning(f"[Case] audit_trail log failed: {e}")
 
         logger.info(f"[Case] {case.case_number}: {old_status} → {new_status} (by={by})")
+
+        # 关闭/误报 → 补复盘草稿: 多连接后端 fire-and-forget,
+        # 单连接 sqlite 内联(并发 session 会踩共享连接); 永不影响状态流转
+        if new_status in PM_DRAFT_STATUSES:
+            await self.schedule_draft_post_mortem(case_id)
+
         return {"success": True, "old_status": old_status, "new_status": new_status}
+
+    async def schedule_draft_post_mortem(self, case_id: int) -> None:
+        """可被测试 patch 的调度入口。"""
+        if _concurrent_bg_safe():
+            _spawn_bg(self._draft_post_mortem_task(case_id))
+        else:
+            await self._draft_post_mortem_task(case_id)
 
     async def assign(
         self, session: AsyncSession, case_id: int, assignee: str
@@ -299,7 +362,82 @@ class CaseManager:
             logger.warning(f"[Case] audit_trail log failed: {e}")
 
         logger.info(f"[Case] {case.case_number}: disposition set by {by}")
+
+        # 处置结论 → 学习闭环反馈(误报/确认/漏报), 24h 去重, fail-open
+        await self._record_disposition_feedback(session, case, disposition, by)
+
         return {"success": True}
+
+    # ── 学习闭环事件边 ──
+
+    async def _draft_post_mortem_task(self, case_id: int) -> None:
+        """后台补复盘草稿: 新开 session(models.async_session), 吞掉一切异常。"""
+        try:
+            from models import async_session
+            from post_mortem_service import post_mortem_service
+            async with async_session() as session:
+                result = await post_mortem_service.create_post_mortem(
+                    session, case_id, author="learn_loop"
+                )
+                if result.get("success") and not result.get("existing"):
+                    logger.info(f"[Case] Draft post-mortem created for case {case_id}")
+        except Exception as e:
+            logger.warning(f"[Case] draft post-mortem for case {case_id} failed: {e}")
+
+    @staticmethod
+    def _infer_feedback_type(disposition: str) -> str:
+        """处置结论关键词 → 反馈类型; 无匹配返回空串(不发明标签)。"""
+        text = (disposition or "").strip()
+        if not text:
+            return ""
+        lowered = text.lower()
+        for keywords, feedback_type in _DISPOSITION_FEEDBACK_KEYWORDS:
+            for kw in keywords:
+                if kw in lowered or kw in text:
+                    return feedback_type
+        return ""
+
+    async def _record_disposition_feedback(
+        self, session: AsyncSession, case: SecurityCase,
+        disposition: str, by: str,
+    ) -> None:
+        """把处置结论映射为 FeedbackRecord(24h 同 case+type 去重), 失败不影响处置。"""
+        try:
+            from models import FeedbackRecord
+            feedback_type = self._infer_feedback_type(disposition)
+            if not feedback_type:
+                return
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            exists = (await session.execute(
+                select(FeedbackRecord.id).where(
+                    FeedbackRecord.case_id == case.id,
+                    FeedbackRecord.feedback_type == feedback_type,
+                    FeedbackRecord.created_at >= cutoff,
+                ).limit(1)
+            )).scalar_one_or_none()
+            if exists is not None:
+                logger.debug(
+                    f"[Case] {case.case_number}: {feedback_type} feedback "
+                    f"already recorded in 24h, skip"
+                )
+                return
+            event_ids = case.event_ids or []
+            session.add(FeedbackRecord(
+                event_id=event_ids[0] if event_ids else None,
+                case_id=case.id,
+                feedback_type=feedback_type,
+                original_conclusion=(disposition or "")[:50],
+                reason=disposition or "",
+                submitted_by=by or "system",
+                status="submitted",
+            ))
+            await session.commit()
+            logger.info(
+                f"[Case] {case.case_number}: disposition → feedback "
+                f"{feedback_type} recorded"
+            )
+        except Exception as e:
+            logger.warning(f"[Case] disposition feedback failed: {e}")
 
     async def get_case(self, session: AsyncSession, case_id: int) -> Optional[dict]:
         """获取案例详情"""

@@ -54,15 +54,26 @@ function classNames(...classes: (string | false | undefined)[]) {
 function Collapse({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="border border-line overflow-hidden">
-      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-4 py-2.5 bg-mist text-sm font-medium text-ink">
-        {title}
-        <span className={`transition-transform ${open ? 'rotate-180' : ''}`}>▼</span>
+    <div className="border border-line bg-paper">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-5 py-3 hover:bg-mist transition-colors">
+        <span className="font-serif text-[15px] font-bold text-ink tracking-tight">{title}</span>
+        <span className={`font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint transition-transform ${open ? 'rotate-180' : ''}`}>
+          {open ? 'Close' : 'Open'}
+        </span>
       </button>
       <AnimatePresence>
-        {open && <motion.div initial={{ height: 0 }} animate={{ height: 'auto' }} exit={{ height: 0 }} className="overflow-hidden">
-          <div className="p-4 text-xs font-mono text-ink-soft whitespace-pre-wrap break-words max-h-96 overflow-y-auto">{children}</div>
-        </motion.div>}
+        {open && (
+          <motion.div
+            initial={{ height: 0 }}
+            animate={{ height: 'auto' }}
+            exit={{ height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="border-t border-line px-5 py-4 font-mono text-[12px] leading-[1.65] text-ink-soft whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+              {children}
+            </div>
+          </motion.div>
+        )}
       </AnimatePresence>
     </div>
   )
@@ -197,19 +208,38 @@ export default function SecurityAudit() {
 
   return (
     <PageTransition>
-      <div className="page-shell pt-12 pb-20">
-        <h1 className="page-title">安全审计测试台</h1>
-        <p className="page-sub mb-8">Audit-LLM + CAD 系统可靠性测试 — 支持单条 / 批量 / 文件导入</p>
+      <div className="page-shell pt-4 pb-12">
+        <header className="flex flex-col gap-2 border-b border-line pb-3 md:flex-row md:items-end md:justify-between">
+          <div className="min-w-0 md:max-w-[44rem]">
+            <h1 className="font-serif text-[28px] font-black tracking-[-0.04em] text-ink leading-[1.1]">
+              安全审计测试台
+            </h1>
+            <p className="mt-1 text-[13px] leading-snug text-ink-soft">
+              Audit-LLM + CAD 系统可靠性测试 — 单条 / 批量 / 文件导入。
+            </p>
+            <p className="mt-1 hidden font-serif italic text-[12px] leading-snug text-ink-faint/80 md:block">
+              <span aria-hidden className="mr-1 text-[#c9a574]/70">¶</span>
+              ——把审计当成产品来测。
+            </p>
+          </div>
+        </header>
 
-        <div className="flex flex-wrap gap-2 mb-8">
+        <nav className="mt-4 mb-5 flex flex-wrap gap-x-6 gap-y-3 border-b border-line">
           {([{ id: 'inject', label: '单条注入' }, { id: 'batch', label: '批量导入' }, { id: 'pipeline', label: '流水线' }, { id: 'cad', label: 'CAD审计' }, { id: 'chains', label: '攻击链' }, { id: 'guard', label: '工具签名' }] as { id: Tab; label: string }[]).map(tab => (
-            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-              className={classNames('px-4 py-2 text-[13px] tracking-[0.08em] border border-ink',
-                activeTab === tab.id ? 'bg-ink text-white' : 'bg-transparent text-ink hover:bg-ink hover:text-white')}>
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={classNames(
+                'relative pb-2 text-[13px]',
+                activeTab === tab.id
+                  ? 'text-ink font-medium after:absolute after:left-0 after:right-0 after:bottom-0 after:h-px after:bg-[#0e1a26]'
+                  : 'text-ink-soft hover:text-ink transition-colors'
+              )}
+            >
               {tab.label}
             </button>
           ))}
-        </div>
+        </nav>
 
         {/* ── Tab: 单条注入 ── */}
         {activeTab === 'inject' && (
@@ -235,8 +265,8 @@ export default function SecurityAudit() {
                 onChange={e => setSessionId(e.target.value)}
                 className="flex-1 px-3 py-2 text-xs font-sans border border-line rounded-none focus:outline-none focus:ring-1 focus:ring-accent" />
               <button onClick={handleInject} disabled={loading}
-                className="px-5 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:opacity-90 disabled:opacity-50">
-                {loading ? '注入中...' : '注入事件'}
+                className="border border-[#0e1a26] bg-[#0e1a26] px-5 py-2 font-mono text-[11px] tracking-[0.18em] uppercase text-[#f1e8d6] hover:bg-[#182838] transition-colors disabled:opacity-50">
+                {loading ? '注入中 …' : '注入事件'}
               </button>
             </div>
             {error && <div className="p-3 bg-red-50 border border-red-200 rounded-none text-xs text-red-700">{error}</div>}
@@ -248,7 +278,7 @@ export default function SecurityAudit() {
                 try { const data = await api.runAuditLLM(JSON.parse(eventJson)); setResult(data) }
                 catch (e: any) { setError(e.message) } finally { setLoading(false) }
               }} disabled={loading}
-                className="px-4 py-2 text-xs font-sans font-medium bg-ink text-white rounded-none hover:opacity-90 disabled:opacity-50">
+                className="border border-[#0e1a26] bg-[#0e1a26] px-4 py-2 font-mono text-[11px] tracking-[0.18em] uppercase text-[#f1e8d6] hover:bg-[#182838] transition-colors disabled:opacity-50">
                 运行 Audit-LLM
               </button>
             </div>

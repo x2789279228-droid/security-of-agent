@@ -65,12 +65,12 @@ export function KpiTab() {
 
   // 指标卡数据
   const cards = [
-    { key: 'mttr', label: 'MTTR（小时）', value: last(dashboard?.mttr), color: '#FF9F0A', series: dashboard?.mttr ?? [] },
-    { key: 'mttd', label: 'MTTD（小时）', value: last(dashboard?.mttd), color: '#0A84FF', series: dashboard?.mttd ?? [] },
-    { key: 'case_count', label: '案例数', value: last(dashboard?.case_count), color: '#5E5CE6', series: dashboard?.case_count ?? [] },
-    { key: 'fp_rate', label: '误报率', value: last(dashboard?.fp_rate), color: '#BF5AF2', series: dashboard?.fp_rate ?? [], pct: true },
-    { key: 'sla_breach_rate', label: 'SLA 违约率', value: last(dashboard?.sla_breach_rate), color: '#FF375F', series: dashboard?.sla_breach_rate ?? [], pct: true },
-    { key: 'order_count', label: '工单数', value: last(dashboard?.order_count), color: '#34c759', series: dashboard?.order_count ?? [] },
+    { key: 'mttr', label: 'MTTR（小时）', value: last(dashboard?.mttr), color: '#C08A3A', series: dashboard?.mttr ?? [] },
+    { key: 'mttd', label: 'MTTD（小时）', value: last(dashboard?.mttd), color: '#4A7A88', series: dashboard?.mttd ?? [] },
+    { key: 'case_count', label: '案例数', value: last(dashboard?.case_count), color: '#4A7A88', series: dashboard?.case_count ?? [] },
+    { key: 'fp_rate', label: '误报率', value: last(dashboard?.fp_rate), color: '#4A7A88', series: dashboard?.fp_rate ?? [], pct: true },
+    { key: 'sla_breach_rate', label: 'SLA 违约率', value: last(dashboard?.sla_breach_rate), color: '#C23A32', series: dashboard?.sla_breach_rate ?? [], pct: true },
+    { key: 'order_count', label: '工单数', value: last(dashboard?.order_count), color: '#3E7A64', series: dashboard?.order_count ?? [] },
   ]
 
   return (
@@ -85,8 +85,8 @@ export function KpiTab() {
               onClick={() => setPeriod(d)}
               className={`px-3 py-1 text-xs rounded-full transition-all ${
                 period === d
-                  ? 'bg-accent text-white font-medium'
-                  : 'bg-black/[0.04] text-ink-soft hover:bg-black/[0.07]'
+                  ? 'bg-accent text-on-accent font-medium'
+                  : 'bg-mist text-ink-soft hover:bg-line'
               }`}
             >
               {d}d
@@ -96,7 +96,7 @@ export function KpiTab() {
         <button
           onClick={triggerSnapshot}
           disabled={snapshotting}
-          className="px-3 py-1.5 text-xs font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+          className="px-3 py-1.5 text-xs font-medium text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50"
           style={{ backgroundImage: AI_GRADIENT }}
         >
           {snapshotting ? '生成中…' : '手动触发日快照'}
@@ -114,7 +114,7 @@ export function KpiTab() {
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {cards.map((c) => (
-              <div key={c.key} className="bg-white border border-line rounded-none px-4 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div key={c.key} className="bg-card/80 border border-line rounded-xl px-4 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <div className="flex items-center gap-1.5 mb-2">
                   <span className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} />
                   <span className="text-[11px] font-medium text-ink-faint">{c.label}</span>
@@ -149,13 +149,13 @@ export function KpiTab() {
 
           {/* 案例数优先级切分 */}
           {dashboard.case_count_priority && (
-            <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <h3 className="text-[13px] font-semibold text-ink mb-4">按优先级的案例数（{period} 天）</h3>
               <div className="space-y-3">
                 {(['critical', 'high', 'medium', 'low'] as const).map((prio) => {
                   const s = dashboard.case_count_priority![prio] || []
                   const total = s.reduce((sum, p) => sum + p.metric_value, 0)
-                  const color = prio === 'critical' ? '#FF375F' : prio === 'high' ? '#FF9F0A' : prio === 'medium' ? '#0A84FF' : '#86868b'
+                  const color = prio === 'critical' ? '#C23A32' : prio === 'high' ? '#C08A3A' : prio === 'medium' ? '#4A7A88' : '#8A97A4'
                   return (
                     <div key={prio}>
                       <div className="flex items-center justify-between mb-1">
@@ -181,7 +181,7 @@ export function KpiTab() {
           {/* SLA breach 实时率 + 最近 breach */}
           {sla && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <h3 className="text-[13px] font-semibold text-ink mb-3">SLA 违约率（近 24h）</h3>
                 <GradientNumber value={Math.round(sla.rate.rate * 100)} suffix="%" />
                 <p className="text-[11px] text-ink-faint mt-2">
@@ -191,7 +191,7 @@ export function KpiTab() {
                   {Object.entries(sla.rate.by_priority).map(([prio, info]) => (
                     <div key={prio}>
                       <p className="text-sm font-bold tabular-nums" style={{
-                        color: info.rate > 0.2 ? '#FF375F' : info.rate > 0.1 ? '#FF9F0A' : '#34c759',
+                        color: info.rate > 0.2 ? '#C23A32' : info.rate > 0.1 ? '#C08A3A' : '#3E7A64',
                       }}>
                         {Math.round(info.rate * 100)}%
                       </p>
@@ -201,7 +201,7 @@ export function KpiTab() {
                 </div>
               </div>
 
-              <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <h3 className="text-[13px] font-semibold text-ink mb-3">最近 SLA 超时（{sla.recent.length}）</h3>
                 {sla.recent.length === 0 ? (
                   <p className="text-xs text-ink-faint py-4 text-center">最近 24h 无超时</p>
@@ -212,8 +212,8 @@ export function KpiTab() {
                         <span className="font-mono text-ink">{r.order_number}</span>
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
                           style={{
-                            color: r.priority === 'critical' ? '#FF375F' : r.priority === 'high' ? '#FF9F0A' : '#86868b',
-                            background: 'rgba(255,55,95,0.08)',
+                            color: r.priority === 'critical' ? '#C23A32' : r.priority === 'high' ? '#C08A3A' : '#8A97A4',
+                            background: 'rgba(194,58,50,0.08)',
                           }}
                         >
                           {r.priority}

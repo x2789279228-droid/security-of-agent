@@ -9,7 +9,7 @@ import {
 import { AGENT_RELAY_STAGES, STAGE_LABELS } from '../../lib/agentPipeline'
 
 const chipBase =
-  'flex items-center gap-1 border px-2 py-1 text-[12px] transition-colors whitespace-nowrap'
+  'flex items-center gap-1 rounded-lg border px-2 py-1 text-[12px] transition-colors whitespace-nowrap'
 
 function TypeChip({
   active,
@@ -27,13 +27,13 @@ function TypeChip({
       onClick={onClick}
       className={`${chipBase} ${
         active
-          ? 'border-ink bg-ink text-white'
-          : 'border-line bg-white text-ink-soft hover:border-dan'
+          ? 'border-accent/60 bg-accent/15 text-accent shadow-[0_2px_10px_rgba(58,101,112,0.14)]'
+          : 'border-line bg-card/70 text-ink-soft hover:border-accent/50 hover:text-accent'
       }`}
     >
       {label}
       {count !== undefined && (
-        <span className={`font-mono text-[11px] tabular-nums ${active ? 'text-white/70' : 'text-ink-faint'}`}>
+        <span className={`font-mono text-[11px] tabular-nums ${active ? 'text-accent/70' : 'text-ink-faint'}`}>
           {count}
         </span>
       )}
@@ -80,7 +80,7 @@ export default function EventToolbar({
         <select
           value={filters.stage}
           onChange={(e) => onChange({ ...filters, stage: e.target.value })}
-          className="border border-line bg-white px-2 py-1 text-[12px] text-ink focus:border-ink focus:outline-none"
+          className="rounded-lg border border-line bg-card/70 px-2 py-1 text-[12px] text-ink transition-colors focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
           title="按 Agent 阶段筛选"
         >
           <option value="all">全部阶段</option>
@@ -100,10 +100,10 @@ export default function EventToolbar({
             <button
               key={key}
               onClick={() => onChange({ ...filters, severity: key as string })}
-              className={`px-1.5 py-0.5 text-[11px] transition-colors ${
+              className={`rounded-md px-1.5 py-0.5 text-[11px] transition-colors ${
                 filters.severity === key
-                  ? 'bg-nong font-semibold text-white'
-                  : 'text-ink-faint hover:text-ink'
+                  ? 'border border-warn/50 bg-warn/15 font-semibold text-warn'
+                  : 'border border-transparent text-ink-faint hover:text-accent'
               }`}
             >
               {label}
@@ -116,7 +116,7 @@ export default function EventToolbar({
           value={filters.query}
           onChange={(e) => onChange({ ...filters, query: e.target.value })}
           placeholder="搜索 src_ip / event_type / trace_id / Agent…"
-          className="w-52 border border-line bg-white px-2 py-1 text-[12px] text-ink placeholder:text-dan focus:border-ink focus:outline-none"
+          className="w-52 rounded-lg border border-line bg-card/70 px-2.5 py-1 text-[12px] text-ink placeholder:text-ink-faint transition-colors focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
         />
       </div>
     </div>

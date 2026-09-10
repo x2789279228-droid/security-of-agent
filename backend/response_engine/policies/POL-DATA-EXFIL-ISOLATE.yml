@@ -7,6 +7,8 @@ match:
   min_confidence: 0.55
   min_severity: high
 actions:
+- name: forensic_snapshot
+  params: {}
 - name: block_ip
   params:
     duration_minutes: 1440

@@ -212,33 +212,33 @@ export function CostTab() {
       label: '今日用量',
       value: budget ? fmtNum(budget.today_usage) : '—',
       sub: budget ? `${fmtNum(budget.today_calls)} 次调用` : '',
-      color: budget?.over_budget ? '#FF375F' : '#0A84FF',
+      color: budget?.over_budget ? '#C23A32' : '#4A7A88',
       danger: budget?.over_budget,
     },
     {
       label: '日预算',
       value: budget ? fmtNum(budget.daily_budget) : '—',
       sub: budget ? `已用 ${budget.usage_pct}%` : '',
-      color: '#5E5CE6',
+      color: '#4A7A88',
     },
     {
       label: '剩余预算',
       value: budget ? fmtNum(budget.remaining) : '—',
       sub: budget?.over_budget ? '已超限，LLM 降级中' : '',
-      color: budget?.over_budget ? '#FF375F' : '#34c759',
+      color: budget?.over_budget ? '#C23A32' : '#3E7A64',
       danger: budget?.over_budget,
     },
     {
       label: '窗口用量',
       value: grand ? fmtTokens(grand.total_tokens) : '—',
       sub: grand ? `输入 ${fmtTokens(grand.prompt_tokens)} · 输出 ${fmtTokens(grand.completion_tokens)}` : '',
-      color: '#FF9F0A',
+      color: '#C08A3A',
     },
     {
       label: '估算费用',
       value: priceIn > 0 || priceOut > 0 ? grandCost : '—',
       sub: priceIn > 0 || priceOut > 0 ? `输入 ¥${priceIn}/1K · 输出 ¥${priceOut}/1K` : '未配置单价（.env）',
-      color: '#BF5AF2',
+      color: '#4A7A88',
     },
     {
       label: 'LLM 缓存命中',
@@ -263,7 +263,7 @@ export function CostTab() {
               key={d}
               onClick={() => setDays(d)}
               className={`px-3 py-1 text-xs rounded-full transition-all ${
-                days === d ? 'bg-accent text-white font-medium' : 'bg-black/[0.04] text-ink-soft hover:bg-black/[0.07]'
+                days === d ? 'bg-accent text-on-accent font-medium' : 'bg-mist text-ink-soft hover:bg-line'
               }`}
             >
               {d}d
@@ -295,7 +295,7 @@ export function CostTab() {
 
       {/* 超限告警 */}
       {budget?.over_budget && (
-        <div className="flex items-center gap-2 px-4 py-3 rounded-none text-xs font-medium text-ink bg-mist border border-ink">
+        <div className="flex items-center gap-2 px-4 py-3 rounded-xl text-xs font-medium text-ink bg-mist border border-ink">
           <span className="relative flex h-2 w-2">
             <motion.span className="absolute inline-flex h-full w-full rounded-full bg-alert opacity-60"
               animate={{ scale: [1, 1.8], opacity: [0.6, 0] }} transition={{ duration: 1.4, repeat: Infinity }} />
@@ -308,9 +308,9 @@ export function CostTab() {
       {error && <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">{error}</div>}
 
       {/* 统计卡片 */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-line border border-line rounded-none overflow-hidden">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-line border border-line rounded-xl overflow-hidden">
         {cards.map((c) => (
-          <div key={c.label} className="bg-white p-4">
+          <div key={c.label} className="bg-card/80 p-4">
             <div className="flex items-center gap-1.5 mb-2">
               <span className="w-1.5 h-1.5 rounded-full" style={{ background: c.color }} />
               <span className="text-[11px] font-medium text-ink-faint">{c.label}</span>
@@ -322,7 +322,7 @@ export function CostTab() {
       </div>
 
       {/* 每日趋势 */}
-      <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-[13px] font-semibold text-ink">每日 Token 用量（近 {days} 天）</h3>
           <span className="text-[10px] text-ink-faint font-sans">总量 {fmtTokens(daily.reduce((s, d) => s + d.total_tokens, 0))}</span>
@@ -338,7 +338,7 @@ export function CostTab() {
                   transition={{ ...spring.ui, delay: i * 0.02 }}
                   className="w-full rounded-sm"
                   style={{
-                    background: p.total_tokens > 0 ? 'linear-gradient(180deg, #BF5AF2, #0A84FF)' : '#f0f0f2',
+                    background: p.total_tokens > 0 ? 'linear-gradient(180deg, #4A7A88, #4A7A88)' : '#f0f0f2',
                     opacity: p.total_tokens > 0 ? 0.4 + (i / daily.length) * 0.6 : 1,
                   }}
                 />
@@ -353,7 +353,7 @@ export function CostTab() {
       </div>
 
       {/* 按模块(调用方)分账 */}
-      <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-[13px] font-semibold text-ink">按模块分账（近 {days} 天）</h3>
           <span className="text-[10px] text-ink-faint font-sans">
@@ -373,13 +373,13 @@ export function CostTab() {
                   <span className="w-36 shrink-0 text-xs font-medium text-ink truncate text-left">
                     {CALLER_LABELS[c.caller] || c.caller}
                   </span>
-                  <div className="flex-1 h-6 bg-black/[0.04] rounded overflow-hidden relative">
+                  <div className="flex-1 h-6 bg-mist rounded overflow-hidden relative">
                     <motion.div
                       initial={{ width: 0 }}
                       animate={{ width: `${Math.max(2, Math.min(100, pct))}%` }}
                       transition={spring.ui}
                       className="h-full"
-                      style={{ background: 'linear-gradient(90deg, #BF5AF2, #0A84FF)' }}
+                      style={{ background: 'linear-gradient(90deg, #4A7A88, #4A7A88)' }}
                     />
                   </div>
                   <span className="w-14 shrink-0 text-right text-xs tabular-nums text-ink-faint">{pct.toFixed(1)}%</span>
@@ -387,7 +387,7 @@ export function CostTab() {
                   <span className="w-24 shrink-0 text-right text-xs tabular-nums text-ink-soft">
                     {c.calls} 次
                   </span>
-                  <span className="w-20 shrink-0 text-right text-xs tabular-nums text-[#BF5AF2] font-medium">
+                  <span className="w-20 shrink-0 text-right text-xs tabular-nums text-[#4A7A88] font-medium">
                     {priceIn > 0 || priceOut > 0 ? `¥${c.cost_yuan.toFixed(2)}` : '—'}
                   </span>
                 </div>
@@ -398,7 +398,7 @@ export function CostTab() {
       </div>
 
       {/* 按事件消耗表 */}
-      <div className="bg-white border border-line rounded-none shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <div className="bg-card/80 border border-line rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <div className="flex items-center justify-between px-5 py-4">
           <h3 className="text-[13px] font-semibold text-ink">按事件 Token 消耗</h3>
           <span className="text-[11px] text-ink-faint font-sans">
@@ -503,7 +503,7 @@ export function CostTab() {
               animate={{ scale: 1, y: 0, opacity: 1 }}
               exit={{ scale: 0.96, y: 12, opacity: 0 }}
               transition={spring.ui}
-              className="bg-white rounded-none shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden"
+              className="bg-card/80 rounded-xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between px-5 py-4 border-b border-line">

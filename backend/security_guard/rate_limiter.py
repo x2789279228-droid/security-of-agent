@@ -18,6 +18,12 @@ class RateLimiter:
         "block_ip": 10,        # 封禁IP：每分钟最多10次
         "isolate_host": 5,     # 隔离主机：每分钟最多5次
         "alert_only": 50,      # 告警：每分钟最多50次
+        "kill_process": 5,
+        "quarantine_file": 10,
+        "disable_account": 3,
+        "dns_sinkhole": 10,
+        "recall_email": 5,
+        "forensic_snapshot": 20,
     }
 
     # 全局频率限制（所有动作合计，每分钟最大次数）

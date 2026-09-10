@@ -73,8 +73,9 @@ export default function ThoughtDag({
                 ? false
                 : pathIds.has(e.from) && pathIds.has(e.to)
             const w = edgeWeight(e, byId)
+            // 0.1s 扫描规则：否决=朱砂虚线；检索/证据=信号青；主链=暮青
             const stroke =
-              e.rel === 'vetoed' ? '#8a5a44' : e.rel === 'retrieved' || e.rel === 'evidences' ? '#7a7a72' : '#1a1a18'
+              e.rel === 'vetoed' ? '#C23A32' : e.rel === 'retrieved' || e.rel === 'evidences' ? '#4A7A88' : '#3A6570'
             return (
               <line
                 key={`${e.from}-${e.to}-${e.rel}`}
@@ -84,7 +85,7 @@ export default function ThoughtDag({
                 y2={b.y}
                 stroke={stroke}
                 strokeWidth={onPath ? 1.8 : 0.7 + w}
-                strokeOpacity={onPath ? 0.9 : selectedId ? 0.18 : 0.35}
+                strokeOpacity={onPath ? 0.9 : selectedId ? 0.18 : 0.32}
                 strokeDasharray={e.rel === 'vetoed' ? '4 3' : e.rel === 'evidences' ? '2 3' : undefined}
               />
             )
@@ -104,7 +105,7 @@ export default function ThoughtDag({
               </p>
               <div className="flex flex-col gap-1.5">
                 {colNodes.length === 0 ? (
-                  <div className="h-8 border border-dashed border-line" />
+                  <div className="h-8 rounded-lg border border-dashed border-line bg-card/40" />
                 ) : (
                   colNodes.map((n) => (
                     <div key={n.step_id} data-step-id={n.step_id}>

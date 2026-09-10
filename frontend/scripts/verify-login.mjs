@@ -116,7 +116,7 @@ async function main() {
 
     let body = await bodyText(cdp)
     const desktop = {
-      hasBrand: /共享记忆/.test(body),
+      hasBrand: /守望/.test(body),
       hasSlogan: /多 Agent|审查接力|安全审计/.test(body),
       hasPipeline: /接入/.test(body) && /审计/.test(body) && /响应/.test(body),
       hasLogin: /进入系统|登录/.test(body),
@@ -211,7 +211,7 @@ async function main() {
     await sleep(2000)
     body = await bodyText(cdp)
     const mobile = {
-      hasBrand: /共享记忆/.test(body),
+      hasBrand: /守望/.test(body),
       hasLogin: /进入系统|登录/.test(body),
       hasPipeline: /接入/.test(body),
     }

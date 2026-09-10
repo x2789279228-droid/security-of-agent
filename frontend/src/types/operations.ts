@@ -119,7 +119,7 @@ export interface FpStats {
 }
 
 export interface TuningSuggestion {
-  type: 'high_fp_rate' | 'missed_threats' | 'user_suggestion'
+  type: 'high_fp_rate' | 'missed_threats' | 'user_suggestion' | 'learn_loop'
   severity: string
   rule_id?: string
   fp_rate?: number
@@ -130,6 +130,43 @@ export interface TuningSuggestion {
   details?: { reason: string; rule_suggestion: string }[]
   feedback_id?: number
   submitted_by?: string
+  from_learn_loop?: boolean
+}
+
+export type LearningActionStatus =
+  | 'proposed'
+  | 'auto_applied'
+  | 'applied'
+  | 'dismissed'
+  | 'rolled_back'
+
+export interface LearningAction {
+  id: number
+  action_type: string
+  target_type: string
+  target_id: string
+  mechanism: string
+  payload: Record<string, unknown>
+  confidence: number
+  status: LearningActionStatus
+  apply_result: Record<string, unknown>
+  created_at: string
+}
+
+export interface LearningRun {
+  id: number
+  window_start: string
+  window_end: string
+  trigger: string
+  status: string
+  actions_proposed: number
+  actions_auto_applied: number
+  actions_failed: number
+  error: string
+  created_at: string
+  harvest: Record<string, unknown>
+  model_summary: Record<string, unknown>
+  actions?: LearningAction[]
 }
 
 export interface SigmaRule {

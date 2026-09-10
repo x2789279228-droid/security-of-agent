@@ -164,26 +164,26 @@ export function RulesTab() {
               key={t.id}
               onClick={() => setRuleType(t.id)}
               className={`px-4 py-1.5 text-xs font-medium rounded-full transition-all ${
-                ruleType === t.id ? 'bg-white text-ink shadow-[0_1px_4px_rgba(0,0,0,0.1)]' : 'text-ink-soft hover:text-ink'
+                ruleType === t.id ? 'bg-card/80 text-ink shadow-[0_1px_4px_rgba(0,0,0,0.1)]' : 'text-ink-soft hover:text-ink'
               }`}
             >
               {t.label}
             </button>
           ))}
         </div>
-        <button onClick={load} className="px-3 py-1.5 text-xs font-medium bg-black/[0.04] rounded-lg hover:bg-black/[0.07] text-ink-soft">刷新</button>
+        <button onClick={load} className="px-3 py-1.5 text-xs font-medium bg-mist rounded-lg hover:bg-line text-ink-soft">刷新</button>
         {ruleType === 'response_policy' && (
           <>
             <button
               onClick={() => setShowCreate((v) => !v)}
-              className="px-3 py-1.5 text-xs font-medium text-white rounded-lg hover:opacity-90"
+              className="px-3 py-1.5 text-xs font-medium text-on-accent rounded-lg hover:opacity-90"
               style={{ backgroundImage: AI_GRADIENT }}
             >
               {showCreate ? '收起表单' : '+ 新建策略'}
             </button>
             <button
               onClick={reloadPolicies}
-              className="px-3 py-1.5 text-xs font-medium bg-black/[0.04] rounded-lg hover:bg-black/[0.07] text-ink-soft"
+              className="px-3 py-1.5 text-xs font-medium bg-mist rounded-lg hover:bg-line text-ink-soft"
             >
               热加载 YAML
             </button>
@@ -195,7 +195,7 @@ export function RulesTab() {
       {msg && <p className="text-xs text-accent bg-accent/[0.06] rounded-lg px-3 py-2">{msg}</p>}
 
       {ruleType === 'response_policy' && showCreate && (
-        <section className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
+        <section className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
           <div>
             <h3 className="text-sm font-semibold text-ink tracking-tight">新建响应策略</h3>
             <p className="text-xs text-ink-faint mt-1">写入 YAML 并热加载，无需重新打包发版。例如 threat_type=BRUTE_WEAK → 封禁 24h。</p>
@@ -247,7 +247,7 @@ export function RulesTab() {
             <button
               onClick={createPolicy}
               disabled={creating}
-              className="ml-auto px-5 py-2 text-xs font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+              className="ml-auto px-5 py-2 text-xs font-medium text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50"
               style={{ backgroundImage: AI_GRADIENT }}
             >
               {creating ? '创建中…' : '创建并热加载'}
@@ -273,7 +273,7 @@ export function RulesTab() {
                 initial={{ opacity: 0, y: 14 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ ...spring.ui, delay: Math.min(i * 0.03, 0.3) }}
-                className="bg-white border border-line rounded-none shadow-[0_1px_3px_rgba(0,0,0,0.04)] overflow-hidden"
+                className="bg-card/80 border border-line rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] overflow-hidden"
               >
                 <button
                   onClick={() => toggleExpand(ruleId)}
@@ -284,7 +284,7 @@ export function RulesTab() {
                       <span className="text-[11px] font-mono text-ink-faint">{ruleId}</span>
                       <SeverityChip severity={r.severity} />
                       {ruleType === 'sigma' && r.attack_type && (
-                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-black/[0.04] text-ink-soft">{r.attack_type}</span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-mist text-ink-soft">{r.attack_type}</span>
                       )}
                       {ruleType === 'response_policy' && (
                         <span className="text-[10px] text-ink-faint">
@@ -337,7 +337,7 @@ export function RulesTab() {
                             {r.enabled !== false && r.role !== 'uncertain_template' && (
                               <button
                                 onClick={() => disablePolicy(ruleId)}
-                                className="px-3 py-1.5 text-[10px] font-medium text-[#FF375F] border border-[#FF375F]/30 rounded-md hover:bg-[#FF375F]/5"
+                                className="px-3 py-1.5 text-[10px] font-medium text-[#C23A32] border border-[#C23A32]/30 rounded-md hover:bg-[#C23A32]/5"
                               >
                                 禁用此策略
                               </button>
@@ -353,7 +353,7 @@ export function RulesTab() {
                           ) : (
                             <div className="space-y-1.5">
                               {vList.map((v) => (
-                                <div key={v.id} className="flex items-center justify-between gap-3 px-3 py-2 bg-black/[0.02] rounded-lg">
+                                <div key={v.id} className="flex items-center justify-between gap-3 px-3 py-2 bg-mist/60 rounded-lg">
                                   <div className="flex items-center gap-2 min-w-0">
                                     <span className={`text-[11px] font-mono font-semibold ${v.is_active ? 'text-accent' : 'text-ink-faint'}`}>v{v.version}</span>
                                     {v.is_active && <span className="text-[9px] px-1.5 py-0.5 rounded bg-accent/10 text-accent font-medium">当前</span>}
@@ -363,7 +363,7 @@ export function RulesTab() {
                                   {!v.is_active && (
                                     <button
                                       onClick={() => rollback(ruleId, v.version)}
-                                      className="shrink-0 px-2.5 py-1 text-[10px] font-medium text-ink-soft border border-line rounded-md hover:bg-black/[0.04] transition-colors"
+                                      className="shrink-0 px-2.5 py-1 text-[10px] font-medium text-ink-soft border border-line rounded-md hover:bg-mist transition-colors"
                                     >
                                       回滚到此版本
                                     </button>
@@ -384,14 +384,14 @@ export function RulesTab() {
       )}
 
       {/* 沙箱测试 */}
-      <section className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+      <section className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
         <h3 className="text-sm font-semibold text-ink tracking-tight mb-1">规则沙箱测试</h3>
         <p className="text-xs text-ink-faint mb-4">用最近的历史事件回放测试规则，评估命中率与误报率（不影响线上）</p>
         <div className="flex gap-2">
           <select
             value={sandboxRule}
             onChange={(e) => setSandboxRule(e.target.value)}
-            className="flex-1 px-3 py-2 text-xs border border-line rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-accent"
+            className="flex-1 px-3 py-2 text-xs border border-line rounded-lg bg-card/80 focus:outline-none focus:ring-1 focus:ring-accent"
           >
             <option value="">选择规则…</option>
             {rules.map((r) => (
@@ -401,7 +401,7 @@ export function RulesTab() {
           <button
             onClick={runSandbox}
             disabled={sandboxing || !sandboxRule}
-            className="px-5 py-2 text-xs font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+            className="px-5 py-2 text-xs font-medium text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50"
             style={{ backgroundImage: AI_GRADIENT }}
           >
             {sandboxing ? '回放测试中…' : '▶ 沙箱测试'}
@@ -416,21 +416,21 @@ export function RulesTab() {
             className="mt-4"
           >
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-              <SandboxStat label="测试事件" value={sandboxResult.total_tested} color="#0A84FF" />
-              <SandboxStat label="命中数" value={sandboxResult.hit_count} color="#5E5CE6" />
-              <SandboxStat label="命中率" value={`${Math.round(sandboxResult.hit_rate * 100)}%`} color="#BF5AF2" />
-              <SandboxStat label="误报率" value={`${Math.round(sandboxResult.fp_rate * 100)}%`} color="#FF375F" />
+              <SandboxStat label="测试事件" value={sandboxResult.total_tested} color="#4A7A88" />
+              <SandboxStat label="命中数" value={sandboxResult.hit_count} color="#4A7A88" />
+              <SandboxStat label="命中率" value={`${Math.round(sandboxResult.hit_rate * 100)}%`} color="#4A7A88" />
+              <SandboxStat label="误报率" value={`${Math.round(sandboxResult.fp_rate * 100)}%`} color="#C23A32" />
             </div>
             <p className="text-[10px] text-ink-faint">回放耗时 {sandboxResult.elapsed_ms}ms · 命中 {sandboxResult.hits.length} 条（展示前 20）</p>
             {sandboxResult.hits.length > 0 && (
               <div className="mt-2 space-y-1 max-h-48 overflow-y-auto">
                 {sandboxResult.hits.map((h) => (
-                  <div key={h.event_id} className="flex items-center gap-3 text-[11px] px-3 py-1.5 bg-black/[0.02] rounded-lg">
+                  <div key={h.event_id} className="flex items-center gap-3 text-[11px] px-3 py-1.5 bg-mist/60 rounded-lg">
                     <span className="font-mono text-ink-faint">#{h.event_id}</span>
                     <span className="text-ink">{h.event_type}</span>
                     <span className="font-mono text-ink-faint">{h.src_ip}</span>
                     <SeverityChip severity={h.severity} />
-                    {h.status === 'false_positive' && <span className="text-[10px] text-[#FF375F]">已标记误报</span>}
+                    {h.status === 'false_positive' && <span className="text-[10px] text-[#C23A32]">已标记误报</span>}
                   </div>
                 ))}
               </div>
@@ -442,7 +442,7 @@ export function RulesTab() {
   )
 }
 
-const inputCls = 'w-full px-3 py-2 text-xs border border-line rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-accent'
+const inputCls = 'w-full px-3 py-2 text-xs border border-line rounded-lg bg-card/80 focus:outline-none focus:ring-1 focus:ring-accent'
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -459,7 +459,7 @@ function Label({ children }: { children: React.ReactNode }) {
 
 function SandboxStat({ label, value, color }: { label: string; value: string | number; color: string }) {
   return (
-    <div className="bg-black/[0.02] rounded-xl px-4 py-3 text-center">
+    <div className="bg-mist/60 rounded-xl px-4 py-3 text-center">
       <p className="text-2xl font-extrabold tracking-tight tabular-nums" style={{ color }}>{value}</p>
       <p className="text-[10px] text-ink-faint mt-0.5">{label}</p>
     </div>

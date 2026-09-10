@@ -112,7 +112,7 @@ async function main() {
     }
 
     const ui = {
-      hasBrand: /共享记忆/.test(body),
+      hasBrand: /守望/.test(body),
       hasRegister: /注册|创建账号/.test(body),
       hasConfirm: /确认密码/.test(body),
       hasLoginLink: /去登录|已有账号/.test(body),

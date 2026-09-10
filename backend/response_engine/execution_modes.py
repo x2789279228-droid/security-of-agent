@@ -83,6 +83,38 @@ _MOCK_TEMPLATES: dict[str, dict] = {
         "returncode": 0,
         "message": "[MOCK] 会话已终止",
     },
+    "kill_process": {
+        "success": True,
+        "stdout": "KILLED",
+        "stderr": "",
+        "returncode": 0,
+        "message": "[MOCK] 进程已终止",
+    },
+    "quarantine_file": {
+        "success": True,
+        "message": "[MOCK] 文件已隔离",
+    },
+    "clean_persistence": {
+        "success": True,
+        "message": "[MOCK] 持久化项已清理",
+    },
+    "forensic_snapshot": {
+        "success": True,
+        "snapshot_status": "ok",
+        "message": "[MOCK] 取证快照已采集",
+    },
+    "disable_account": {
+        "success": True,
+        "message": "[MOCK] 账户已禁用",
+    },
+    "recall_email": {
+        "success": True,
+        "message": "[MOCK] 邮件已撤回",
+    },
+    "dns_sinkhole": {
+        "success": True,
+        "message": "[MOCK] DNS sinkhole 已写入",
+    },
     "send_alert": {
         "success": True,
         "message": "[MOCK] 告警已发送",

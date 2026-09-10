@@ -1,11 +1,30 @@
 /**
- * 速率直方图 — 最近 60 秒事件到达量（12 × 5 秒分桶），手绘 div 实现，无图表库依赖
+ * 速率直方图 — 最近 60 秒事件到达量（12 × 5 秒分桶），recharts BarChart
+ * 暮青柱 + 纸面 tooltip；最新一桶命中时提亮。
  */
 import { useEffect, useState } from 'react'
+import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip } from 'recharts'
+import { BRAND_COLORS } from '../../lib/brand'
 import { getArrivalTimes } from '../../lib/eventStream'
 
 const BUCKETS = 12
 const BUCKET_MS = 5_000
+
+type TipPayload = { payload?: { count?: number; from?: number; to?: number } }
+
+function PaperTooltip({ active, payload }: { active?: boolean; payload?: TipPayload[] }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (!d) return null
+  return (
+    <div className="rounded-lg border border-line bg-card px-2.5 py-1.5 font-mono text-[11px] text-ink shadow-[0_8px_24px_rgba(28,40,56,0.14)]">
+      <span className="text-accent tabular-nums">{d.count ?? 0}</span> 条
+      <span className="ml-1.5 text-ink-faint tabular-nums">
+        {d.from}s ~ {d.to}s
+      </span>
+    </div>
+  )
+}
 
 export default function RateHistogram() {
   const [bars, setBars] = useState<number[]>(() => new Array(BUCKETS).fill(0))
@@ -31,28 +50,50 @@ export default function RateHistogram() {
 
   const max = Math.max(1, ...bars)
   const last30 = bars.slice(BUCKETS / 2).reduce((a, b) => a + b, 0)
+  const data = bars.map((count, i) => {
+    const from = -(BUCKETS - i) * BUCKET_MS / 1000
+    return { i, count, from, to: from + BUCKET_MS / 1000 }
+  })
 
   return (
     <div className="shrink-0 md:w-52">
       <div className="mb-1.5 flex items-baseline justify-between">
         <span className="text-[11px] tracking-wide text-ink-faint">到达速率 · 60s</span>
-        <span className="font-mono text-[12px] font-semibold text-ink tabular-nums">{last30}/30s</span>
+        <span className="font-mono text-[12px] font-semibold text-accent tabular-nums">{last30}/30s</span>
       </div>
-      <div className="flex h-10 items-end gap-[3px]" title={`最近30秒 ${last30} 条（截至 ${new Date(now).toLocaleTimeString('zh-CN', { hour12: false })}）`}>
-        {bars.map((v, i) => (
-          <div key={i} className="flex h-full flex-1 flex-col justify-end">
-            <div
-              className={`${i === BUCKETS - 1 && v > 0 ? 'bg-ink' : v > 0 ? 'bg-dan' : 'bg-mist'} w-full`}
-              style={{ height: `${Math.max(v > 0 ? 14 : 4, (v / max) * 100)}%` }}
-              title={`${-((BUCKETS - 1 - i) * BUCKET_MS)}s ~ ${-(BUCKETS - 1 - i) * BUCKET_MS + BUCKET_MS}s：${v} 条`}
+      <div
+        className="h-10"
+        title={`最近30秒 ${last30} 条（截至 ${new Date(now).toLocaleTimeString('zh-CN', { hour12: false })}）`}
+      >
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }} barCategoryGap="12%">
+            <Bar dataKey="count" radius={[2, 2, 0, 0]} isAnimationActive={false}>
+              {data.map((d) => (
+                <Cell
+                  key={d.i}
+                  fill={
+                    d.i === BUCKETS - 1 && d.count > 0
+                      ? BRAND_COLORS.accent
+                      : d.count > 0
+                        ? 'rgba(58,101,112,0.45)'
+                        : 'rgba(58,101,112,0.18)'
+                  }
+                />
+              ))}
+            </Bar>
+            <Tooltip
+              cursor={{ fill: 'rgba(58,101,112,0.08)' }}
+              content={<PaperTooltip />}
+              wrapperStyle={{ zIndex: 30, outline: 'none' }}
             />
-          </div>
-        ))}
+          </BarChart>
+        </ResponsiveContainer>
       </div>
       <div className="mt-1 flex justify-between font-mono text-[10px] text-ink-faint">
         <span>-60s</span>
         <span>现在</span>
       </div>
+      <p className="sr-only">最大桶 {max} 条</p>
     </div>
   )
 }

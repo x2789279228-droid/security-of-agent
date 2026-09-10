@@ -19,18 +19,18 @@ interface AuditEntry {
 }
 
 const ACTION_COLORS: Record<string, string> = {
-  'case.transition': '#0A84FF',
-  'case.assign': '#5E5CE6',
-  'case.disposition': '#5E5CE6',
-  'order.approve': '#34c759',
-  'order.reject': '#FF375F',
-  'rule.publish': '#BF5AF2',
-  'rule.rollback': '#FF9F0A',
-  'asset.create': '#0A84FF',
-  'asset.update': '#5E5CE6',
-  'asset.decommission': '#86868b',
-  'source.register': '#0A84FF',
-  'source.revoke': '#FF375F',
+  'case.transition': '#4A7A88',
+  'case.assign': '#4A7A88',
+  'case.disposition': '#4A7A88',
+  'order.approve': '#3E7A64',
+  'order.reject': '#C23A32',
+  'rule.publish': '#4A7A88',
+  'rule.rollback': '#C08A3A',
+  'asset.create': '#4A7A88',
+  'asset.update': '#4A7A88',
+  'asset.decommission': '#8A97A4',
+  'source.register': '#4A7A88',
+  'source.revoke': '#C23A32',
 }
 
 export function AuditTrailTab() {
@@ -89,12 +89,12 @@ export function AuditTrailTab() {
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder="搜索 actor / 目标 ID / 原因…"
-          className="px-3 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white w-64"
+          className="px-3 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80 w-64"
         />
         <select
           value={targetTypeFilter}
           onChange={(e) => setTargetTypeFilter(e.target.value)}
-          className="px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white"
+          className="px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80"
         >
           <option value="">全部目标</option>
           {targetTypes.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -102,7 +102,7 @@ export function AuditTrailTab() {
         <select
           value={actionFilter}
           onChange={(e) => setActionFilter(e.target.value)}
-          className="px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white"
+          className="px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80"
         >
           <option value="">全部动作</option>
           {Object.keys(actionStats).sort().map((a) => (
@@ -111,7 +111,7 @@ export function AuditTrailTab() {
         </select>
         <button
           onClick={flush}
-          className="ml-auto px-3 py-1.5 text-xs font-medium text-white rounded-lg hover:opacity-90"
+          className="ml-auto px-3 py-1.5 text-xs font-medium text-on-accent rounded-lg hover:opacity-90"
           style={{ backgroundImage: AI_GRADIENT }}
         >
           冲刷离线缓冲
@@ -127,10 +127,10 @@ export function AuditTrailTab() {
           ) : filtered.length === 0 ? (
             <EmptyState icon="📜" title="没有匹配的审计记录" />
           ) : (
-            <div className="bg-white border border-line rounded-none overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-card/80 border border-line rounded-xl overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="text-[10px] uppercase tracking-wide text-ink-faint text-left bg-black/[0.02]">
+                  <tr className="text-[10px] uppercase tracking-wide text-ink-faint text-left bg-mist/60">
                     <th className="px-4 py-3 font-medium">时间</th>
                     <th className="px-4 py-3 font-medium">操作人</th>
                     <th className="px-4 py-3 font-medium">动作</th>
@@ -140,7 +140,7 @@ export function AuditTrailTab() {
                 </thead>
                 <tbody>
                   {filtered.slice(0, 100).map((e, i) => {
-                    const color = ACTION_COLORS[e.action] ?? '#86868b'
+                    const color = ACTION_COLORS[e.action] ?? '#8A97A4'
                     const isSelected = selected?.id === e.id
                     return (
                       <motion.tr
@@ -149,7 +149,7 @@ export function AuditTrailTab() {
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ ...spring.ui, delay: Math.min(i, 10) * 0.02 }}
                         onClick={() => setSelected(isSelected ? null : e)}
-                        className={`border-t border-line cursor-pointer hover:bg-black/[0.02] transition-colors ${
+                        className={`border-t border-line cursor-pointer hover:bg-mist/40 transition-colors ${
                           isSelected ? 'bg-accent/[0.05]' : ''
                         }`}
                       >
@@ -189,9 +189,9 @@ export function AuditTrailTab() {
         </div>
 
         {/* 详情面板 */}
-        <div className="self-start xl:sticky xl:top-16">
+        <div className="self-start xl:sticky xl:top-[6.25rem]">
           {selected ? (
-            <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
+            <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
               <div>
                 <p className="text-[11px] font-medium text-ink-faint uppercase tracking-wide">操作人</p>
                 <p className="text-sm font-medium text-ink mt-1">
@@ -201,7 +201,7 @@ export function AuditTrailTab() {
               </div>
               <div>
                 <p className="text-[11px] font-medium text-ink-faint uppercase tracking-wide">动作</p>
-                <p className="text-sm font-mono mt-1" style={{ color: ACTION_COLORS[selected.action] ?? '#0A84FF' }}>
+                <p className="text-sm font-mono mt-1" style={{ color: ACTION_COLORS[selected.action] ?? '#4A7A88' }}>
                   {selected.action}
                 </p>
               </div>
@@ -245,7 +245,7 @@ export function AuditTrailTab() {
               )}
             </div>
           ) : (
-            <div className="bg-white border border-line rounded-none p-8 text-center shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-card/80 border border-line rounded-xl p-8 text-center shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <p className="text-sm text-ink-faint">📋 点击左侧记录</p>
               <p className="text-xs text-ink-faint mt-1">查看完整 before/after 快照</p>
             </div>

@@ -2,7 +2,6 @@
 # 经 <<: *flink-taskmanager 展开为 flink-taskmanager-1/2/3;
 # 各副本仅差异化 container_name 与宿主机指标端口 (9251/9252/9253 → 容器 9250)
 x-flink-taskmanager: &flink-taskmanager
-  image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:-dev}
   build:
     context: ./flink-jobs
     dockerfile: Dockerfile
@@ -185,7 +184,6 @@ services:
 
   # ── Flink 流处理引擎 (生产级: RocksDB + 持久化 checkpoint + Exactly-Once) ──
   flink-jobmanager:
-    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:-dev}
     build:
       context: ./flink-jobs
       dockerfile: Dockerfile
@@ -259,7 +257,6 @@ services:
   # `docker compose up -d` 后无需手动命令即自动提交核心作业;
   # JM/TM 重启或作业失败后自动补交。手动重提不再作为必需步骤。
   flink-job-submitter:
-    image: ghcr.io/x2789279228-droid/soc-flink:${IMAGE_TAG:-dev}
     build:
       context: ./flink-jobs
       dockerfile: Dockerfile
@@ -282,7 +279,6 @@ services:
         condition: service_started
 
   backend:
-    image: ghcr.io/x2789279228-droid/soc-backend:${IMAGE_TAG:-dev}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -452,7 +448,6 @@ services:
           memory: 4G
 
   frontend:
-    image: ghcr.io/x2789279228-droid/soc-frontend:${IMAGE_TAG:-dev}
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -472,7 +467,9 @@ services:
 
   # ── Temporal Worker (4 层 Agent 编排的执行者; 独立进程跑 workflow/activity) ──
   temporal-worker:
-    image: ghcr.io/x2789279228-droid/soc-backend:${IMAGE_TAG:-dev}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: soc-temporal-worker
     restart: always
     command: ["python", "-m", "temporal.worker"]

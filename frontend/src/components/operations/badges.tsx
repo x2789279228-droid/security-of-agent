@@ -1,47 +1,44 @@
 import { motion } from 'framer-motion'
+import { BRAND_COLORS } from '../../lib/brand'
 import type { CaseStatus, CasePriority, OrderType } from '../../types/operations'
+import { INK_FAINT } from '../../lib/operationsTokens'
 
-const GRAY = {
-  ink: '#111111',
-  nong: '#555555',
-  hui: '#888888',
-  dan: '#c8c8c8',
-  qing: '#e8e8e8',
-  mist: '#f2f2f2',
-  white: '#ffffff',
+/** 守望徽章：soft chip = 文本色 + 1 层 12~15% 底色 + inset 细描边 */
+function chip(hex: string, bgA = '1f', ringA = '4d') {
+  return { color: hex, bg: `${hex}${bgA}`, ring: `${hex}${ringA}` }
 }
 
-const CASE_STATUS_META: Record<CaseStatus, { label: string; color: string; bg: string }> = {
-  open: { label: '待处理', color: GRAY.white, bg: GRAY.ink },
-  investigating: { label: '调查中', color: GRAY.white, bg: GRAY.nong },
-  pending_approval: { label: '待审批', color: GRAY.ink, bg: GRAY.dan },
-  responding: { label: '处置中', color: GRAY.ink, bg: GRAY.qing },
-  resolved: { label: '已解决', color: GRAY.ink, bg: GRAY.mist },
-  closed: { label: '已关闭', color: GRAY.hui, bg: GRAY.mist },
-  false_positive: { label: '误报', color: GRAY.hui, bg: GRAY.qing },
+const CASE_STATUS_META: Record<CaseStatus, { label: string; color: string; bg: string; ring: string }> = {
+  open: { label: '待处理', ...chip(BRAND_COLORS.alert) },
+  investigating: { label: '调查中', ...chip(BRAND_COLORS.signal) },
+  pending_approval: { label: '待审批', ...chip(BRAND_COLORS.warn) },
+  responding: { label: '处置中', ...chip(BRAND_COLORS.accent) },
+  resolved: { label: '已解决', ...chip(BRAND_COLORS.accent, '12', '38') },
+  closed: { label: '已关闭', ...chip(INK_FAINT, '14', '40') },
+  false_positive: { label: '误报', ...chip(INK_FAINT, '14', '40') },
 }
 
-const SEVERITY_META: Record<string, { color: string; bg: string }> = {
-  critical: { color: GRAY.white, bg: GRAY.ink },
-  high: { color: GRAY.white, bg: GRAY.nong },
-  medium: { color: GRAY.ink, bg: GRAY.dan },
-  low: { color: GRAY.ink, bg: GRAY.qing },
-  info: { color: GRAY.hui, bg: GRAY.mist },
+const SEVERITY_META: Record<string, { label?: string; color: string; bg: string; ring: string }> = {
+  critical: { label: 'critical', ...chip(BRAND_COLORS.alert) },
+  high: { label: 'high', ...chip(BRAND_COLORS.warn) },
+  medium: { label: 'medium', ...chip(BRAND_COLORS.signal) },
+  low: { label: 'low', ...chip(INK_FAINT, '12', '38') },
+  info: { label: 'info', ...chip(INK_FAINT, '10', '33') },
 }
 
-const PRIORITY_META: Record<CasePriority, { label: string; color: string }> = {
-  critical: { label: 'P0 紧急', color: GRAY.ink },
-  high: { label: 'P1 高', color: GRAY.nong },
-  medium: { label: 'P2 中', color: GRAY.hui },
-  low: { label: 'P3 低', color: GRAY.dan },
+const PRIORITY_META: Record<CasePriority, { label: string; color: string; bg: string; ring: string }> = {
+  critical: { label: 'P0 紧急', ...chip(BRAND_COLORS.alert) },
+  high: { label: 'P1 高', ...chip(BRAND_COLORS.warn) },
+  medium: { label: 'P2 中', ...chip(BRAND_COLORS.signal) },
+  low: { label: 'P3 低', ...chip(INK_FAINT, '12', '38') },
 }
 
 export function StatusBadge({ status }: { status: CaseStatus }) {
   const meta = CASE_STATUS_META[status] ?? CASE_STATUS_META.open
   return (
     <span
-      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-none text-[11px] font-medium whitespace-nowrap"
-      style={{ color: meta.color, background: meta.bg }}
+      className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-medium whitespace-nowrap"
+      style={{ color: meta.color, background: meta.bg, boxShadow: `inset 0 0 0 1px ${meta.ring}` }}
     >
       {meta.label}
     </span>
@@ -52,10 +49,10 @@ export function SeverityChip({ severity }: { severity: string }) {
   const meta = SEVERITY_META[severity] ?? SEVERITY_META.info
   return (
     <span
-      className="inline-flex items-center px-2 py-0.5 rounded-none text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap"
-      style={{ color: meta.color, background: meta.bg }}
+      className="inline-flex items-center rounded-lg px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap"
+      style={{ color: meta.color, background: meta.bg, boxShadow: `inset 0 0 0 1px ${meta.ring}` }}
     >
-      {severity}
+      {meta.label}
     </span>
   )
 }
@@ -64,8 +61,8 @@ export function PriorityChip({ priority }: { priority: CasePriority }) {
   const meta = PRIORITY_META[priority] ?? PRIORITY_META.medium
   return (
     <span
-      className="inline-flex items-center px-2 py-0.5 rounded-none text-[10px] font-semibold whitespace-nowrap border border-ink"
-      style={{ color: meta.color }}
+      className="inline-flex items-center rounded-lg px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap"
+      style={{ color: meta.color, background: meta.bg, boxShadow: `inset 0 0 0 1px ${meta.ring}` }}
     >
       {meta.label}
     </span>
@@ -92,10 +89,10 @@ export function OrderTypeIcon({ type, size = 16 }: { type: OrderType; size?: num
   const meta = ORDER_TYPE_META[type] ?? ORDER_TYPE_META.disposition
   return (
     <span
-      className="inline-flex items-center justify-center rounded-none shrink-0 border border-ink"
+      className="inline-flex items-center justify-center rounded-lg shrink-0 border border-line text-ink bg-mist/40"
       style={{ width: size + 12, height: size + 12 }}
     >
-      <svg viewBox="0 0 24 24" fill="none" stroke="#111" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ width: size, height: size }}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ width: size, height: size }}>
         <path d={meta.icon} />
       </svg>
     </span>
@@ -116,22 +113,33 @@ export function SlaBadge({ deadline, breached }: { deadline: string | null; brea
 
   return (
     <motion.span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-none text-[10px] font-semibold whitespace-nowrap border border-ink"
-      style={{
-        color: isOverdue ? '#fff' : '#111',
-        background: isOverdue ? '#111' : 'transparent',
-      }}
-      animate={isOverdue ? { opacity: [1, 0.55, 1] } : {}}
-      transition={isOverdue ? { duration: 1.4, repeat: Infinity } : {}}
+      className="inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap"
+      style={
+        isOverdue
+          ? {
+              color: BRAND_COLORS.alert,
+              background: `${BRAND_COLORS.alert}1a`,
+              boxShadow: `inset 0 0 0 1px ${BRAND_COLORS.alert}66`,
+            }
+          : {
+              color: INK_FAINT,
+              background: 'transparent',
+              boxShadow: `inset 0 0 0 1px ${INK_FAINT}40`,
+            }
+      }
+      animate={isOverdue ? { opacity: [1, 0.5, 1] } : {}}
+      transition={isOverdue ? { duration: 1.2, repeat: Infinity } : {}}
     >
+      {isOverdue && <span className="h-1 w-1 rounded-full bg-alert shadow-[0_0_6px_rgba(194,58,50,0.45)]" aria-hidden />}
       {text}
     </motion.span>
   )
 }
 
-export function EmptyState({ title, hint }: { icon?: string; title: string; hint?: string }) {
+export function EmptyState({ icon, title, hint }: { icon?: string; title: string; hint?: string }) {
   return (
-    <div className="flex flex-col items-center justify-center py-20 text-center border border-line">
+    <div className="flex flex-col items-center justify-center py-20 text-center rounded-xl border border-line">
+      {icon && <span className="mb-3 text-2xl opacity-60" aria-hidden>{icon}</span>}
       <p className="text-sm font-medium text-ink">{title}</p>
       {hint && <p className="text-xs text-ink-faint mt-1 font-light">{hint}</p>}
     </div>

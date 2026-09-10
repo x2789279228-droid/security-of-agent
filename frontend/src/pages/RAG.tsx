@@ -160,15 +160,21 @@ export default function RAG() {
 
   return (
     <PageTransition>
-      <div className="page-shell pt-12 pb-20">
-        <div className="flex items-end justify-between mb-2 pb-6 border-b border-line">
-          <div>
-            <h1 className="page-title">安全知识库</h1>
-            <p className="page-sub">
-              检索增强生成（RAG）— 用预置安全知识减少 LLM 幻觉
+      <div className="page-shell pt-4 pb-12">
+        <header className="flex flex-col gap-2 border-b border-line pb-3 md:flex-row md:items-end md:justify-between md:gap-8">
+          <div className="min-w-0 md:max-w-[44rem]">
+            <h1 className="font-serif text-[28px] font-black tracking-[-0.04em] text-ink leading-[1.1]">
+              安全知识库
+            </h1>
+            <p className="mt-1 text-[13px] leading-snug text-ink-soft">
+              检索增强生成（RAG）— 用预置安全知识减少 LLM 幻觉。
+            </p>
+            <p className="mt-1 hidden font-serif italic text-[12px] leading-snug text-ink-faint/80 md:block">
+              <span aria-hidden className="mr-1 text-[#c9a574]/70">¶</span>
+              ——给模型一个可以查证的起点。
             </p>
           </div>
-          <div className="flex items-center gap-2 text-[13px]">
+          <div className="flex items-center gap-2 text-[13px] shrink-0">
             {stats && (
               <span className="px-3.5 py-1.5 border border-ink text-ink font-medium">
                 文档 {stats.documents} · 分块 {stats.chunks}
@@ -176,13 +182,12 @@ export default function RAG() {
             )}
             <button onClick={loadStats} className="px-3.5 py-1.5 border border-ink hover:bg-ink hover:text-white transition-colors">刷新</button>
           </div>
-        </div>
-        <div className="mb-8" />
+        </header>
 
         {/* ═══ 知识库为空提示 ═══ */}
         {isEmpty && (
           <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
-            className="mb-6 p-4 bg-mist border border-ink">
+            className="mt-5 mb-6 p-4 bg-mist border border-ink">
             <p className="text-sm font-semibold text-ink mb-1">知识库为空 — 立即载入安全知识</p>
             <p className="text-xs text-ink-faint mb-3">从 MITRE 官方源获取完整攻击知识库，或使用预置知识快速填充</p>
             <div className="flex gap-2 flex-wrap">
@@ -230,7 +235,7 @@ export default function RAG() {
         )}
 
         {/* ═══ Tab 导航 — Apple 分段控件 ═══ */}
-        <div className="flex flex-wrap gap-2 mb-8">
+        <div className="mt-5 flex flex-wrap gap-2 mb-6">
           {[
             { id: 'search', label: '知识检索' },
             { id: 'docs', label: '文档管理' },

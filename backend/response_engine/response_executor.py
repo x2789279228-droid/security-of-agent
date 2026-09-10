@@ -31,6 +31,41 @@ from .response_registry import response_registry
 
 logger = logging.getLogger(__name__)
 
+_SNAPSHOT_BEFORE = frozenset({"isolate_host", "kill_process", "quarantine_file"})
+
+
+def _observe_duration(action_name: str, duration_ms: float) -> None:
+    """动作耗时 → Prometheus 直方图（秒）。失败仅记日志，不影响执行。"""
+    try:
+        from metrics import observe_response_duration
+        observe_response_duration(action_name, duration_ms / 1000.0)
+    except Exception as e:
+        logger.debug(f"metrics observe_response_duration failed: {e}")
+
+
+def _maybe_prepend_snapshot(actions: list[dict], threat_info: Optional[dict]) -> list[dict]:
+    names = [a.get("name") for a in actions]
+    if "forensic_snapshot" in names:
+        return actions
+    if not any(n in _SNAPSHOT_BEFORE for n in names):
+        return actions
+    if any((a.get("params") or {}).get("skip_snapshot") for a in actions):
+        return actions
+    host_ip = ""
+    pid = None
+    if threat_info:
+        host_ip = threat_info.get("host_ip") or threat_info.get("src_ip") or ""
+        pid = threat_info.get("process_id") or threat_info.get("pid")
+    for a in actions:
+        p = a.get("params") or {}
+        host_ip = p.get("host_ip") or p.get("src_ip") or host_ip
+        if p.get("pid") is not None:
+            pid = p.get("pid")
+    snap = {"name": "forensic_snapshot", "params": {"host_ip": host_ip, "reason": "pre-containment snapshot"}}
+    if pid not in (None, ""):
+        snap["params"]["pid"] = pid
+    return [snap] + actions
+
 
 @dataclass
 class ActionResult:
@@ -71,10 +106,12 @@ class RollbackStore:
 
     # Redis key 前缀与 TTL（7 天）：超过 TTL 的回滚记录自动过期
     REDIS_KEY_PREFIX = "rollback:"
+    ROLLED_PREFIX = "rollback:done:"
     REDIS_TTL_SEC = 7 * 24 * 3600
 
     def __init__(self):
         self._store: dict[str, list[dict]] = {}  # token → [action_records]
+        self._rolled: set[str] = set()           # 已回滚 token（幂等标记）
         self._redis = None
 
     def set_redis(self, redis_client):
@@ -117,6 +154,31 @@ class RollbackStore:
             except Exception as e:
                 logger.warning(f"RollbackStore: failed to delete token from Redis: {e}")
 
+    async def mark_rolled(self, token: str):
+        """标记该批次已回滚（幂等）。内存为主，Redis 持久化（TTL 与回滚记录一致 7 天）。
+
+        进程重启后内存丢失，仍可从 Redis 判断"已回滚过"，避免重复删除规则。
+        """
+        self._rolled.add(token)
+        if self._redis is not None:
+            try:
+                await self._redis.set(f"{self.ROLLED_PREFIX}{token}", "1", ex=self.REDIS_TTL_SEC)
+            except Exception as e:
+                logger.warning(f"RollbackStore: failed to persist rolled flag to Redis: {e}")
+
+    async def is_rolled(self, token: str) -> bool:
+        """该批次是否已回滚过（内存优先，Redis 兜底）"""
+        if token in self._rolled:
+            return True
+        if self._redis is not None:
+            try:
+                if await self._redis.get(f"{self.ROLLED_PREFIX}{token}"):
+                    self._rolled.add(token)
+                    return True
+            except Exception as e:
+                logger.warning(f"RollbackStore: failed to read rolled flag from Redis: {e}")
+        return False
+
 
 rollback_store = RollbackStore()
 
@@ -152,6 +214,9 @@ class ResponseExecutor:
         if not actions:
             batch_result.end_time = time.time()
             return batch_result
+
+        actions = _maybe_prepend_snapshot(list(actions), threat_info)
+        batch_result.total = len(actions)
 
         # 生成批次回滚令牌（使用 crypto 随机数）
         import secrets
@@ -232,6 +297,29 @@ class ResponseExecutor:
             elif name == "kill_session":
                 if "session_id" not in params and threat_info.get("session_id"):
                     params["session_id"] = threat_info["session_id"]
+            elif name in ("kill_process", "quarantine_file", "clean_persistence", "forensic_snapshot"):
+                if "host_ip" not in params:
+                    params["host_ip"] = threat_info.get("host_ip") or threat_info.get("src_ip") or ""
+                if name == "kill_process":
+                    if "pid" not in params and threat_info.get("process_id"):
+                        params["pid"] = threat_info["process_id"]
+                    if "sha256" not in params and threat_info.get("image_hash"):
+                        params["sha256"] = threat_info["image_hash"]
+                if name == "quarantine_file" and "path" not in params and threat_info.get("file_path"):
+                    params["path"] = threat_info["file_path"]
+            elif name == "disable_account":
+                if "account" not in params and threat_info.get("user_name"):
+                    params["account"] = threat_info["user_name"]
+            elif name == "dns_sinkhole":
+                if "domain" not in params and threat_info.get("domain"):
+                    params["domain"] = threat_info["domain"]
+            elif name == "recall_email":
+                if "internet_message_id" not in params and (
+                    threat_info.get("internet_message_id") or threat_info.get("message_id")
+                ):
+                    params["internet_message_id"] = (
+                        threat_info.get("internet_message_id") or threat_info.get("message_id")
+                    )
 
             if "reason" not in params:
                 params["reason"] = (
@@ -243,6 +331,7 @@ class ResponseExecutor:
         try:
             result = await response_registry.execute(name, **params)
             duration = (time.time() - t_start) * 1000
+            _observe_duration(name, duration)
             return ActionResult(
                 action_name=name,
                 success=result.get("success", False),
@@ -253,6 +342,7 @@ class ResponseExecutor:
             )
         except Exception as e:
             duration = (time.time() - t_start) * 1000
+            _observe_duration(name, duration)
             logger.error(f"Execute action {name} failed: {e}")
             return ActionResult(
                 action_name=name,
@@ -280,6 +370,26 @@ class ResponseExecutor:
                 error=f"Rollback token not found: {batch_token}",
             )
 
+        # 幂等短路: 该批次已回滚过（本进程或重启后经 Redis 恢复）
+        # → 不再逐条删除，直接返回全成功 + idempotent 标记
+        if await rollback_store.is_rolled(batch_token):
+            logger.info(f"Rollback token {batch_token[:16]}... already rolled back (idempotent replay)")
+            return BatchActionResult(
+                total=len(records),
+                succeeded=len(records),
+                failed=0,
+                results=[
+                    ActionResult(
+                        action_name=f"rollback_{r.get('action', '?')}",
+                        success=True,
+                        idempotent=True,
+                        result={"idempotent": True, "message": "already rolled back"},
+                    )
+                    for r in reversed(records)
+                ],
+                batch_rollback_token=batch_token,
+            )
+
         logger.info(f"Rolling back {len(records)} actions from token {batch_token[:16]}...")
 
         # 逆向回滚（最后执行的先回滚）
@@ -293,10 +403,20 @@ class ResponseExecutor:
 
             try:
                 result = await response_registry.rollback(action_name, **params)
+                inner = result.get("result", result) if isinstance(result, dict) else {}
+                ok = bool(result.get("success", False)) if isinstance(result, dict) else False
+                idem = bool(inner.get("idempotent", False)) if isinstance(inner, dict) else False
+                # not_found / 幂等成功都不算失败：重复回滚是合法操作
+                if isinstance(inner, dict) and inner.get("status") == "not_found":
+                    ok = True
+                    idem = True
+                if idem and not ok:
+                    ok = True
                 ar = ActionResult(
                     action_name=f"rollback_{action_name}",
-                    success=result.get("success", False),
-                    result=result.get("result", result),
+                    success=ok,
+                    result=inner if isinstance(inner, dict) else {},
+                    idempotent=idem,
                 )
                 results.append(ar)
                 if ar.success:
@@ -312,6 +432,11 @@ class ResponseExecutor:
                 ))
 
         logger.info(f"Rollback complete: {succeeded}/{len(records)} rollbacks OK")
+
+        # 已执行的回滚批次打上幂等标记（not_found/幂等成功也标记 —
+        # 它们已按成功计数；真实错误不标记，允许调用方重试）
+        if failed == 0:
+            await rollback_store.mark_rolled(batch_token)
 
         return BatchActionResult(
             total=len(records),

@@ -28,10 +28,12 @@ SSH 防火墙适配器 — 通过 SSH 连接 Linux 虚拟机执行 iptables 真�
   SHARED_MEMORY_FW_USE_SUDO      是否使用 sudo (默认 true)
 """
 import asyncio
+import hashlib
 import ipaddress
 import logging
 import os
 import random
+import re
 import time
 from datetime import datetime
 from typing import Optional
@@ -44,6 +46,32 @@ try:
 except ImportError:
     HAS_PARAMIKO = False
     logger.warning("paramiko not installed — SSH firewall adapter disabled")
+
+# 地址族常量
+FAMILY_IPV4 = "ipv4"
+FAMILY_IPV6 = "ipv6"
+
+# 未撤销状态集合(block=active, isolate=isolated); get_active_rules 按此过滤
+_ACTIVE_STATUSES = ("active", "isolated", "applied")
+
+# 域名强校验: 字母/数字/连字符/点, ≤253, 无路径无空格 — sinkhole 拼命令前必须通过
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?$")
+_MARKER_RE = re.compile(r"^SOC-SH-[A-Za-z0-9\-]{1,32}$")
+
+
+def _normalize_ip(value: str) -> tuple[str, str]:
+    """校验并规范化 IP; 返回 (规范化字符串, family)。IPv4-mapped 地址按 IPv6 处理。"""
+    try:
+        addr = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        raise ValueError(f"非法 IP 地址: {value}")
+    family = FAMILY_IPV6 if addr.version == 6 else FAMILY_IPV4
+    return str(addr), family
+
+
+def _table_for(family: str) -> str:
+    """family → iptables / ip6tables"""
+    return "ip6tables" if family == FAMILY_IPV6 else "iptables"
 
 
 class SshFirewallAdapter:
@@ -209,9 +237,10 @@ class SshFirewallAdapter:
                 raise RuntimeError(f"命令白名单拒绝: {reason} (命令: {cmd[:100]})")
 
         t = timeout or self._config["exec_timeout"]
-        # 最小权限: 仅 iptables 命令加 sudo，nmap/诊断命令不加
+        # 最小权限: 仅 iptables/ip6tables 命令加 sudo，nmap/诊断命令不加
         if self._config["use_sudo"] and not cmd.startswith("sudo"):
-            if cmd.startswith("iptables") or cmd.startswith("iptables "):
+            if (cmd.startswith("iptables") or cmd.startswith("iptables ")
+                    or cmd.startswith("ip6tables") or cmd.startswith("ip6tables ")):
                 cmd = f"sudo {cmd}"
         stdin, stdout, stderr = self._client.exec_command(cmd, timeout=t)
         out = stdout.read().decode("utf-8", errors="ignore")
@@ -224,10 +253,10 @@ class SshFirewallAdapter:
     # ── 防火墙 API ──
 
     def block_ip(self, ip: str, duration: int = 3600) -> dict:
-        """通过 iptables 封禁 IP（含参数校验 + 核心资产保护）"""
-        # 参数强校验
+        """按地址族封禁 IP: IPv4→iptables, IPv6→ip6tables(IP 先规范化再拼命令)。"""
+        # 参数强校验 + 规范化
         try:
-            ipaddress.ip_address(ip)
+            norm_ip, family = _normalize_ip(ip)
         except ValueError:
             return {"status": "error", "message": f"非法 IP 地址: {ip}"}
 
@@ -238,28 +267,40 @@ class SshFirewallAdapter:
             return {"status": "blocked", "message": reason}
 
         rule_id = f"FW-RULE-{random.randint(10000, 99999)}"
-        cmd = f"iptables -I INPUT -s {ip} -j DROP -m comment --comment '{rule_id}'"
-        self._exec(cmd)
+        table = _table_for(family)
+        cmd = f"{table} -I INPUT -s {norm_ip} -j DROP -m comment --comment '{rule_id}'"
+        try:
+            self._exec(cmd)
+        except Exception as e:
+            logger.error(f"[Firewall] block {norm_ip} failed on {table}: {e}")
+            return {"status": "error", "message": f"{table} 封禁命令执行失败: {e}",
+                    "rule_id": rule_id, "ip": norm_ip, "family": family}
         # 记录规则
         self._active_rules[rule_id] = {
-            "ip": ip, "duration": duration, "chain": "INPUT",
+            "ip": norm_ip, "family": family, "duration": duration, "chain": "INPUT",
             "created_at": datetime.now().isoformat(), "status": "active",
         }
-        logger.info(f"[Firewall] IP {ip} blocked: {rule_id}")
+        logger.info(f"[Firewall] IP {norm_ip} blocked ({family}): {rule_id}")
         return {
             "status": "success",
             "device": "Linux-iptables-SSH",
             "rule_id": rule_id,
-            "ip": ip,
+            "ip": norm_ip,
+            "family": family,
             "duration": duration,
-            "message": f"IP {ip} 已通过 iptables 封禁",
+            "message": f"IP {norm_ip} 已通过 {table} 封禁",
         }
 
-    def isolate_host(self, host: str, isolation_type: str = "network") -> dict:
-        """通过 iptables 阻断主机所有流量（含参数校验 + 核心资产保护）"""
-        # 参数强校验
+    def isolate_host(self, host: str, isolation_type: str = "network",
+                     extra_ips: Optional[list] = None) -> dict:
+        """双栈隔离主机: 每个地址(host + extra_ips)在对应族表写 INPUT -s + OUTPUT -d DROP。
+
+        返回 complete / families_applied / families_missing — 有请求的协议族未全部写入时
+        complete=False, 不允许宣称完全隔离。ip6tables 缺失等单族失败会被捕获并标记该族 missing。
+        """
+        # 参数强校验 + 规范化
         try:
-            ipaddress.ip_address(host)
+            norm_host, _host_family = _normalize_ip(host)
         except ValueError:
             return {"status": "error", "message": f"非法 IP 地址: {host}"}
 
@@ -269,25 +310,68 @@ class SshFirewallAdapter:
         if is_protected:
             return {"status": "blocked", "message": reason}
 
+        # 收集全部目标地址(host + extra_ips, 去重)并逐个规范化
+        seen_norm: set[str] = set()
+        targets: list[tuple[str, str]] = []  # (normalized_ip, family)
+        for raw in [host] + list(extra_ips or []):
+            raw = str(raw or "").strip()
+            if not raw:
+                continue
+            try:
+                norm, family = _normalize_ip(raw)
+            except ValueError as e:
+                return {"status": "error", "message": str(e), "host": host}
+            if norm not in seen_norm:
+                seen_norm.add(norm)
+                targets.append((norm, family))
+        if not targets:
+            return {"status": "error", "message": "没有可隔离的 IP 地址", "host": host}
+
+        requested_families = sorted({fam for _, fam in targets})
         isolation_id = f"EDR-ISO-{random.randint(10000, 99999)}"
-        cmds = [
-            f"iptables -I INPUT -s {host} -j DROP -m comment --comment '{isolation_id}'",
-            f"iptables -I OUTPUT -d {host} -j DROP -m comment --comment '{isolation_id}'",
-        ]
-        for c in cmds:
-            self._exec(c)
-        self._active_rules[isolation_id] = {
-            "host": host, "isolation_type": isolation_type,
-            "created_at": datetime.now().isoformat(), "status": "isolated",
-        }
-        logger.info(f"[Firewall] Host {host} isolated: {isolation_id}")
+        ok_families: set[str] = set()  # INPUT+OUTPUT 全部写成功的族
+        written = 0                    # 成功写入的规则条数
+        for norm_ip, family in targets:
+            table = _table_for(family)
+            chain_ok = True
+            for chain, flag in (("INPUT", "-s"), ("OUTPUT", "-d")):
+                cmd = (f"{table} -I {chain} {flag} {norm_ip} -j DROP "
+                       f"-m comment --comment '{isolation_id}'")
+                try:
+                    self._exec(cmd)
+                    written += 1
+                except Exception as e:
+                    chain_ok = False
+                    logger.error(f"[Firewall] isolate {norm_ip} {chain} failed on {table}: {e}")
+            if chain_ok:
+                ok_families.add(family)
+
+        applied = sorted(ok_families)
+        missing = sorted(f for f in requested_families if f not in ok_families)
+        complete = bool(written) and not missing
+        if written:
+            self._active_rules[isolation_id] = {
+                "host": host, "ip": norm_host, "families": requested_families,
+                "families_applied": applied, "families_missing": missing,
+                "isolation_type": isolation_type,
+                "created_at": datetime.now().isoformat(), "status": "isolated",
+            }
+            logger.info(f"[Firewall] Host {host} isolated: {isolation_id} "
+                        f"(applied={applied} missing={missing})")
         return {
-            "status": "success",
+            "status": "success" if written else "error",
             "device": "Linux-iptables-SSH",
+            "success": bool(written),
+            "complete": complete,
+            "families_applied": applied,
+            "families_missing": missing,
+            "rule_ids": [isolation_id] if written else [],
             "isolation_id": isolation_id,
             "host": host,
+            "ip": norm_host,
             "isolation_type": isolation_type,
-            "message": f"主机 {host} 已执行网络隔离 (iptables DROP)",
+            "message": (f"主机 {host} 已执行网络隔离 ({'/'.join(applied) or '无'})"
+                         if written else f"主机 {host} 隔离失败(未写入任何规则)"),
         }
 
     def vulnerability_scan(self, target: str, scan_type: str = "fast") -> dict:
@@ -318,34 +402,57 @@ class SshFirewallAdapter:
         }
 
     def rollback(self, rule_id: str) -> dict:
-        """按 rule_id 回滚 iptables 规则（恢复能力核心）"""
-        for chain in ["INPUT", "OUTPUT"]:
-            try:
-                out = self._exec(f"iptables -L {chain} -n --line-numbers")
-            except Exception:
-                continue
-            for line in out.splitlines():
-                if rule_id in line:
-                    parts = line.strip().split()
-                    if parts and parts[0].isdigit():
-                        self._exec(f"iptables -D {chain} {parts[0]}")
-                        if rule_id in self._active_rules:
-                            self._active_rules[rule_id]["status"] = "revoked"
-                        logger.info(f"[Firewall] Rule {rule_id} rolled back (chain={chain}, line={parts[0]})")
-                        return {
-                            "status": "success",
-                            "rule_id": rule_id,
-                            "deleted_line": parts[0],
-                            "message": f"规则 {rule_id} 已回滚（{chain} line {parts[0]} 已删除）",
-                        }
-        return {"status": "not_found", "message": f"未找到 rule_id={rule_id} 的规则"}
+        """按 rule_id 回滚 — 扫描 iptables+ip6tables × INPUT+OUTPUT, 删除全部匹配注释行。
+
+        修复: 旧实现删除第一个匹配行即 return, 隔离规则(同一 isolation_id 写 INPUT+OUTPUT/
+        双族)会残留 OUTPUT 或另一族规则。
+        """
+        deleted = 0
+        deleted_chains: list[str] = []
+        for table in ("iptables", "ip6tables"):
+            for chain in ("INPUT", "OUTPUT"):
+                try:
+                    out = self._exec(f"{table} -L {chain} -n --line-numbers")
+                except Exception:
+                    continue  # 表/链不可用(如未装 ip6tables) → 跳过该族
+                line_nums: list[int] = []
+                for line in out.splitlines():
+                    if rule_id in line:
+                        parts = line.strip().split()
+                        if parts and parts[0].isdigit():
+                            line_nums.append(int(parts[0]))
+                # 同一链内从后往前删, 避免行号偏移
+                for ln in reversed(sorted(line_nums)):
+                    try:
+                        self._exec(f"{table} -D {chain} {ln}")
+                        deleted += 1
+                    except Exception:
+                        pass
+                if line_nums:
+                    deleted_chains.append(f"{table}:{chain}")
+        if deleted:
+            if rule_id in self._active_rules:
+                self._active_rules[rule_id]["status"] = "revoked"
+            logger.info(f"[Firewall] Rule {rule_id} rolled back: {deleted} lines {deleted_chains}")
+            return {"status": "success", "rule_id": rule_id, "deleted": deleted,
+                    "deleted_chains": deleted_chains,
+                    "idempotent": False,
+                    "message": f"规则 {rule_id} 已回滚(删除 {deleted} 条)"}
+        # 幂等语义: 规则不存在 = 已回滚过(或从未写入), 是成功而非失败,
+        # 重复回滚/自动解封竞态下调用方可安全重试。
+        return {"status": "success", "rule_id": rule_id, "deleted": 0,
+                "deleted_chains": [], "idempotent": True,
+                "message": f"规则 {rule_id} 已回滚(无可删除项, 幂等)"}
 
     def rollback_all(self) -> dict:
-        """回滚所有本演示期间写入的规则"""
+        """回滚所有本演示期间写入的规则 — 双族扫描(iptables + ip6tables) × INPUT/OUTPUT"""
         count = 0
-        for chain in ["INPUT", "OUTPUT"]:
-            try:
-                out = self._exec(f"iptables -L {chain} -n --line-numbers")
+        for table in ("iptables", "ip6tables"):
+            for chain in ("INPUT", "OUTPUT"):
+                try:
+                    out = self._exec(f"{table} -L {chain} -n --line-numbers")
+                except Exception:
+                    continue
                 lines_to_delete = []
                 for line in out.splitlines()[2:]:
                     if "FW-RULE-" in line or "EDR-ISO-" in line:
@@ -355,16 +462,160 @@ class SshFirewallAdapter:
                 # 从后往前删（避免行号偏移）
                 for ln in reversed(lines_to_delete):
                     try:
-                        self._exec(f"iptables -D {chain} {ln}")
+                        self._exec(f"{table} -D {chain} {ln}")
                         count += 1
                     except Exception:
                         pass
-            except Exception:
-                pass
-        for rid in self._active_rules:
+        for rid in list(self._active_rules):
             self._active_rules[rid]["status"] = "revoked"
         logger.info(f"[Firewall] Rolled back {count} rules")
-        return {"status": "ok", "rolled_back": count, "message": f"已回滚 {count} 条规则"}
+        result = {"status": "ok", "rolled_back": count,
+                  "message": f"已回滚 {count} 条规则"}
+        if count == 0:
+            result["idempotent"] = True  # 无规则可清理 = 重复调用, 幂等成功
+        return result
+
+    # ── DNS sinkhole ──
+
+    def _sudo(self, cmd: str) -> str:
+        """给非 iptables 管理命令按配置加 sudo(_exec 只自动处理 iptables/ip6tables)。"""
+        if self._config.get("use_sudo") and not cmd.startswith("sudo"):
+            return f"sudo {cmd}"
+        return cmd
+
+    def sinkhole_domain(self, domain: str, ipv4: Optional[str] = None,
+                        ipv6: Optional[str] = None, marker_id: str = "") -> dict:
+        """把恶意域名指向黑洞 IP(装了 dnsmasq → drop-in 配置; 否则追加 /etc/hosts)。
+
+        ⚠ skip_whitelist 豁免仅限本方法与 unsinkhole_domain: 所有命令由常量模板 +
+        经严格校验的 domain(_DOMAIN_RE) / IP(ipaddress) / marker(_MARKER_RE) 拼装,
+        不接受任何含用户自由文本的命令串, 也不会把 skip_whitelist 暴露给外部调用方。
+        """
+        d = str(domain or "").strip()
+        marker_id = str(marker_id or "").strip()
+        if not self._connected:
+            return {"status": "error", "success": False, "mode": "unconfigured",
+                    "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                    "message": "SSH 防火墙未连接"}
+        if not _DOMAIN_RE.match(d) or len(d) > 253 or ".." in d:
+            return {"status": "error", "success": False, "mode": "invalid",
+                    "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                    "message": f"非法域名: {domain!r}"}
+        if not _MARKER_RE.match(marker_id):
+            marker_id = f"SOC-SH-{hashlib.sha1(d.encode('ascii')).hexdigest()[:10].upper()}"
+        # IP 规范化; v4-mapped IPv6 不能作真实 AAAA/主机条目, 只参与 IPv4 语义
+        try:
+            v4_norm = _normalize_ip(ipv4)[0] if ipv4 else ""
+            v6_raw = _normalize_ip(ipv6)[0] if ipv6 else ""
+        except ValueError as e:
+            return {"status": "error", "success": False, "mode": "invalid",
+                    "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                    "message": str(e)}
+        v6_native = ""
+        if v6_raw:
+            try:
+                a6 = ipaddress.ip_address(v6_raw)
+                v6_native = v6_raw if a6.ipv4_mapped is None else ""
+            except ValueError:
+                v6_native = ""
+        if not v4_norm and not v6_native:
+            return {"status": "error", "success": False, "mode": "invalid",
+                    "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                    "message": "没有可用的黑洞 IP(ipv4/ipv6)"}
+
+        try:
+            probe = self._exec("test -x /usr/sbin/dnsmasq && echo DNSMASQ_OK || echo NO_DNSMASQ",
+                               skip_whitelist=True)
+        except Exception:
+            probe = ""
+
+        try:
+            if "DNSMASQ_OK" in probe:
+                backend = "dnsmasq"
+                conf = f"/etc/dnsmasq.d/soc-sinkhole-{marker_id}.conf"
+                lines = []
+                if v4_norm:
+                    lines.append(f"address=/{d}/{v4_norm}")
+                if v6_native:
+                    lines.append(f"address=/{d}/{v6_native}")
+                args = " ".join(f"'{ln}'" for ln in lines)
+                write_cmd = f"printf '%s\\n' {args} | {self._sudo(f'tee {conf}')}"
+                self._exec(write_cmd, skip_whitelist=True)
+                # 生效需重启/重载 dnsmasq; 失败仅告警, drop-in 下次启动即生效
+                try:
+                    self._exec(self._sudo("pkill -HUP dnsmasq"), skip_whitelist=True)
+                except Exception:
+                    logger.warning(f"[Firewall] dnsmasq reload failed for {d} (drop-in saved)")
+            else:
+                backend = "hosts"
+                lines = []
+                if v4_norm:
+                    lines.append(f"{v4_norm} {d} # {marker_id}")
+                if v6_native:
+                    lines.append(f"{v6_native} {d} # {marker_id}")
+                # 幂等: 同 marker 已存在则跳过
+                try:
+                    hosts = self._exec("cat /etc/hosts", skip_whitelist=True)
+                except Exception:
+                    hosts = ""
+                if marker_id not in hosts:
+                    args = " ".join(f"'{ln}'" for ln in lines)
+                    append_cmd = f"printf '%s\\n' {args} | {self._sudo('tee -a /etc/hosts')}"
+                    self._exec(append_cmd, skip_whitelist=True)
+        except Exception as e:
+            logger.error(f"[Firewall] sinkhole {d} write failed: {e}")
+            return {"status": "error", "success": False, "mode": "error",
+                    "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                    "message": f"sinkhole 写入失败: {e}"}
+
+        logger.info(f"[Firewall] DNS sinkhole {d} -> {backend} ({marker_id})")
+        return {"status": "success", "success": True, "mode": "live",
+                "domain": d, "marker_id": marker_id, "backend": backend,
+                "message": f"DNS sinkhole {d} 已写入 {backend} (marker={marker_id})"}
+
+    def unsinkhole_domain(self, domain: str = "", marker_id: str = "") -> dict:
+        """撤销 DNS sinkhole: 按 marker 删 /etc/hosts 行 + dnsmasq drop-in 文件。
+
+        ⚠ 同 sinkhole_domain 的 skip_whitelist 豁免说明; 命令恒为常量模板 + 已校验参数。
+        """
+        d = str(domain or "").strip()
+        marker_id = str(marker_id or "").strip()
+        if not self._connected:
+            return {"status": "error", "success": False, "mode": "unconfigured",
+                    "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                    "message": "SSH 防火墙未连接"}
+        if d and (not _DOMAIN_RE.match(d) or len(d) > 253 or ".." in d):
+            return {"status": "error", "success": False, "mode": "invalid",
+                    "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                    "message": f"非法域名: {domain!r}"}
+        if not _MARKER_RE.match(marker_id):
+            if not d:
+                return {"status": "error", "success": False, "mode": "invalid",
+                        "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                        "message": "缺少 marker_id 或 domain"}
+            marker_id = f"SOC-SH-{hashlib.sha1(d.encode('ascii')).hexdigest()[:10].upper()}"
+        done: list[str] = []
+        try:
+            self._exec(self._sudo(f"sed -i '/{marker_id}/d' /etc/hosts"), skip_whitelist=True)
+            done.append("hosts")
+        except Exception as e:
+            logger.warning(f"[Firewall] unsinkhole hosts cleanup failed: {e}")
+        try:
+            conf = f"/etc/dnsmasq.d/soc-sinkhole-{marker_id}.conf"
+            self._exec(self._sudo(f"rm -f {conf}"), skip_whitelist=True)
+            done.append("dnsmasq")
+        except Exception as e:
+            logger.warning(f"[Firewall] unsinkhole dnsmasq cleanup failed: {e}")
+        if not done:
+            return {"status": "error", "success": False, "mode": "error",
+                    "domain": d, "marker_id": marker_id, "backend": "unconfigured",
+                    "message": "unsinkhole 清理命令全部失败"}
+        logger.info(f"[Firewall] DNS unsinkhole {d or marker_id} cleaned={done}")
+        return {"status": "success", "success": True, "mode": "live",
+                "domain": d, "marker_id": marker_id,
+                "backend": "dnsmasq" if "dnsmasq" in done else "hosts",
+                "cleaned": done,
+                "message": f"DNS sinkhole 已撤销 ({d or marker_id})"}
 
     def list_rules(self) -> dict:
         """查询虚拟机 iptables 规则"""
@@ -384,18 +635,21 @@ class SshFirewallAdapter:
                 "device": "Linux-iptables-SSH",
                 "host": self._config["host"],
                 "info": f"{hostname}\n{uptime}",
-                "active_rules": len([r for r in self._active_rules.values() if r["status"] == "active"]),
+                "active_rules": len([r for r in self._active_rules.values() if r["status"] in _ACTIVE_STATUSES]),
                 "time": datetime.now().isoformat(),
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
     def get_active_rules(self) -> list[dict]:
-        """获取所有活跃规则"""
+        """获取所有未撤销规则(status ∈ active/isolated/applied)。
+
+        修复: 隔离记录 status='isolated', 旧实现只滤 active 导致 _restore_host 永远找不到。
+        """
         return [
             {"rule_id": rid, **info}
             for rid, info in self._active_rules.items()
-            if info.get("status") == "active"
+            if info.get("status") in _ACTIVE_STATUSES
         ]
 
     # ── 异步包装器（避免阻塞事件循环） ──
@@ -408,9 +662,10 @@ class SshFirewallAdapter:
         import asyncio
         return await asyncio.to_thread(self.block_ip, ip, duration)
 
-    async def async_isolate_host(self, host: str, isolation_type: str = "network") -> dict:
+    async def async_isolate_host(self, host: str, isolation_type: str = "network",
+                                 extra_ips: Optional[list] = None) -> dict:
         import asyncio
-        return await asyncio.to_thread(self.isolate_host, host, isolation_type)
+        return await asyncio.to_thread(self.isolate_host, host, isolation_type, extra_ips)
 
     async def async_vulnerability_scan(self, target: str, scan_type: str = "fast") -> dict:
         import asyncio

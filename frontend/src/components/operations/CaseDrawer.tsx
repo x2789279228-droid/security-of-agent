@@ -124,7 +124,7 @@ export function CaseDrawer({
         className="fixed top-0 right-0 bottom-0 z-[61] w-full max-w-[520px] bg-surface shadow-[-8px_0_40px_rgba(0,0,0,0.12)] flex flex-col"
       >
         {/* 头部 */}
-        <div className="px-6 pt-6 pb-4 border-b border-line bg-white">
+        <div className="px-6 pt-6 pb-4 border-b border-line bg-card/80">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[11px] font-mono text-ink-faint">{caseItem.case_number}</p>
@@ -171,7 +171,7 @@ export function CaseDrawer({
                     onClick={() => doTransition(t)}
                     className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors disabled:opacity-50 ${
                       t === 'false_positive'
-                        ? 'border-line text-ink-soft hover:bg-black/[0.04]'
+                        ? 'border-line text-ink-soft hover:bg-mist'
                         : 'border-accent/30 text-accent bg-accent/[0.06] hover:bg-accent/[0.12]'
                     }`}
                   >
@@ -190,10 +190,10 @@ export function CaseDrawer({
                 value={assignee}
                 onChange={(e) => setAssignee(e.target.value)}
                 placeholder="输入负责人"
-                className="flex-1 px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white"
+                className="flex-1 px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80"
               />
               <button onClick={doAssign} disabled={busy || !assignee}
-                className="px-4 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+                className="px-4 py-2 text-xs font-medium bg-accent text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50">
                 指派
               </button>
             </div>
@@ -207,10 +207,10 @@ export function CaseDrawer({
               onChange={(e) => setDisposition(e.target.value)}
               placeholder="记录最终处置结论…"
               rows={3}
-              className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white resize-none"
+              className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80 resize-none"
             />
             <button onClick={doDisposition} disabled={busy || !disposition}
-              className="mt-2 px-4 py-1.5 text-xs font-medium bg-ink text-white rounded-lg hover:opacity-90 disabled:opacity-50">
+              className="mt-2 px-4 py-1.5 text-xs font-medium bg-ink text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50">
               保存结论
             </button>
           </section>
@@ -227,7 +227,7 @@ export function CaseDrawer({
                   <div key={i} className="relative pb-4 last:pb-0">
                     <span
                       className="absolute -left-5 top-1 w-[11px] h-[11px] rounded-full border-2 border-surface"
-                      style={{ background: t.type === 'response' ? '#BF5AF2' : '#0A84FF' }}
+                      style={{ background: t.type === 'response' ? '#4A7A88' : '#4A7A88' }}
                     />
                     <p className="text-[10px] font-mono text-ink-faint tabular-nums">{t.time?.slice(0, 19).replace('T', ' ')}</p>
                     <p className="text-xs text-ink mt-0.5 leading-relaxed">{t.detail}</p>
@@ -242,7 +242,7 @@ export function CaseDrawer({
             <button
               onClick={markFalsePositive}
               disabled={busy || caseItem.status === 'false_positive'}
-              className="w-full py-2 text-xs font-medium text-ink-soft border border-line rounded-lg hover:bg-black/[0.04] disabled:opacity-50 transition-colors"
+              className="w-full py-2 text-xs font-medium text-ink-soft border border-line rounded-lg hover:bg-mist disabled:opacity-50 transition-colors"
             >
               ⚑ 标记为误报（提交反馈并关闭）
             </button>

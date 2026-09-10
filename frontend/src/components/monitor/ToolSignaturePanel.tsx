@@ -18,7 +18,7 @@ function HourBars({ counts }: { counts: number[] }) {
       {hours.map((n, i) => (
         <div
           key={i}
-          className="flex-1 bg-ink min-w-0"
+          className="flex-1 bg-accent/80 min-w-0"
           style={{ height: `${Math.max(6, (n / max) * 100)}%`, opacity: n ? 1 : 0.15 }}
           title={`${String(i).padStart(2, '0')}:00 · ${n}`}
         />
@@ -193,7 +193,7 @@ export default function ToolSignaturePanel() {
           type="button"
           onClick={handleRefresh}
           disabled={busy !== null}
-          className="px-4 py-2 text-xs font-sans font-medium border border-ink text-ink disabled:opacity-50"
+          className="px-4 py-2 text-xs font-sans font-medium rounded-lg border border-line text-ink-soft transition-colors hover:border-accent/60 hover:text-accent disabled:opacity-50"
         >
           {busy === 'refresh' ? '刷新中…' : '刷新'}
         </button>
@@ -209,7 +209,7 @@ export default function ToolSignaturePanel() {
               title={p.hint}
               disabled={busy !== null}
               onClick={() => handlePlaybook(p.id)}
-              className="px-3 py-1.5 text-xs font-sans border border-ink text-ink hover:bg-ink hover:text-white disabled:opacity-50"
+              className="px-3 py-1.5 text-xs font-sans rounded-lg border border-line text-ink-soft transition-colors hover:border-accent/60 hover:text-accent disabled:opacity-50"
             >
               {busy === p.id ? '执行中…' : p.label}
             </button>
@@ -219,11 +219,11 @@ export default function ToolSignaturePanel() {
       </div>
 
       {error && (
-        <div className="p-3 border border-ink text-xs text-ink">{error}</div>
+        <div className="rounded-lg border border-alert/40 bg-alert/[0.06] p-3 text-xs text-alert">{error}</div>
       )}
 
       {lastResult && (
-        <div className="border border-line bg-white p-4 text-xs">
+        <div className="rounded-lg border border-line bg-card/80 p-4 text-xs">
           <p className="font-medium text-ink mb-1">
             末次调用 {lastResult.decision}
             {lastResult.signature?.is_anomaly ? ` · 偏离 ${lastResult.signature.score}` : ''}
@@ -253,7 +253,7 @@ export default function ToolSignaturePanel() {
                 type="button"
                 key={key}
                 onClick={() => setOpenId(openId === key ? null : key)}
-                className="text-left border border-line bg-white p-4 hover:border-ink"
+                className="text-left rounded-xl border border-line bg-card/80 p-4 transition-colors hover:border-accent/50"
               >
                 <div className="flex items-baseline justify-between gap-2 mb-2">
                   <p className="text-sm font-semibold font-mono text-ink">{s.tool_name}</p>
@@ -284,7 +284,7 @@ export default function ToolSignaturePanel() {
         {anomalies.length === 0 && <p className="text-xs text-ink-faint">暂无偏离。</p>}
         <ul className="space-y-2">
           {anomalies.map((a, i) => (
-            <li key={`${a.ts}-${i}`} className="border border-line bg-white px-4 py-3">
+            <li key={`${a.ts}-${i}`} className="rounded-lg border border-line bg-card/80 px-4 py-3">
               <p className="text-xs font-medium text-ink">
                 <span className="font-mono">{a.tool_name}</span>
                 {' · '}{a.caller}
@@ -305,7 +305,7 @@ export default function ToolSignaturePanel() {
           <p className="text-xs font-sans font-medium text-ink-faint mb-2">待确认工单</p>
           <ul className="space-y-2">
             {approvals.filter((t) => t.status === 'pending').map((t) => (
-              <li key={t.ticket_id} className="border border-ink bg-white px-4 py-3 text-xs">
+              <li key={t.ticket_id} className="rounded-lg border border-accent/50 bg-accent/[0.06] px-4 py-3 text-xs">
                 <p className="font-medium font-mono">{t.ticket_id} · {t.tool_name}</p>
                 <p className="text-ink-soft mt-1">{t.decision_reason}</p>
                 <p className="text-[10px] text-ink-faint mt-1">trigger={t.trigger}</p>

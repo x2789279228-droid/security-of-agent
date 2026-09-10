@@ -1,78 +1,212 @@
+import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { ROUTES } from '../lib/constants'
 import { useAuthStore } from '../stores/authStore'
+import { WatchShift } from '../components/ui/WatchShift'
+import { ROUTES } from '../lib/constants'
+import { NAV_GROUPS } from './nav'
 
-const tabs = [
-  { path: ROUTES.HOME, label: '首页' },
-  { path: ROUTES.LOGS, label: '日志中心' },
-  { path: ROUTES.MONITOR, label: '监控' },
-  { path: ROUTES.SECURITY_AUDIT, label: '安全审计' },
-  { path: ROUTES.RESPONSE, label: '响应' },
-  { path: ROUTES.OPERATIONS, label: '运营中心' },
-  { path: ROUTES.SELF_PLAY, label: '自博弈' },
-  { path: ROUTES.RAG, label: '知识库' },
-]
+/**
+ * TopNav · 守望 v5
+ *
+ * 极简两行结构：
+ * - 行 1（h-14）：品牌左 / 状态中 / 操作右 —— 一行解决三件事
+ * - 行 2（h-10）：目录带
+ *
+ * 总高度从 116px 压到 76px，省 35%
+ */
 
 export function TopNav() {
   const location = useLocation()
   const navigate = useNavigate()
   const { username, token, logout } = useAuthStore()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [senseOpen, setSenseOpen] = useState(false)
+  const senseRef = useRef<HTMLDivElement>(null)
+
+  const senseGroup = NAV_GROUPS.find((g) => g.title === '感知')!
+  const primaryGroups = NAV_GROUPS.filter((g) => g.title !== '感知')
+  const senseActive = senseGroup.items.some((i) => i.path === location.pathname)
+
+  useEffect(() => {
+    setMenuOpen(false)
+    setSenseOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    if (!senseOpen) return
+    const onDoc = (e: MouseEvent) => {
+      if (!senseRef.current?.contains(e.target as Node)) setSenseOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [senseOpen])
+
+  const go = (path: string) => {
+    navigate(path)
+    setMenuOpen(false)
+    setSenseOpen(false)
+  }
+
+  const today = new Date().toLocaleDateString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+  })
+  const weekday = new Date().toLocaleDateString('zh-CN', { weekday: 'long' })
 
   return (
-    <header className="fixed top-0 left-0 right-0 z-50 h-14 bg-surface">
-      <div className="page-shell h-full flex items-center justify-between">
+    <header className="sticky top-0 z-40 bg-[#ecf0ee] border-b border-line">
+      {/* 行 1：品牌 + 状态 + 操作 */}
+      <div className="page-shell h-14 flex items-center gap-6">
+        {/* 左：品牌 */}
         <button
-          onClick={() => navigate(ROUTES.HOME)}
-          className="text-[15px] font-black tracking-wide text-ink"
+          onClick={() => go(ROUTES.HOME)}
+          aria-label="守望首页"
+          className="flex items-baseline gap-3 shrink-0"
         >
-          共享记忆
+          <span className="font-serif text-[20px] font-black tracking-[-0.02em] text-ink leading-none">
+            守望
+          </span>
+          <span className="hidden md:inline font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint">
+            Shouwang · Night Watch SOC
+          </span>
         </button>
 
-        <nav className="hidden md:flex items-center gap-7">
-          {tabs.map((tab) => {
-            const active = location.pathname === tab.path
-            return (
-              <button
-                key={tab.path}
-                onClick={() => navigate(tab.path)}
-                className={`relative text-[13px] tracking-wide transition-colors ${
-                  active ? 'text-ink font-bold' : 'text-ink-faint hover:text-ink'
-                }`}
-              >
-                {tab.label}
-                {active && (
-                  <span className="absolute left-0 -bottom-1 h-[2px] w-full bg-ink" aria-hidden />
-                )}
-              </button>
-            )
-          })}
-        </nav>
+        {/* 中：状态 meta —— 一行收齐 */}
+        <div className="hidden lg:flex items-center gap-5 flex-1 min-w-0 justify-center font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint">
+          <span className="whitespace-nowrap">{today} · {weekday}</span>
+          <span className="h-3 w-px bg-line" aria-hidden />
+          <span className="inline-flex items-center gap-2 text-accent whitespace-nowrap">
+            <span className="live-arc text-accent" aria-hidden />
+            <span>Shift Active</span>
+          </span>
+          <WatchShift className="ml-1" />
+        </div>
 
-        <div className="flex items-center gap-4 text-[12px] tracking-[0.18em]">
+        {/* 右：用户操作 */}
+        <div className="flex items-center gap-3 ml-auto shrink-0">
           {token ? (
             <>
-              <span className="text-ink-faint">{username || 'admin'}</span>
+              <span className="hidden sm:inline font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint">
+                {username || 'admin'}
+              </span>
               <button
                 onClick={() => {
                   logout()
                   navigate('/login')
                 }}
-                className="text-ink hover:opacity-70"
+                className="nav-btn"
               >
-                退出
+                登出
               </button>
             </>
           ) : (
-            <button
-              onClick={() => navigate('/login')}
-              className="text-ink font-medium hover:opacity-70"
-            >
+            <button onClick={() => navigate('/login')} className="nav-btn">
               登录
             </button>
           )}
+          <button
+            type="button"
+            className="lg:hidden font-mono text-[10px] tracking-[0.22em] uppercase text-ink-soft hover:text-ink border-l border-line pl-3"
+            aria-expanded={menuOpen}
+            aria-label={menuOpen ? '关闭目录' : '打开目录'}
+            onClick={() => setMenuOpen((v) => !v)}
+          >
+            {menuOpen ? 'Close' : 'Menu'}
+          </button>
         </div>
       </div>
-      <div className="h-px bg-line" />
+
+      {/* 行 2：目录带 */}
+      <nav className="hidden lg:block border-t border-line">
+        <div className="page-shell h-10 flex items-stretch gap-0">
+          {primaryGroups.map((group, gi) => (
+            <div key={group.title} className="flex items-stretch">
+              {gi > 0 && <span className="self-center mx-1 h-4 w-px bg-line" aria-hidden />}
+              {group.items.map((item) => {
+                const active = location.pathname === item.path
+                return (
+                  <button
+                    key={item.path}
+                    onClick={() => go(item.path)}
+                    className={`relative px-4 text-[13px] whitespace-nowrap transition-colors ${
+                      active ? 'text-ink' : 'text-ink-soft hover:text-ink'
+                    }`}
+                  >
+                    {item.short}
+                    {active && (
+                      <span className="absolute inset-x-3 bottom-0 h-px bg-[#0e1a26]" />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          ))}
+          <span className="self-center mx-1 h-4 w-px bg-line" aria-hidden />
+          <div className="relative flex items-stretch" ref={senseRef}>
+            <button
+              type="button"
+              aria-expanded={senseOpen}
+              onClick={() => setSenseOpen((v) => !v)}
+              className={`relative px-4 text-[13px] whitespace-nowrap ${
+                senseActive ? 'text-ink' : 'text-ink-soft hover:text-ink'
+              }`}
+            >
+              感知
+              {senseActive && (
+                <span className="absolute inset-x-3 bottom-0 h-px bg-[#0e1a26]" />
+              )}
+            </button>
+            {senseOpen && (
+              <div className="absolute left-0 top-full z-50 min-w-[10rem] border border-line bg-paper py-2 shadow-[var(--shadow-2)]">
+                {senseGroup.items.map((item) => {
+                  const active = location.pathname === item.path
+                  return (
+                    <button
+                      key={item.path}
+                      onClick={() => go(item.path)}
+                      className={`block w-full px-4 py-1.5 text-left text-[13px] ${
+                        active ? 'text-ink' : 'text-ink-soft hover:text-ink'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </nav>
+
+      {menuOpen && (
+        <div className="lg:hidden border-t border-line bg-surface">
+          <div className="page-shell py-6">
+            {NAV_GROUPS.map((group) => (
+              <div key={group.title} className="mb-6">
+                <p className="mb-2 font-mono text-[10px] tracking-[0.22em] uppercase text-ink-faint">
+                  {group.title}
+                </p>
+                <div className="flex flex-col gap-1">
+                  {group.items.map((item) => {
+                    const active = location.pathname === item.path
+                    return (
+                      <button
+                        key={item.path}
+                        onClick={() => go(item.path)}
+                        className={`py-1.5 text-left text-[16px] ${
+                          active ? 'text-ink' : 'text-ink-soft'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </header>
   )
 }

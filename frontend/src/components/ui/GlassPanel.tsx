@@ -7,12 +7,11 @@ interface GlassPanelProps {
   onClick?: () => void
 }
 
-/** 直角线框卡片（保留原名以免改动调用方） */
 export function GlassPanel({ children, className = '', strong, onClick }: GlassPanelProps) {
   return (
     <div
       onClick={onClick}
-      className={`${strong ? 'mono-card-ink' : 'mono-card'} rounded-none ${className}`}
+      className={`${strong ? 'glass-strong' : 'glass'} ${className}`}
     >
       {children}
     </div>

@@ -36,10 +36,10 @@ interface DiscoveryTask {
 }
 
 const CRITICALITY_META: Record<string, { color: string; bg: string; label: string }> = {
-  critical: { color: '#FF375F', bg: 'rgba(255,55,95,0.10)', label: '核心' },
-  high: { color: '#FF9F0A', bg: 'rgba(255,159,10,0.12)', label: '重要' },
-  medium: { color: '#0A84FF', bg: 'rgba(10,132,255,0.10)', label: '一般' },
-  low: { color: '#86868b', bg: 'rgba(134,134,139,0.10)', label: '低' },
+  critical: { color: '#C23A32', bg: 'rgba(194,58,50,0.10)', label: '核心' },
+  high: { color: '#C08A3A', bg: 'rgba(192,138,58,0.12)', label: '重要' },
+  medium: { color: '#4A7A88', bg: 'rgba(74,122,136,0.10)', label: '一般' },
+  low: { color: '#8A97A4', bg: 'rgba(138,151,164,0.12)', label: '低' },
 }
 
 export function AssetsTab() {
@@ -138,10 +138,10 @@ export function AssetsTab() {
     <div className="space-y-6">
       {/* 顶部指标卡 */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <MetricCard label="资产总数" value={counts.total} color="#0A84FF" />
-        <MetricCard label="核心资产" value={counts.critical} color="#FF375F" />
-        <MetricCard label="重要资产" value={counts.high} color="#FF9F0A" />
-        <MetricCard label="活跃资产" value={counts.active} color="#34c759" />
+        <MetricCard label="资产总数" value={counts.total} color="#4A7A88" />
+        <MetricCard label="核心资产" value={counts.critical} color="#C23A32" />
+        <MetricCard label="重要资产" value={counts.high} color="#C08A3A" />
+        <MetricCard label="活跃资产" value={counts.active} color="#3E7A64" />
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-6">
@@ -153,7 +153,7 @@ export function AssetsTab() {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               placeholder="搜索 IP / 主机名 / 责任人…"
-              className="px-3 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white w-64"
+              className="px-3 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80 w-64"
             />
           </div>
 
@@ -162,10 +162,10 @@ export function AssetsTab() {
           ) : filtered.length === 0 ? (
             <EmptyState icon="🖥️" title="暂无已注册资产" hint="在右侧表单注册首个资产" />
           ) : (
-            <div className="bg-white border border-line rounded-none overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-card/80 border border-line rounded-xl overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="text-[10px] uppercase tracking-wide text-ink-faint text-left bg-black/[0.02]">
+                  <tr className="text-[10px] uppercase tracking-wide text-ink-faint text-left bg-mist/60">
                     <th className="px-4 py-3 font-medium">IP / 主机</th>
                     <th className="px-4 py-3 font-medium">关键性</th>
                     <th className="px-4 py-3 font-medium">责任部门</th>
@@ -183,7 +183,7 @@ export function AssetsTab() {
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ ...spring.ui, delay: Math.min(i, 8) * 0.03 }}
-                        className="border-t border-line hover:bg-black/[0.02] transition-colors"
+                        className="border-t border-line hover:bg-mist/40 transition-colors"
                       >
                         <td className="px-4 py-3">
                           <div className="font-medium text-ink">{a.ip || a.hostname || a.asset_key}</div>
@@ -209,7 +209,7 @@ export function AssetsTab() {
                           {a.is_active && (
                             <button
                               onClick={() => remove(a.id)}
-                              className="text-[10px] text-[#FF375F] hover:underline"
+                              className="text-[10px] text-[#C23A32] hover:underline"
                             >
                               下线
                             </button>
@@ -228,7 +228,7 @@ export function AssetsTab() {
         <div className="space-y-6">
           <div>
             <h3 className="text-sm font-semibold text-ink tracking-tight mb-4">注册资产</h3>
-            <div className="bg-white border border-line rounded-none p-5 space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-card/80 border border-line rounded-xl p-5 space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <p className="text-[11px] font-medium text-ink-faint mb-1">IP</p>
@@ -236,7 +236,7 @@ export function AssetsTab() {
                     value={ip}
                     onChange={(e) => setIp(e.target.value)}
                     placeholder="10.0.0.5"
-                    className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white font-mono"
+                    className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80 font-mono"
                   />
                 </div>
                 <div>
@@ -245,7 +245,7 @@ export function AssetsTab() {
                     value={hostname}
                     onChange={(e) => setHostname(e.target.value)}
                     placeholder="db-primary"
-                    className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white"
+                    className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80"
                   />
                 </div>
               </div>
@@ -255,7 +255,7 @@ export function AssetsTab() {
                 <select
                   value={assetType}
                   onChange={(e) => setAssetType(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white"
+                  className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80"
                 >
                   <option value="host">host</option>
                   <option value="server">server</option>
@@ -292,14 +292,14 @@ export function AssetsTab() {
                   value={business}
                   onChange={(e) => setBusiness(e.target.value)}
                   placeholder="db / finance / ops"
-                  className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white"
+                  className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80"
                 />
               </div>
 
               <button
                 onClick={submit}
                 disabled={submitting}
-                className="w-full py-2 text-xs font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+                className="w-full py-2 text-xs font-medium text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50"
                 style={{ backgroundImage: AI_GRADIENT }}
               >
                 {submitting ? '保存中…' : '保存'}
@@ -311,7 +311,7 @@ export function AssetsTab() {
           {/* 资产发现 */}
           <div>
             <h3 className="text-sm font-semibold text-ink tracking-tight mb-4">资产发现</h3>
-            <div className="bg-white border border-line rounded-none p-5 space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-card/80 border border-line rounded-xl p-5 space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <p className="text-[11px] font-medium text-ink-faint mb-1">扫描范围</p>
@@ -319,7 +319,7 @@ export function AssetsTab() {
                     value={scope}
                     onChange={(e) => setScope(e.target.value)}
                     placeholder="all / 10.0.0.0/24"
-                    className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white font-mono"
+                    className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80 font-mono"
                   />
                 </div>
                 <div>
@@ -327,7 +327,7 @@ export function AssetsTab() {
                   <select
                     value={scanner}
                     onChange={(e) => setScanner(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white"
+                    className="w-full px-2.5 py-1.5 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80"
                   >
                     <option value="edr">EDR 派生</option>
                     <option value="nmap">nmap 扫描</option>
@@ -338,7 +338,7 @@ export function AssetsTab() {
               <button
                 onClick={discover}
                 disabled={discovering}
-                className="w-full py-2 text-xs font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+                className="w-full py-2 text-xs font-medium text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50"
                 style={{ backgroundImage: AI_GRADIENT }}
               >
                 {discovering ? '扫描中…' : '启动发现'}
@@ -352,14 +352,14 @@ export function AssetsTab() {
               <h3 className="text-sm font-semibold text-ink tracking-tight mb-3">最近发现任务</h3>
               <div className="space-y-2">
                 {tasks.slice(0, 5).map((t) => (
-                  <div key={t.id} className="bg-white border border-line rounded-lg px-3 py-2 text-[11px]">
+                  <div key={t.id} className="bg-card/80 border border-line rounded-lg px-3 py-2 text-[11px]">
                     <div className="flex items-center justify-between">
                       <span className="font-mono text-ink-soft">{t.task_id.slice(0, 12)}</span>
                       <span
                         className="px-1.5 py-0.5 rounded text-[10px] font-semibold"
                         style={{
-                          color: t.status === 'completed' ? '#34c759' : t.status === 'failed' ? '#FF375F' : '#0A84FF',
-                          background: t.status === 'completed' ? 'rgba(52,199,89,0.10)' : 'rgba(10,132,255,0.10)',
+                          color: t.status === 'completed' ? '#3E7A64' : t.status === 'failed' ? '#C23A32' : '#4A7A88',
+                          background: t.status === 'completed' ? 'rgba(62,122,100,0.10)' : 'rgba(74,122,136,0.10)',
                         }}
                       >
                         {t.status}
@@ -381,7 +381,7 @@ export function AssetsTab() {
 
 function MetricCard({ label, value, color }: { label: string; value: number; color: string }) {
   return (
-    <div className="bg-white border border-line rounded-none px-4 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+    <div className="bg-card/80 border border-line rounded-xl px-4 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
       <div className="flex items-center gap-1.5 mb-2">
         <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
         <span className="text-[11px] font-medium text-ink-faint">{label}</span>

@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     allowed_origins: str = '["http://localhost:3001", "http://127.0.0.1:3001"]'
     rate_limit_per_minute: int = 120
+    # HTTP 全局限流白名单的"追加项"(逗号分隔路径前缀, 见 http_guards.RATE_LIMIT_WHITELIST)
+    # 默认白名单已覆盖全部业务域/运营只读端点; 此处只用于现场临时放开某个前缀, 无需改代码
+    rate_limit_whitelist: str = ""
     admin_user: str = "admin"
     admin_password: str = ""
 
@@ -228,6 +231,31 @@ class Settings(BaseSettings):
     fw_ssh_user_readonly: str = ""           # 只读 SSH 账号（nmap/查询用）
     ttl_scan_interval: int = 30             # TTL 过期扫描间隔（秒）
 
+    # ── 控制面安全（审批 HMAC / JWT 吊销 / 来源限制）──
+    control_hmac_key: str = ""               # 空则回退 jwt_secret
+    approval_ttl_minutes: int = 15
+    approval_ttl_critical_minutes: int = 10
+    api_allowlist: str = ""                  # 逗号分隔 IP/CIDR，空=不启用
+    api_allowlist_allow_loopback: bool = True
+    trust_proxy: bool = False
+    service_token: str = ""                  # X-SOC-Service-Token；空=不启用
+    mtls_enforce: bool = False               # 要求 X-SSL-Client-Verify=SUCCESS
+
+    # ── 终端遏制 (containment) ──
+    dns_sinkhole_ipv4: str = "127.0.0.2"
+    dns_sinkhole_ipv6: str = "::ffff:127.0.0.2"
+    ldap_url: str = ""
+    ldap_bind_dn: str = ""
+    ldap_bind_password: str = ""
+    ldap_base_dn: str = ""
+    graph_tenant: str = ""
+    graph_client_id: str = ""
+    graph_client_secret: str = ""
+    forensic_snapshot_timeout_s: int = 15
+    forensic_include_dump: bool = False
+    forensic_dump_max_mb: int = 64
+    kill_process_max_matches: int = 20
+
     # ── NDR 流量采集 ──
     capture_enabled: bool = False            # 启用网络流量采集
     capture_interface: str = "eth0"          # 抓包网卡
@@ -334,6 +362,21 @@ class Settings(BaseSettings):
     causal_min_windows: int = 40
     causal_learn_interval_s: int = 900
     causal_lookback_hours: int = 48
+
+    # ── 每日学习闭环 (learn_loop: 收割→统计/聚类/序列→提议→自动应用) ──
+    learn_loop_enabled: bool = True
+    learn_loop_hourly_enabled: bool = False      # True=每小时走 run_cycle(hourly); False=保持原 generate_tuning_suggestions
+    learn_loop_hour_utc: int = 2                 # 每日 UTC 触发钟点
+    learn_loop_minute: int = 15                  # 每日 UTC 触发分钟
+    learn_loop_lookback_hours: int = 24          # 收割窗口回溯小时
+    learn_loop_auto_apply: bool = True           # 白名单动作自动应用
+    learn_loop_cluster_min_size: int = 3         # 聚类最小簇大小
+    learn_loop_jaccard: float = 0.5              # 事件聚类 Jaccard 阈值
+    learn_loop_markov_min_count: int = 5         # 序列转移最小计数
+    learn_loop_markov_min_p: float = 0.4         # 序列转移最小条件概率
+    learn_loop_prior_clip: float = 0.2           # 信誉先验单侧 clip（±0.2）
+    learn_loop_harvest_cases_limit: int = 500    # 收割案例上限
+    learn_loop_harvest_events_limit: int = 5000  # 收割事件扫描上限
 
     # ── 演示流量（默认关；仅仿真事件打 _demo，不写生产 Sigma）──
     demo_traffic_enabled: bool = False

@@ -32,8 +32,7 @@ export default function LoginForm({
 
   return (
     <form onSubmit={onSubmit} className="w-full" noValidate>
-      <h2 className="text-[22px] font-black tracking-tight text-ink">登录</h2>
-      <p className="mt-1.5 text-[13px] text-ink-faint">使用账号密码进入系统</p>
+      <h2 className="font-serif text-[28px] font-black tracking-tight text-ink">登录</h2>
 
       <div className="mt-8">
         <label htmlFor={userId} className="block text-[12px] text-ink-faint mb-1">
@@ -47,7 +46,7 @@ export default function LoginForm({
           autoFocus
           value={username}
           onChange={(e) => onUsernameChange(e.target.value)}
-          placeholder="用户名"
+          placeholder=""
           aria-invalid={hasError}
           className="auth-input text-[16px] lg:text-[15px]"
         />
@@ -65,7 +64,7 @@ export default function LoginForm({
             autoComplete="current-password"
             value={password}
             onChange={(e) => onPasswordChange(e.target.value)}
-            placeholder="••••••••"
+            placeholder=""
             aria-invalid={hasError}
             className="auth-input text-[16px] lg:text-[15px] pr-14"
           />
@@ -74,7 +73,7 @@ export default function LoginForm({
             onClick={() => setShowPassword((v) => !v)}
             aria-pressed={showPassword}
             aria-label={showPassword ? '隐藏密码' : '显示密码'}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-[12px] tracking-wide text-ink-faint hover:text-ink"
+            className="absolute right-0 top-1/2 -translate-y-1/2 text-[12px] text-ink-faint hover:text-ink"
           >
             {showPassword ? '隐藏' : '显示'}
           </button>
@@ -82,7 +81,7 @@ export default function LoginForm({
       </div>
 
       {error && (
-        <p role="alert" className="mt-4 border border-ink bg-mist px-3 py-2 text-[13px] text-ink">
+        <p role="alert" className="mt-4 text-[13px] text-alert">
           {error}
         </p>
       )}
@@ -91,14 +90,14 @@ export default function LoginForm({
         type="submit"
         variant="primary"
         disabled={loading}
-        className="mt-8 h-11 w-full tracking-[0.2em] disabled:opacity-40"
+        className="mt-10 h-11 w-full disabled:opacity-40"
       >
-        {loading ? '登录中…' : '进入系统'}
+        {loading ? '登录中…' : '进入'}
       </Button>
 
-      <p className="mt-6 text-center text-[13px] text-ink-faint">
+      <p className="mt-6 text-[13px] text-ink-faint">
         还没有账号？{' '}
-        <Link to="/register" className="text-ink border-b border-ink hover:opacity-70">
+        <Link to="/register" className="border-b border-accent/50 text-accent hover:opacity-80">
           去注册
         </Link>
       </p>

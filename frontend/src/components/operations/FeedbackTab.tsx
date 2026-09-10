@@ -70,7 +70,7 @@ export function FeedbackTab() {
       {/* 左：提交反馈 */}
       <div>
         <h3 className="text-sm font-semibold text-ink tracking-tight mb-4">提交反馈</h3>
-        <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
+        <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div>
               <FieldLabel>事件 ID（可选）</FieldLabel>
@@ -78,7 +78,7 @@ export function FeedbackTab() {
                 value={eventId}
                 onChange={(e) => setEventId(e.target.value)}
                 placeholder="如 42"
-                className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white"
+                className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80"
               />
             </div>
             <div>
@@ -87,7 +87,7 @@ export function FeedbackTab() {
                 value={ruleId}
                 onChange={(e) => setRuleId(e.target.value)}
                 placeholder="如 SIG-001"
-                className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white font-mono"
+                className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80 font-mono"
               />
             </div>
           </div>
@@ -102,7 +102,7 @@ export function FeedbackTab() {
                   className={`px-3 py-2 text-xs rounded-lg border text-left transition-all ${
                     feedbackType === t.value
                       ? 'border-accent bg-accent/[0.07] text-accent font-medium'
-                      : 'border-line text-ink-soft hover:bg-black/[0.02]'
+                      : 'border-line text-ink-soft hover:bg-mist/40'
                   }`}
                 >
                   {t.label}
@@ -118,7 +118,7 @@ export function FeedbackTab() {
               onChange={(e) => setReason(e.target.value)}
               placeholder="为什么这样判断？"
               rows={3}
-              className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white resize-none"
+              className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80 resize-none"
             />
           </div>
 
@@ -130,7 +130,7 @@ export function FeedbackTab() {
                 onChange={(e) => setSuggestion(e.target.value)}
                 placeholder="建议如何调整规则？"
                 rows={2}
-                className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-white resize-none"
+                className="w-full px-3 py-2 text-xs border border-line rounded-lg focus:outline-none focus:ring-1 focus:ring-accent bg-card/80 resize-none"
               />
             </div>
           )}
@@ -138,7 +138,7 @@ export function FeedbackTab() {
           <button
             onClick={submit}
             disabled={submitting}
-            className="w-full py-2.5 text-xs font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+            className="w-full py-2.5 text-xs font-medium text-on-accent rounded-lg hover:opacity-90 disabled:opacity-50"
             style={{ backgroundImage: AI_GRADIENT }}
           >
             {submitting ? '提交中…' : '提交反馈'}
@@ -158,20 +158,20 @@ export function FeedbackTab() {
                 initial={{ opacity: 0, y: 14 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ ...spring.ui, delay: i * 0.05 }}
-                className="bg-white border border-line rounded-none px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+                className="bg-card/80 border border-line rounded-xl px-5 py-4 shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
               >
                 <div className="flex items-center gap-2 mb-2">
                   <SeverityChip severity={s.severity} />
                   {s.rule_id && <span className="text-[11px] font-mono text-ink-faint">{s.rule_id}</span>}
                   {s.fp_rate !== undefined && (
-                    <span className="text-[11px] font-semibold text-[#FF375F]">误报率 {Math.round(s.fp_rate * 100)}%</span>
+                    <span className="text-[11px] font-semibold text-[#C23A32]">误报率 {Math.round(s.fp_rate * 100)}%</span>
                   )}
                 </div>
                 <p className="text-xs text-ink leading-relaxed">{s.suggestion}</p>
                 {s.actions && s.actions.length > 0 && (
                   <div className="flex flex-wrap gap-1.5 mt-3">
                     {s.actions.map((a) => (
-                      <span key={a} className="px-2 py-1 text-[10px] font-medium text-ink-soft bg-black/[0.04] rounded-md">{a}</span>
+                      <span key={a} className="px-2 py-1 text-[10px] font-medium text-ink-soft bg-mist rounded-md">{a}</span>
                     ))}
                   </div>
                 )}
@@ -190,28 +190,28 @@ export function FeedbackTab() {
           <div className="space-y-4">
             {/* 总体指标 */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-white border border-line rounded-none px-5 py-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="bg-card/80 border border-line rounded-xl px-5 py-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <p className="text-[11px] font-medium text-ink-faint mb-2">整体误报率</p>
                 <GradientNumber value={fpPct} suffix="%" />
               </div>
-              <div className="bg-white border border-line rounded-none px-5 py-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+              <div className="bg-card/80 border border-line rounded-xl px-5 py-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 <p className="text-[11px] font-medium text-ink-faint mb-2">反馈总数</p>
                 <GradientNumber value={stats?.total_feedback ?? 0} />
               </div>
             </div>
 
             {/* 分类计数 */}
-            <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <div className="grid grid-cols-4 gap-3 text-center">
-                <CountStat label="误报" value={stats?.false_positive ?? 0} color="#FF375F" />
-                <CountStat label="确认" value={stats?.true_positive ?? 0} color="#34c759" />
-                <CountStat label="漏报" value={stats?.missed_threat ?? 0} color="#FF9F0A" />
-                <CountStat label="建议" value={stats?.rule_suggestion ?? 0} color="#0A84FF" />
+                <CountStat label="误报" value={stats?.false_positive ?? 0} color="#C23A32" />
+                <CountStat label="确认" value={stats?.true_positive ?? 0} color="#3E7A64" />
+                <CountStat label="漏报" value={stats?.missed_threat ?? 0} color="#C08A3A" />
+                <CountStat label="建议" value={stats?.rule_suggestion ?? 0} color="#4A7A88" />
               </div>
             </div>
 
             {/* 按规则 FP 率 */}
-            <div className="bg-white border border-line rounded-none p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="bg-card/80 border border-line rounded-xl p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
               <p className="text-[11px] font-semibold text-ink-faint uppercase tracking-wide mb-4">按规则误报率</p>
               {ruleEntries.length === 0 ? (
                 <p className="text-xs text-ink-faint py-4 text-center">暂无按规则的反馈数据</p>

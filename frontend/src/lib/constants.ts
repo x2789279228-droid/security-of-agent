@@ -27,6 +27,5 @@ export const ROUTES = {
   CAPABILITIES: '/capabilities',
 } as const
 
-/** 单色极简 — 运营中心签名（灰阶） */
-export const AI_GRADIENT = 'linear-gradient(120deg, #111111 0%, #555555 50%, #c8c8c8 100%)'
-export const AI_GRADIENT_STOPS = ['#111111', '#333333', '#555555', '#888888', '#c8c8c8']
+/** 守望签名 — 暮青 → 灰青 → 松绿 → 柿黄 */
+export { AI_GRADIENT, AI_GRADIENT_STOPS, BRAND, BRAND_COLORS } from './brand'

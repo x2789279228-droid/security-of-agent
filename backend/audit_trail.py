@@ -36,6 +36,74 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 
+# ── 审计哈希链 (PR1 控制面安全) ──
+# 每条记录携带 prev_hash / row_hash:
+#   row_hash = hmac_sha256(canonical_json{actor, action, target_type, target_id,
+#                                          before, after, reason, prev_hash, created_at_iso})
+#   prev_hash = 前一条 row_hash (按 id 倒序取最新); 首条用 64 个 '0'(genesis)
+# 写库(_persist_entry / flush_fallback)与校验(verify_chain)共用 _compute_row_hash, 保证一致。
+GENESIS_HASH = "0" * 64
+
+
+def _utc_naive_iso(dt) -> str:
+    """统一 UTC-naive ISO 串: 写入(aware datetime)与读回(sqlite naive / PG aware)一致。"""
+    if dt is None:
+        return ""
+    try:
+        if getattr(dt, "tzinfo", None) is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.isoformat()
+    except Exception:
+        return str(dt)
+
+
+def _compute_row_hash(*, actor, action, target_type, target_id,
+                      before, after, reason, prev_hash, created_at) -> str:
+    """重算单行 row_hash(写库与校验共用, 输入必须与落库值一致)。"""
+    from security_crypto import canonical_json, hmac_hex
+    payload = canonical_json({
+        "actor": actor,
+        "action": action,
+        "target_type": target_type or "",
+        "target_id": str(target_id) if target_id not in (None, "") else "",
+        "before": before or {},
+        "after": after or {},
+        "reason": reason or "",
+        "prev_hash": prev_hash or GENESIS_HASH,
+        "created_at": _utc_naive_iso(created_at),
+    })
+    return hmac_hex(payload)
+
+
+async def _latest_row_hash(session: AsyncSession) -> str:
+    """取当前链尾 row_hash; 无记录或查询失败 → genesis(fail-open)。"""
+    from models import AuditTrail
+    try:
+        last = (await session.execute(
+            select(AuditTrail.row_hash).order_by(desc(AuditTrail.id)).limit(1)
+        )).scalar()
+        return last or GENESIS_HASH
+    except Exception as e:
+        logger.warning(f"[audit_trail] read latest row_hash failed: {e}")
+        return GENESIS_HASH
+
+
+def _chain_for(entry: dict, created_at, prev_hash: str) -> tuple:
+    """计算 (prev_hash, row_hash)。哈希计算失败 → fail-open: 空哈希仍落库, 业务不阻塞。"""
+    try:
+        row_hash = _compute_row_hash(
+            actor=entry["actor"], action=entry["action"],
+            target_type=entry["target_type"], target_id=entry["target_id"],
+            before=entry["before"], after=entry["after"],
+            reason=entry["reason"], prev_hash=prev_hash,
+            created_at=created_at,
+        )
+        return prev_hash, row_hash
+    except Exception as e:
+        logger.warning(f"[audit_trail] row hash compute failed (fail-open, empty hash): {e}")
+        return "", ""
+
+
 # ── 离线降级缓冲 ──
 # DB 不可用时,日志先 enqueue(限量),后台再重试; 进一步场景可改为 Redis 队列。
 _fallback_buffer: list[dict] = []
@@ -162,6 +230,9 @@ async def log_action(
 
 async def _persist_entry(session: AsyncSession, entry: dict) -> None:
     from models import AuditTrail
+    created_at = entry.get("created_at") or datetime.now(timezone.utc)
+    prev_hash = await _latest_row_hash(session)
+    prev_hash, row_hash = _chain_for(entry, created_at, prev_hash)
     session.add(AuditTrail(
         actor=entry["actor"],
         actor_role=entry["actor_role"],
@@ -173,7 +244,9 @@ async def _persist_entry(session: AsyncSession, entry: dict) -> None:
         ip=entry["ip"],
         user_agent=entry["user_agent"],
         reason=entry["reason"],
-        created_at=entry.get("created_at") or datetime.now(timezone.utc),
+        prev_hash=prev_hash,
+        row_hash=row_hash,
+        created_at=created_at,
     ))
     await session.commit()
 
@@ -236,15 +309,21 @@ async def flush_fallback(session: AsyncSession) -> int:
     n = 0
     try:
         from models import AuditTrail
+        prev_hash = await _latest_row_hash(session)
         for entry in batch:
+            created_at = entry.get("created_at") or datetime.now(timezone.utc)
+            _, row_hash = _chain_for(entry, created_at, prev_hash)
             session.add(AuditTrail(
                 actor=entry["actor"], actor_role=entry["actor_role"],
                 action=entry["action"], target_type=entry["target_type"],
                 target_id=entry["target_id"], before=entry["before"],
                 after=entry["after"], ip=entry["ip"],
                 user_agent=entry["user_agent"], reason=entry["reason"],
-                created_at=entry.get("created_at") or datetime.now(timezone.utc),
+                prev_hash=prev_hash, row_hash=row_hash,
+                created_at=created_at,
             ))
+            # 链式推进: 同批内后一行 prev = 本行 row_hash(哈希失败则沿用旧 prev, 断链可检出)
+            prev_hash = row_hash or prev_hash
             n += 1
         await session.commit()
         del _fallback_buffer[:n]
@@ -257,6 +336,33 @@ async def flush_fallback(session: AsyncSession) -> int:
         except Exception:
             pass
         return 0
+
+
+async def verify_chain(session: AsyncSession) -> dict:
+    """校验整条审计哈希链。
+
+    按 id 升序遍历, 用每行字段 + prev_hash 重算 row_hash 并与库中值比对。
+    返回: {"ok": bool, "checked": int, "first_break_id": Optional[int]}
+      - 空表: ok=True, checked=0, first_break_id=None
+      - 断点: first_break_id=首个不匹配行 id, checked=断点前通过行数
+      注: 空 row_hash/prev_hash 的行(旧数据或 fail-open 落库)会计为断点。
+    """
+    from models import AuditTrail
+    stmt = select(AuditTrail).order_by(AuditTrail.id)
+    rows = (await session.execute(stmt)).scalars().all()
+    checked = 0
+    for row in rows:
+        recomputed = _compute_row_hash(
+            actor=row.actor, action=row.action,
+            target_type=row.target_type or "", target_id=row.target_id or "",
+            before=row.before or {}, after=row.after or {},
+            reason=row.reason or "", prev_hash=row.prev_hash or "",
+            created_at=row.created_at,
+        )
+        if recomputed != (row.row_hash or ""):
+            return {"ok": False, "checked": checked, "first_break_id": row.id}
+        checked += 1
+    return {"ok": True, "checked": checked, "first_break_id": None}
 
 
 def _truncate(obj, max_chars: int = 4000) -> dict:

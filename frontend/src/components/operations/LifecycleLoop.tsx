@@ -97,7 +97,7 @@ export function LifecycleLoop({
         >
           <span
             className="text-6xl font-extrabold tracking-tight tabular-nums bg-clip-text text-transparent leading-none"
-            style={{ backgroundImage: `linear-gradient(135deg, ${AI_GRADIENT_STOPS[0]}, ${AI_GRADIENT_STOPS[2]}, ${AI_GRADIENT_STOPS[3]})` }}
+            style={{ backgroundImage: `linear-gradient(135deg, ${AI_GRADIENT_STOPS[0]}, ${AI_GRADIENT_STOPS[1]}, ${AI_GRADIENT_STOPS[2]})` }}
           >
             {activeCases}
           </span>
@@ -105,7 +105,7 @@ export function LifecycleLoop({
           <span className="flex items-center gap-1.5 mt-1.5 text-[10px] text-ink-faint">
             <motion.span
               className="w-1.5 h-1.5 rounded-full"
-              style={{ background: '#34c759' }}
+              style={{ background: '#3E7A64' }}
               animate={{ scale: [1, 1.5, 1], opacity: [1, 0.5, 1] }}
               transition={{ duration: 1.8, repeat: Infinity }}
             />
@@ -133,7 +133,7 @@ export function LifecycleLoop({
             style={{ left: x, top: y, transform: 'translate(-50%, -50%)' }}
           >
             <span
-              className="relative flex items-center justify-center rounded-none bg-white border shadow-[0_2px_12px_rgba(0,0,0,0.06)] transition-shadow group-hover:shadow-[0_4px_20px_rgba(0,0,0,0.12)]"
+              className="relative flex items-center justify-center rounded-xl bg-card/80 border shadow-[0_2px_12px_rgba(0,0,0,0.06)] transition-shadow group-hover:shadow-[0_4px_20px_rgba(0,0,0,0.12)]"
               style={{ width: NODE_R * 2, height: NODE_R * 2, borderColor: `${color}30` }}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">
@@ -141,7 +141,7 @@ export function LifecycleLoop({
               </svg>
               {count > 0 && (
                 <span
-                  className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full text-[10px] font-bold text-white tabular-nums"
+                  className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full text-[10px] font-bold text-on-accent tabular-nums"
                   style={{ background: color }}
                 >
                   {count > 99 ? '99+' : count}

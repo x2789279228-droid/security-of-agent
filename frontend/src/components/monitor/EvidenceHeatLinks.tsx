@@ -32,10 +32,10 @@ export default function EvidenceHeatLinks({
                 if (it.kind === 'event' && it.eventId && onJumpEvent) onJumpEvent(it.eventId)
                 if (it.kind === 'rag' && it.step && onSelectStep) onSelectStep(it.step)
               }}
-              className="inline-flex items-center gap-1 border border-line bg-white px-1.5 py-0.5 font-mono text-[10px] text-ink-soft hover:border-ink"
+              className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-1.5 py-0.5 font-mono text-[10px] text-ink-soft transition-colors hover:border-accent/50 hover:text-accent"
             >
               <span
-                className="inline-block h-1.5 bg-ink"
+                className="inline-block h-1.5 rounded-full bg-accent"
                 style={{ width: w, opacity: 0.25 + it.weight * 0.75 }}
               />
               {it.kind === 'rag' ? it.label.slice(0, 18) : it.label}

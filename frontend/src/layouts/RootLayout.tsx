@@ -8,7 +8,7 @@ export function RootLayout() {
   return (
     <div className="relative min-h-screen bg-surface font-sans text-ink">
       <TopNav />
-      <main className="pt-14 min-h-screen">
+      <main className="min-h-screen">
         <AnimatePresence mode="wait">
           <Outlet key={location.pathname} />
         </AnimatePresence>

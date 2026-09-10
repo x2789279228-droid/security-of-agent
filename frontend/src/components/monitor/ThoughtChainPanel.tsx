@@ -17,24 +17,24 @@ import ThoughtDag from './ThoughtDag'
 function Detail({ step }: { step: ThoughtStep }) {
   const conf = fmtConf(step.confidence ?? step.rag_score)
   return (
-    <div className="w-full shrink-0 border-l border-line bg-surface p-3 md:w-64">
-      <p className="text-[10px] tracking-wide text-ink-faint">
-        {KIND_LABELS[step.kind] ?? step.kind} · {step.stage}
-      </p>
-      <p className="mt-1 text-[13px] font-semibold text-ink">{step.title}</p>
-      {conf && <p className="mt-0.5 font-mono text-[11px] text-ink-soft">置信度 {conf}</p>}
-      {step.summary && (
-        <p className="mt-2 text-[12px] leading-relaxed text-ink-soft">{step.summary}</p>
-      )}
-      {(step.evidence_quotes || []).length > 0 && (
-        <div className="mt-2 space-y-1">
-          {(step.evidence_quotes || []).map((q, i) => (
-            <p key={i} className="border border-line bg-white px-2 py-1 font-mono text-[10px] text-ink-faint">
-              “{q}”
-            </p>
-          ))}
-        </div>
-      )}
+        <div className="w-full shrink-0 border-l border-line bg-surface p-3 md:w-64">
+          <p className="text-[10px] tracking-wide text-ink-faint">
+            {KIND_LABELS[step.kind] ?? step.kind} · {step.stage}
+          </p>
+          <p className="mt-1 text-[13px] font-semibold text-ink">{step.title}</p>
+          {conf && <p className="mt-0.5 font-mono text-[11px] text-accent/80">置信度 {conf}</p>}
+          {step.summary && (
+            <p className="mt-2 text-[12px] leading-relaxed text-ink-soft">{step.summary}</p>
+          )}
+          {(step.evidence_quotes || []).length > 0 && (
+            <div className="mt-2 space-y-1">
+              {(step.evidence_quotes || []).map((q, i) => (
+                <p key={i} className="rounded-md border border-line bg-mist px-2 py-1 font-mono text-[10px] text-ink-faint">
+                  “{q}”
+                </p>
+              ))}
+            </div>
+          )}
       {step.tool_name && (
         <p className="mt-2 font-mono text-[10px] text-ink-faint">
           工具 {step.tool_name}
@@ -141,7 +141,7 @@ export default function ThoughtChainPanel({
 
   if (!eventId) {
     return (
-      <div className="mb-5 border border-dashed border-line bg-white px-5 py-3 text-[12px] text-ink-faint">
+      <div className="mb-5 rounded-xl border border-dashed border-line bg-card/50 px-5 py-3 text-[12px] text-ink-faint">
         {idleHint || '当前没有可展示的 Audit-LLM 思维链。请注入一条安全事件，或在本页跑演示审查。'}
       </div>
     )
@@ -151,12 +151,12 @@ export default function ThoughtChainPanel({
   const gScore = payload?.grounding?.score
 
   return (
-    <div className="mb-5 border border-line bg-white">
+    <div className="mb-5 rounded-xl border border-line bg-card/70 backdrop-blur-sm overflow-hidden">
       <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2">
         <div className="min-w-0">
           <h3 className="text-[13px] font-semibold text-ink">
             思维链
-            <span className="ml-2 font-mono text-[12px] font-normal text-ink-faint">#{eventId}</span>
+            <span className="ml-2 font-mono text-[12px] font-normal text-accent/80">#{eventId}</span>
           </h3>
           <p className="text-[10px] text-ink-faint">
             {source === 'projected' ? '由历史审计投影' : source === 'persisted' ? '落库回放' : '实时'}
@@ -170,7 +170,7 @@ export default function ThoughtChainPanel({
           <button
             type="button"
             onClick={onClose}
-            className="border border-line px-2 py-0.5 text-[11px] text-ink-soft hover:border-ink hover:text-ink"
+            className="rounded-lg border border-line px-2 py-0.5 text-[11px] text-ink-soft transition-colors hover:border-accent/60 hover:text-accent"
           >
             关闭
           </button>

@@ -14,7 +14,7 @@ export function TiltCard({ children, className = '', ...props }: TiltCardProps) 
       ref={ref}
       onMouseMove={onMouseMove}
       onMouseLeave={onMouseLeave}
-      className={`bg-card border border-line rounded-lg shadow-[0_1px_3px_rgba(0,0,0,0.03)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.06)] transition-shadow will-change-transform ${className}`}
+      className={`border-b border-line hover:border-accent/50 transition-colors ${className}`}
       style={style}
       {...props}
     >

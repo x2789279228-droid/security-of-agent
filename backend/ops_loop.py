@@ -16,7 +16,10 @@ FP_RATE_DOWNGRADE = 0.15
 DOWNGRADE_WINDOW_DAYS = 7
 DOWNGRADE_MIN_SAMPLES = 5
 
-_BLOCKING_ACTIONS = {"block_ip", "isolate_host", "terminate_process", "rate_limit"}
+_BLOCKING_ACTIONS = {
+    "block_ip", "isolate_host", "terminate_process", "rate_limit",
+    "kill_process", "quarantine_file", "disable_account", "dns_sinkhole",
+}
 
 
 # ═══════════════════════════════════════════
@@ -245,10 +248,24 @@ def apply_rule_downgrade(rule_id: str) -> dict:
         except Exception as e2:
             result["sigma"] = {"success": False, "error": f"{e}; {e2}"}
 
+    # learn_loop/运营闭环: shadow 落盘后热重载 pySigma 引擎(YAML → 编译),
+    # 让降级立即生效; 引擎无 reload(legacy)时静默跳过
+    if result.get("sigma") and result["sigma"].get("success"):
+        try:
+            from sigma_detector import sigma_detector
+            if hasattr(sigma_detector, "reload"):
+                sigma_detector.reload()
+                result["sigma"]["reloaded"] = True
+        except Exception as e:
+            result["sigma"]["reload_error"] = str(e)
+
     try:
         from response_engine.response_policies import policy_engine
         p = policy_engine.get_policy(rule_id)
-        if p is not None:
+        if p is None:
+            # 规则未映射响应策略: 明示而不是留 None(调用方无法区分"无策略"与"未查")
+            result["response_policy"] = {"success": False, "error": "policy_unmapped"}
+        else:
             result["response_policy"] = downgrade_response_policy(p)
     except Exception as e:
         result["response_policy"] = {"success": False, "error": str(e)}

@@ -16,8 +16,9 @@ import json
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -403,6 +404,13 @@ _PUBLIC_PATHS = frozenset({
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
+    from http_guards import allowlist_blocks, mtls_blocks
+    blocked = allowlist_blocks(request)
+    if blocked:
+        return JSONResponse(status_code=403, content={"detail": blocked})
+    mtls_err = mtls_blocks(request)
+    if mtls_err:
+        return JSONResponse(status_code=403, content={"detail": mtls_err})
     if path.startswith("/api/") and path not in _PUBLIC_PATHS:
         # 支持 Authorization header 和 query param (SSE EventSource 不支持自定义 header)
         token = None
@@ -416,13 +424,11 @@ async def auth_middleware(request: Request, call_next):
             return JSONResponse(status_code=401, content={"detail": "Missing authorization"})
 
         try:
-            import jwt as _jwt
-            payload = _jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+            from auth import decode_access_token
+            payload = await decode_access_token(token)
             request.state.user = payload
-        except _jwt.ExpiredSignatureError:
-            return JSONResponse(status_code=401, content={"detail": "Token expired"})
-        except _jwt.InvalidTokenError:
-            return JSONResponse(status_code=401, content={"detail": "Invalid token"})
+        except HTTPException as e:
+            return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
 
     response = await call_next(request)
     # 移除 Server 版本头 (starlette MutableHeaders 无 dict.pop, 用 del + 存在性检查)
@@ -437,29 +443,7 @@ _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 _RATE_LIMIT_CLEANUP_INTERVAL = 300
 _last_rate_limit_cleanup = 0.0
 
-# 限流白名单 — 这些路径高频访问或本身已有限流, 不计入全局限流
-#   /api/health         — K8s liveness/readiness probe + 前端轮询
-#   /api/llm/cost       — LLM 成本只读查询, O(1) 内存读取, 不应限流
-#   /api/feedback/*     — feedback 统计/建议, 只读
-#   /api/auth/*         — 登录/注册, auth.py 已有自己的 brute force 429
-#   /api/logs/ingest    — 真实日志源入站(2026-09-01 v4 复现:同机 ingest 被打 429)
-#   /api/logs/events    — 监控查询(Monitor 页 SSE/轮询,被打 429 会断流)
-#   /api/firewall/*     — 防火墙状态查询(只读,被限会让 SOC 失去态势感知)
-#   /api/response/*     — 响应引擎状态/动作查询(只读,被限会让响应链断)
-_RATE_LIMIT_WHITELIST = (
-    "/api/health",
-    "/api/llm/cost",
-    "/api/feedback",
-    "/api/auth",
-    "/api/logs/ingest",
-    "/api/logs/events",
-    "/api/firewall",
-    "/api/response",
-)
-
-
-def _is_rate_limit_whitelisted(path: str) -> bool:
-    return any(path == p or path.startswith(p + "/") for p in _RATE_LIMIT_WHITELIST)
+from http_guards import rate_limit_decision as _rate_limit_decision
 
 
 def _resolve_rate_limit_key(request: Request) -> str:
@@ -493,16 +477,29 @@ def _resolve_rate_limit_key(request: Request) -> str:
     return f"ip:{request.client.host if request.client else 'unknown'}"
 
 
+def _rate_limit_bucket(request: Request) -> Optional[tuple]:
+    """返回 (桶 key, 命名空间);豁免路径返回 None。
+
+    命名空间让"高危点名端点"(crit)与普通流量(std)互不占额度。
+    """
+    path = request.url.path
+    counted, namespace = _rate_limit_decision(path, request.method)
+    if not counted:
+        return None
+    return f"{namespace}:{_resolve_rate_limit_key(request)}", namespace
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     global _last_rate_limit_cleanup
+    bucket = _rate_limit_bucket(request)
     # 白名单路径直接 pass, 不计入限流
-    if _is_rate_limit_whitelisted(request.url.path):
+    if bucket is None:
         return await call_next(request)
     if settings.rate_limit_per_minute <= 0:
         return await call_next(request)
     # v4 修复:按 (api_key | xff | client_ip) 分桶,而非纯 client_ip
-    rate_key = _resolve_rate_limit_key(request)
+    rate_key, namespace = bucket
     now = time.time()
     window = 60.0
     if now - _last_rate_limit_cleanup > _RATE_LIMIT_CLEANUP_INTERVAL:
@@ -514,7 +511,14 @@ async def rate_limit_middleware(request: Request, call_next):
     cutoff = now - window
     _rate_limit_store[rate_key] = [t for t in timestamps if t > cutoff]
     if len(_rate_limit_store[rate_key]) >= settings.rate_limit_per_minute:
-        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": "Rate limit exceeded",
+                "limit_per_minute": settings.rate_limit_per_minute,
+                "scope": namespace,
+            },
+        )
     _rate_limit_store[rate_key].append(now)
     return await call_next(request)
 

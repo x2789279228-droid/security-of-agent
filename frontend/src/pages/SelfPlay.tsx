@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { PageFrame } from '../components/common/PageFrame'
 import { Button } from '../components/ui/Button'
 import { api } from '../lib/api'
+
+const MATCH_STORAGE_KEY = 'sm_selfplay_match'
 
 type MatchSnap = {
   match_id: string
@@ -83,10 +86,45 @@ function outcomeTone(o: string) {
   return 'bg-mist text-ink-soft'
 }
 
+function readStoredMatchId() {
+  try {
+    return sessionStorage.getItem(MATCH_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function writeStoredMatchId(id: string) {
+  try {
+    if (id) sessionStorage.setItem(MATCH_STORAGE_KEY, id)
+    else sessionStorage.removeItem(MATCH_STORAGE_KEY)
+  } catch {
+    /* private mode */
+  }
+}
+
+function pickResumeId(matches: MatchSnap[], preferred: string) {
+  if (preferred && matches.some((m) => m.match_id === preferred)) return preferred
+  const running = matches.find((m) => m.status === 'running' || m.status === 'stopping')
+  return running?.match_id || matches[0]?.match_id || ''
+}
+
+function normalizeMatch(d: MatchSnap): MatchSnap {
+  const rounds = Array.isArray(d.rounds) ? d.rounds : []
+  const last = d.last_round || rounds[rounds.length - 1] || null
+  return {
+    ...d,
+    rounds,
+    last_round: last,
+    level: d.level ?? d.curriculum_level ?? last?.curriculum_level ?? 0,
+  }
+}
+
 export default function SelfPlay() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [catalog, setCatalog] = useState<any>(null)
   const [matches, setMatches] = useState<MatchSnap[]>([])
-  const [activeId, setActiveId] = useState('')
+  const [activeId, setActiveId] = useState(() => searchParams.get('match') || readStoredMatchId())
   const [detail, setDetail] = useState<MatchSnap | null>(null)
   const [rules, setRules] = useState<any[]>([])
   const [hist, setHist] = useState<any>(null)
@@ -97,6 +135,18 @@ export default function SelfPlay() {
   const [background, setBackground] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const hydratedRef = useRef(false)
+
+  const selectMatch = useCallback((id: string) => {
+    setActiveId(id)
+    writeStoredMatchId(id)
+    const current = searchParams.get('match') || ''
+    if (current === id) return
+    const next = new URLSearchParams(searchParams)
+    if (id) next.set('match', id)
+    else next.delete('match')
+    setSearchParams(next, { replace: true })
+  }, [searchParams, setSearchParams])
 
   const loadList = useCallback(async () => {
     try {
@@ -111,7 +161,7 @@ export default function SelfPlay() {
     if (!id) return
     try {
       const d = await api.selfPlayMatch(id)
-      setDetail(d)
+      setDetail(normalizeMatch(d))
     } catch {
       /* ignore */
     }
@@ -136,6 +186,15 @@ export default function SelfPlay() {
     loadList()
     loadSide()
   }, [loadList, loadSide])
+
+  useEffect(() => {
+    if (hydratedRef.current) return
+    if (!matches.length) return
+    hydratedRef.current = true
+    const preferred = searchParams.get('match') || readStoredMatchId() || activeId
+    const pick = pickResumeId(matches, preferred)
+    if (pick) selectMatch(pick)
+  }, [matches, searchParams, activeId, selectMatch])
 
   const running = (detail?.status === 'running' || detail?.status === 'stopping')
     || matches.some((m) => m.match_id === activeId && (m.status === 'running' || m.status === 'stopping'))
@@ -164,7 +223,7 @@ export default function SelfPlay() {
         diverse_env: diverse,
         background_traffic: background,
       })
-      setActiveId(r.match_id)
+      selectMatch(r.match_id)
       await loadList()
       await loadDetail(r.match_id)
     } catch (e: any) {
@@ -209,7 +268,8 @@ export default function SelfPlay() {
   return (
     <PageFrame
       title="红蓝自博弈"
-      subtitle="Red Agent 生成对抗场景,Blue Agent 复用 Audit-LLM 流水线实时响应,漏报进入 overlay 课程学习。"
+      hint="Red Agent 生成对抗场景,Blue Agent 复用 Audit-LLM 流水线实时响应,漏报进入 overlay 课程学习。"
+      marginalia="——不自动改生产规则，是底线。"
       extra={
         <div className="flex flex-wrap items-center gap-3">
           <label className="text-[12px] text-ink-faint">
@@ -380,7 +440,7 @@ export default function SelfPlay() {
               <li key={m.match_id}>
                 <button
                   className={`w-full text-left p-3 text-[13px] ${activeId === m.match_id ? 'bg-ink text-white' : 'hover:bg-mist'}`}
-                  onClick={() => setActiveId(m.match_id)}
+                  onClick={() => selectMatch(m.match_id)}
                 >
                   <div className="font-mono text-[12px]">{m.match_id}</div>
                   <div className="mt-1 opacity-80">

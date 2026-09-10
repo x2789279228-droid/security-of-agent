@@ -37,8 +37,7 @@ export default function RegisterForm({
 
   return (
     <form onSubmit={onSubmit} className="w-full" noValidate>
-      <h2 className="text-[22px] font-black tracking-tight text-ink">注册</h2>
-      <p className="mt-1.5 text-[13px] text-ink-faint">创建账号后即可登录使用平台</p>
+      <h2 className="font-serif text-[28px] font-black tracking-tight text-ink">注册</h2>
 
       <div className="mt-8">
         <label htmlFor={userId} className="block text-[12px] text-ink-faint mb-1">
@@ -104,7 +103,7 @@ export default function RegisterForm({
       </div>
 
       {error && (
-        <p role="alert" className="mt-4 border border-ink bg-mist px-3 py-2 text-[13px] text-ink">
+        <p role="alert" className="mt-4 text-[13px] text-alert">
           {error}
         </p>
       )}
@@ -113,14 +112,14 @@ export default function RegisterForm({
         type="submit"
         variant="primary"
         disabled={loading}
-        className="mt-8 h-11 w-full tracking-[0.2em] disabled:opacity-40"
+        className="mt-10 h-11 w-full disabled:opacity-40"
       >
         {loading ? '注册中…' : '创建账号'}
       </Button>
 
-      <p className="mt-6 text-center text-[13px] text-ink-faint">
+      <p className="mt-6 text-[13px] text-ink-faint">
         已有账号？{' '}
-        <Link to="/login" className="text-ink border-b border-ink hover:opacity-70">
+        <Link to="/login" className="border-b border-accent/50 text-accent hover:opacity-80">
           去登录
         </Link>
       </p>

@@ -5,6 +5,7 @@ import { ROUTES } from './lib/constants'
 import { PageTransition } from './components/common/PageTransition'
 import { useAuthStore } from './stores/authStore'
 
+
 const Login = lazy(() => import('./pages/Login'))
 const Register = lazy(() => import('./pages/Register'))
 const Home = lazy(() => import('./pages/Home'))
@@ -25,8 +26,9 @@ const CapabilitiesDashboard = lazy(() => import('./pages/CapabilitiesDashboard')
 function PageLoader() {
   return (
     <PageTransition>
-      <div className="flex items-center justify-center h-[60vh] text-sm text-ink-faint tracking-[0.2em]">
-        加载中…
+      <div className="flex h-[60vh] flex-col items-center justify-center gap-3">
+        <p className="font-serif text-[28px] font-black text-ink">守望</p>
+        <p className="text-sm text-ink-faint">加载中</p>
       </div>
     </PageTransition>
   )

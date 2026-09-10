@@ -3,12 +3,20 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from config import settings
-from auth import create_access_token
+from auth import (
+    create_access_token,
+    get_current_user,
+    revoke_jti,
+    revoke_username,
+    RequireRole,
+    UserInfo,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+)
 from models import async_session
 
 logger = logging.getLogger(__name__)
@@ -162,6 +170,33 @@ async def register(req: RegisterRequest, request: Request):
     except Exception as e:
         logger.error(f"[Auth] Register failed: {e}")
         raise HTTPException(status_code=500, detail="注册失败，请稍后重试")
+
+
+class RevokeRequest(BaseModel):
+    jti: str = ""
+    username: str = ""
+
+
+@router.post("/auth/logout")
+async def logout(user: UserInfo = Depends(get_current_user)):
+    """吊销当前 JWT 的 jti，立即失效。"""
+    await revoke_jti(user.jti, ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    return {"status": "revoked", "jti": user.jti}
+
+
+@router.post("/auth/revoke")
+async def revoke_tokens(
+    req: RevokeRequest,
+    user: UserInfo = Depends(RequireRole("admin")),
+):
+    """管理员吊销指定 jti 或该用户名下已记录的全部 token。"""
+    if req.jti:
+        await revoke_jti(req.jti, ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+        return {"status": "revoked", "jti": req.jti, "count": 1}
+    if req.username:
+        n = await revoke_username(req.username)
+        return {"status": "revoked", "username": req.username, "count": n}
+    raise HTTPException(status_code=400, detail="jti or username required")
 
 
 _is_prod = os.environ.get("SHARED_MEMORY_ENV_NAME", settings.env_name) == "prod"

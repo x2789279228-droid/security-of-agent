@@ -15,10 +15,29 @@
         platform="linux",
     )
 """
+import ipaddress
 import logging
 from typing import Callable, Coroutine, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _family_of(ip: str) -> str:
+    """IP → 'ipv4' | 'ipv6' | ''(非 IP)。"""
+    try:
+        addr = ipaddress.ip_address(str(ip or "").strip())
+    except ValueError:
+        return ""
+    return "ipv6" if addr.version == 6 else "ipv4"
+
+
+def _tables_for(params: dict, ip: str) -> list[str]:
+    """本次验证需查询的表: 双栈隔离(families_applied 含 ipv4+ipv6)查双表, 否则按 IP 族单表。"""
+    fams = params.get("families_applied") or params.get("families") or []
+    fams = {str(f) for f in fams} if isinstance(fams, (list, tuple)) else set()
+    if {"ipv4", "ipv6"} <= fams:
+        return ["iptables", "ip6tables"]
+    return ["ip6tables"] if _family_of(ip) == "ipv6" else ["iptables"]
 
 
 class PostValidator:
@@ -79,20 +98,19 @@ class PostValidator:
 async def _verify_block_ip(
     params: dict, exec_fn: Callable, platform: str
 ) -> dict:
-    """验证 IP 封禁规则是否存在"""
+    """验证 IP 封禁规则是否存在(按 IP 地址族查 iptables/ip6tables INPUT)。"""
     src_ip = params.get("src_ip", "")
     rule_id = params.get("rule_id", "")
     rule_name = params.get("rule_name", "")
 
     if platform == "linux":
-        out = await exec_fn("iptables -L INPUT -n --line-numbers")
-        stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)
-        # 检查 IP 和 rule_id 是否出现在规则列表中
-        if src_ip and src_ip in stdout:
-            if rule_id and rule_id in stdout:
-                return {"verified": True, "evidence": f"iptables 规则存在: {src_ip} ({rule_id})"}
-            return {"verified": True, "evidence": f"iptables 中存在 {src_ip} 的 DROP 规则"}
-        return {"verified": False, "evidence": f"iptables INPUT 链中未找到 {src_ip}"}
+        check_token = rule_id or src_ip
+        for table in _tables_for(params, src_ip):
+            out = await exec_fn(f"{table} -L INPUT -n --line-numbers")
+            stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)
+            if check_token and check_token in stdout:
+                return {"verified": True, "evidence": f"{table} 规则存在: {src_ip} ({check_token})"}
+        return {"verified": False, "evidence": f"{_tables_for(params, src_ip)} INPUT 链中未找到 {src_ip}"}
 
     else:  # windows
         if not rule_name:
@@ -107,17 +125,18 @@ async def _verify_block_ip(
 async def _verify_unblock_ip(
     params: dict, exec_fn: Callable, platform: str
 ) -> dict:
-    """验证 IP 封禁规则已删除"""
+    """验证 IP 封禁规则已删除(按地址族查对应表)。"""
     src_ip = params.get("src_ip", "")
     rule_id = params.get("rule_id", "")
     rule_name = params.get("rule_name", "")
 
     if platform == "linux":
-        out = await exec_fn("iptables -L INPUT -n --line-numbers")
-        stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)
         check_token = rule_id or src_ip
-        if check_token and check_token in stdout:
-            return {"verified": False, "evidence": f"规则仍存在: {check_token}"}
+        for table in _tables_for(params, src_ip):
+            out = await exec_fn(f"{table} -L INPUT -n --line-numbers")
+            stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)
+            if check_token and check_token in stdout:
+                return {"verified": False, "evidence": f"规则仍存在: {check_token} ({table})"}
         return {"verified": True, "evidence": f"规则已删除: {check_token}"}
 
     else:
@@ -133,31 +152,22 @@ async def _verify_unblock_ip(
 async def _verify_isolate_host(
     params: dict, exec_fn: Callable, platform: str
 ) -> dict:
-    """验证主机隔离（INPUT + OUTPUT 两条规则）"""
+    """验证主机隔离(双栈: INPUT + OUTPUT × iptables/ip6tables 都须含 token)。"""
     host_ip = params.get("host_ip", params.get("host", ""))
     isolation_id = params.get("isolation_id", "")
 
     if platform == "linux":
-        input_ok = False
-        output_ok = False
-        for chain in ["INPUT", "OUTPUT"]:
-            out = await exec_fn(f"iptables -L {chain} -n --line-numbers")
-            stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)
-            check_token = isolation_id or host_ip
-            if check_token and check_token in stdout:
-                if chain == "INPUT":
-                    input_ok = True
-                else:
-                    output_ok = True
-
-        if input_ok and output_ok:
-            return {"verified": True, "evidence": f"INPUT+OUTPUT 隔离规则均存在: {host_ip}"}
         missing = []
-        if not input_ok:
-            missing.append("INPUT")
-        if not output_ok:
-            missing.append("OUTPUT")
-        return {"verified": False, "evidence": f"缺少 {'+'.join(missing)} 隔离规则: {host_ip}"}
+        for table in _tables_for(params, host_ip):
+            for chain in ["INPUT", "OUTPUT"]:
+                out = await exec_fn(f"{table} -L {chain} -n --line-numbers")
+                stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)
+                check_token = isolation_id or host_ip
+                if not (check_token and check_token in stdout):
+                    missing.append(f"{table}:{chain}")
+        if not missing:
+            return {"verified": True, "evidence": f"INPUT+OUTPUT 隔离规则均存在: {host_ip}"}
+        return {"verified": False, "evidence": f"缺少隔离规则 {' '.join(missing)}: {host_ip}"}
 
     else:
         rule_in = f"RE_Isolate_In_{host_ip.replace('.', '_')}"
@@ -176,15 +186,16 @@ async def _verify_isolate_host(
 async def _verify_restore_host(
     params: dict, exec_fn: Callable, platform: str
 ) -> dict:
-    """验证主机隔离已解除"""
+    """验证主机隔离已解除(双栈全表全链都不含该 IP)。"""
     host_ip = params.get("host_ip", params.get("host", ""))
 
     if platform == "linux":
-        for chain in ["INPUT", "OUTPUT"]:
-            out = await exec_fn(f"iptables -L {chain} -n --line-numbers")
-            stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)
-            if host_ip and host_ip in stdout:
-                return {"verified": False, "evidence": f"{chain} 链中仍存在 {host_ip} 的规则"}
+        for table in _tables_for(params, host_ip):
+            for chain in ["INPUT", "OUTPUT"]:
+                out = await exec_fn(f"{table} -L {chain} -n --line-numbers")
+                stdout = out.get("stdout", "") if isinstance(out, dict) else str(out)
+                if host_ip and host_ip in stdout:
+                    return {"verified": False, "evidence": f"{table}:{chain} 链中仍存在 {host_ip} 的规则"}
         return {"verified": True, "evidence": f"隔离规则已全部删除: {host_ip}"}
 
     else:

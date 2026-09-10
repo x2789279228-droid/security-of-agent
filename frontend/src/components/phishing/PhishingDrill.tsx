@@ -190,9 +190,9 @@ export default function PhishingDrill() {
             {selectedDrill.stats && (
               <div className="grid grid-cols-4 gap-3 text-center mb-3">
                 {[
-                  { value: `${selectedDrill.stats.open_rate}%`, label: '打开率', color: 'text-[#0071e3]' },
-                  { value: `${selectedDrill.stats.click_rate}%`, label: '点击率', color: 'text-[#ff9f0a]' },
-                  { value: `${selectedDrill.stats.report_rate}%`, label: '上报率', color: 'text-[#34c759]' },
+                  { value: `${selectedDrill.stats.open_rate}%`, label: '打开率', color: 'text-accent' },
+                  { value: `${selectedDrill.stats.click_rate}%`, label: '点击率', color: 'text-warn' },
+                  { value: `${selectedDrill.stats.report_rate}%`, label: '上报率', color: 'text-ok' },
                   { value: selectedDrill.stats.total, label: '目标数', color: 'text-ink' },
                 ].map((s) => (
                   <div key={s.label}>
@@ -206,9 +206,9 @@ export default function PhishingDrill() {
             {selectedDrill.stats && selectedDrill.stats.sent > 0 && (
               <div className="space-y-1.5">
                 {[
-                  { label: '已打开', count: selectedDrill.stats.opened, color: 'bg-[#0071e3]' },
-                  { label: '已点击', count: selectedDrill.stats.clicked, color: 'bg-[#ff9f0a]' },
-                  { label: '已上报', count: selectedDrill.stats.reported, color: 'bg-[#34c759]' },
+                  { label: '已打开', count: selectedDrill.stats.opened, color: 'bg-accent' },
+                  { label: '已点击', count: selectedDrill.stats.clicked, color: 'bg-warn' },
+                  { label: '已上报', count: selectedDrill.stats.reported, color: 'bg-ok' },
                 ].map((bar) => (
                   <div key={bar.label} className="flex items-center gap-2 text-[11px]">
                     <span className="w-10 text-ink-faint shrink-0">{bar.label}</span>

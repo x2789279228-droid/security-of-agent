@@ -137,9 +137,14 @@ async def observability_spans(
 
 @router.get("/observability/active-pipelines")
 async def observability_active_pipelines(
-    user: UserInfo = Depends(RequireRole("admin")),
+    user: UserInfo = Depends(RequireRole("operator", "analyst")),
 ):
-    """按 event_id 聚合正在运行的 Agent 接力（Monitor 首屏 hydration）"""
+    """按 event_id 聚合正在运行的 Agent 接力（Monitor 首屏 hydration）
+
+    鉴权:operator / analyst（2026-09-10 由 admin 放宽）。
+    Monitor 是运营中心首屏,轮询该端点做接力 hydration;admin-only 会让运营账号
+    每次轮询都吃 403，页面永远空态，属于运营路径被挡。viewer 仍不可见。
+    """
     from observability.pipeline_tracer import pipeline_tracer, STAGES
     from observability.stage_events import DEFAULT_SSE_STAGES, STAGE_LABELS
 
@@ -782,6 +787,178 @@ async def feedback_suggestions(user: UserInfo = Depends(RequireRole("admin"))):
     from feedback_loop import feedback_loop
     async with async_session() as session:
         return await feedback_loop.generate_tuning_suggestions(session)
+
+# ── 学习闭环 (learn_loop) ──
+
+def _payload_is_llm(payload) -> bool:
+    """payload 是否携带 LLM 来源结论（禁止直接写回规则）。"""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("llm_sourced"):
+        return True
+    from learn_loop.types import LLM_PREFIX
+    for key in ("original_conclusion", "conclusion", "source_conclusion"):
+        v = payload.get(key)
+        if isinstance(v, str) and v.startswith(LLM_PREFIX):
+            return True
+    return False
+
+
+def _learning_run_to_dict(r) -> dict:
+    return {
+        "id": r.id,
+        "window_start": r.window_start.isoformat() if r.window_start else "",
+        "window_end": r.window_end.isoformat() if r.window_end else "",
+        "trigger": r.trigger,
+        "status": r.status,
+        "actions_proposed": r.actions_proposed,
+        "actions_auto_applied": r.actions_auto_applied,
+        "actions_failed": r.actions_failed,
+        "error": r.error or "",
+        "created_at": r.created_at.isoformat() if r.created_at else "",
+        "harvest": r.harvest or {},
+        "model_summary": r.model_summary or {},
+    }
+
+
+async def _run_with_payload(session: AsyncSession, run_id: int) -> dict:
+    """run 详情 + actions（get_run_with_actions 基础上合并 payload 供 UI 展示）"""
+    from learn_loop.store import get_run_with_actions
+    from models import LearningAction
+
+    run = await get_run_with_actions(session, run_id)
+    if not run:
+        return {}
+    actions = run.get("actions") or []
+    ids = [a.get("id") for a in actions if isinstance(a, dict) and a.get("id")]
+    if ids:
+        rows = (await session.execute(
+            select(LearningAction.id, LearningAction.payload)
+            .where(LearningAction.id.in_(ids))
+        )).all()
+        payload_map = {rid: (p or {}) for rid, p in rows}
+        for a in actions:
+            a["payload"] = payload_map.get(a.get("id"), {})
+    return run
+
+
+@router.get("/learn-loop/runs")
+async def learn_loop_runs(
+    limit: int = Query(30, ge=1, le=200),
+    user: UserInfo = Depends(RequireRole("operator", "analyst")),
+):
+    """学习闭环运行列表"""
+    from models import LearningRun
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(LearningRun).order_by(desc(LearningRun.id)).limit(limit)
+        )).scalars().all()
+        return {"runs": [_learning_run_to_dict(r) for r in rows], "count": len(rows)}
+
+
+@router.get("/learn-loop/runs/latest")
+async def learn_loop_latest_run(user: UserInfo = Depends(RequireRole("operator", "analyst"))):
+    """最近一次学习闭环运行（含 actions + payload）"""
+    from models import LearningRun
+    async with async_session() as session:
+        run_id = (await session.execute(
+            select(LearningRun.id).order_by(desc(LearningRun.id)).limit(1)
+        )).scalar_one_or_none()
+        if run_id is None:
+            return None
+        return await _run_with_payload(session, run_id)
+
+
+@router.get("/learn-loop/runs/{run_id}")
+async def learn_loop_run_detail(
+    run_id: int, user: UserInfo = Depends(RequireRole("operator", "analyst")),
+):
+    """单次学习闭环运行详情（含 actions + payload）"""
+    async with async_session() as session:
+        run = await _run_with_payload(session, run_id)
+        if not run:
+            raise HTTPException(404, "运行记录不存在")
+        return run
+
+
+@router.post("/learn-loop/run")
+async def learn_loop_run_now(
+    body: dict = None, user: UserInfo = Depends(RequireRole("admin")),
+):
+    """手动触发一轮学习闭环（trigger=manual, fail-open 返回运行摘要）"""
+    from learn_loop import run_cycle
+    b = body or {}
+    lookback = b.get("lookback_hours")
+    async with async_session() as session:
+        if isinstance(lookback, (int, float)) and lookback > 0:
+            now = datetime.now(timezone.utc)
+            return await run_cycle(
+                session, trigger="manual",
+                window_start=now - timedelta(hours=float(lookback)),
+                window_end=now,
+            )
+        return await run_cycle(session, trigger="manual")
+
+
+@router.post("/learn-loop/actions/{action_id}/apply")
+async def learn_loop_apply_action(
+    action_id: int, user: UserInfo = Depends(RequireRole("admin")),
+):
+    """人工应用学习闭环动作（LLM 来源的 apply_sigma_change 拒绝 400）"""
+    from models import LearningAction
+    from learn_loop.apply import apply_action
+
+    actor = (user.username or "") or "admin"
+    async with async_session() as session:
+        action = await session.get(LearningAction, action_id)
+        if not action:
+            raise HTTPException(404, "动作不存在")
+        if action.action_type == "apply_sigma_change" and _payload_is_llm(action.payload):
+            raise HTTPException(400, "LLM 结论不能直接写回 Sigma 规则，请人工确认后修改")
+        result = await apply_action(session, action, actor=actor, auto=False)
+        action.apply_result = result or {}
+        if result and result.get("success"):
+            action.status = "applied"
+            action.applied_at = datetime.now(timezone.utc)
+            action.applied_by = actor
+        await session.commit()
+    return result
+
+
+@router.post("/learn-loop/actions/{action_id}/dismiss")
+async def learn_loop_dismiss_action(
+    action_id: int, user: UserInfo = Depends(RequireRole("admin")),
+):
+    """驳回学习闭环动作"""
+    from models import LearningAction
+    async with async_session() as session:
+        action = await session.get(LearningAction, action_id)
+        if not action:
+            raise HTTPException(404, "动作不存在")
+        action.status = "dismissed"
+        await session.commit()
+        return {"success": True, "id": action.id, "status": action.status}
+
+
+@router.post("/learn-loop/actions/{action_id}/rollback")
+async def learn_loop_rollback_action(
+    action_id: int, user: UserInfo = Depends(RequireRole("admin")),
+):
+    """回滚已应用动作（基线衰减不可逆 / 复盘草稿不删除，返回 notes 说明）"""
+    from models import LearningAction
+    from learn_loop.apply import rollback_action
+
+    async with async_session() as session:
+        action = await session.get(LearningAction, action_id)
+        if not action:
+            raise HTTPException(404, "动作不存在")
+        result = await rollback_action(session, action)
+        action.apply_result = {**(action.apply_result or {}), "rollback": result}
+        if result and result.get("success"):
+            action.status = "rolled_back"
+        await session.commit()
+    return result
+
 
 @router.get("/rules")
 async def list_rules(

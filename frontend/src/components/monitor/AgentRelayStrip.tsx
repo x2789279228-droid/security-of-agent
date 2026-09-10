@@ -14,6 +14,13 @@ import {
 import { useEventStreamStore } from '../../lib/eventStream'
 import RateHistogram from './RateHistogram'
 
+// 节点三态：进行中=松绿柔光；有错误=朱砂；空闲=暗淡卡片（0.1s 可辨）
+const NODE_TONE = {
+  running: 'border-ok/70 bg-ok/[0.07] shadow-[0_0_14px_rgba(62,122,100,0.14)]',
+  error: 'border-alert/70 bg-alert/[0.08] shadow-[0_0_14px_rgba(194,58,50,0.14)]',
+  idle: 'border-line bg-mist/40 opacity-75',
+} as const
+
 function Node({
   label,
   running,
@@ -29,16 +36,16 @@ function Node({
   flashKey?: number
   active?: boolean
 }) {
+  const tone: keyof typeof NODE_TONE =
+    running > 0 || active ? 'running' : errors > 0 ? 'error' : 'idle'
   return (
     <div
-      className={`relative z-10 flex min-w-[78px] flex-col items-center gap-0.5 border px-2.5 py-2 ${
-        active ? 'border-ink bg-mist' : 'border-line bg-white'
-      }`}
+      className={`relative z-10 flex min-w-[78px] flex-col items-center gap-0.5 rounded-lg border px-2.5 py-2 transition-colors ${NODE_TONE[tone]}`}
     >
-      <span className="whitespace-nowrap text-[10px] tracking-wide text-ink-faint">{label}</span>
-      <span className="font-mono text-[15px] font-semibold text-ink tabular-nums">
+      <span className={`whitespace-nowrap text-[10px] tracking-wide ${tone === 'idle' ? 'text-ink-faint' : 'text-ink-soft'}`}>{label}</span>
+      <span className={`font-mono text-[15px] font-semibold tabular-nums ${tone === 'error' ? 'text-alert' : running > 0 || tone === 'running' ? 'text-accent' : 'text-ink-soft'}`}>
         {running > 0 ? (
-          <span className="text-ink">{running}</span>
+          <span>{running}</span>
         ) : (
           completed
         )}
@@ -52,7 +59,7 @@ function Node({
           initial={{ opacity: 0.35 }}
           animate={{ opacity: 0 }}
           transition={{ duration: 0.7 }}
-          className="pointer-events-none absolute inset-0 bg-qing"
+          className="pointer-events-none absolute inset-0 rounded-lg bg-accent/25"
         />
       )}
     </div>
@@ -66,6 +73,7 @@ export default function AgentRelayStrip() {
   const { nodeStats, active } = useMemo(() => deriveRelays(buffer), [buffer])
 
   const [packet, setPacket] = useState<number | null>(null)
+  const [packetError, setPacketError] = useState(false)
   const [pulseStage, setPulseStage] = useState<string>('')
   const [flashMap, setFlashMap] = useState<Record<string, number>>({})
   const lastRunRef = useRef(0)
@@ -79,6 +87,7 @@ export default function AgentRelayStrip() {
 
     const top = buffer.find((e) => e.kind === 'event' && e.type === 'agent_stage')
     const stage = top ? String(top.data?.stage || '') : ''
+    setPacketError(top ? String(top.data?.status || '') === 'error' : false)
     if (stage && (AGENT_RELAY_STAGES as readonly string[]).includes(stage)) {
       setPulseStage(stage)
       setFlashMap((m) => ({ ...m, [stage]: (m[stage] ?? 0) + 1 }))
@@ -111,7 +120,11 @@ export default function AgentRelayStrip() {
         {packet !== null && (
           <motion.span
             key={packet}
-            className="absolute z-20 h-2 w-2 rounded-full bg-ink"
+            className={`absolute z-20 h-2 w-2 rounded-full ${
+              packetError
+                ? 'bg-alert shadow-[0_0_8px_rgba(194,58,50,0.35)]'
+                : 'bg-ok shadow-[0_0_8px_rgba(62,122,100,0.35)]'
+            }`}
             style={{ marginLeft: -4, top: 'calc(50% + 8px)' }}
             initial={{ left: '5%', opacity: 0 }}
             animate={{ left: '95%', opacity: [0, 1, 1, 0.85] }}
